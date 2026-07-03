@@ -39,7 +39,10 @@ import {
     SqlChartAsCode,
     UpdatedByUser,
     type ContentVerificationInfo,
+    type DashboardConfig,
     type DashboardTileWithSlug,
+    type DateZoomConfig,
+    type DateZoomTileTarget,
     type FilterGroup,
     type FilterGroupInput,
     type FilterGroupItem,
@@ -379,6 +382,73 @@ export class CoderService extends BaseService {
         };
     }
 
+    /* Convert date zoom control tileTargets from tile uuids to tile slugs
+     * DashboardDAO to DashboardAsCode
+     */
+    static getConfigWithDateZoomTileSlugs(
+        dashboard: DashboardDAO,
+    ): DashboardConfig | undefined {
+        const { config } = dashboard;
+        if (!config?.dateZoomConfig) return config;
+
+        const tileTargets = Object.entries(
+            config.dateZoomConfig.tileTargets ?? {},
+        ).reduce<Record<string, DateZoomTileTarget>>(
+            (acc, [tileUuid, target]) => {
+                const tileSlug = CoderService.getChartSlugForTileUuid(
+                    dashboard,
+                    tileUuid,
+                );
+                if (!tileSlug) return acc;
+                return { ...acc, [tileSlug]: target };
+            },
+            {},
+        );
+
+        return {
+            ...config,
+            dateZoomConfig: { ...config.dateZoomConfig, tileTargets },
+        };
+    }
+
+    /* Convert date zoom control tileTargets from tile slugs to tile uuids
+     * DashboardAsCode to DashboardDAO
+     */
+    static getConfigWithDateZoomTileUuids(
+        config: DashboardConfig,
+        tilesWithUuids: DashboardTileWithSlug[],
+    ): DashboardConfig {
+        const { dateZoomConfig } = config;
+        if (!dateZoomConfig) return config;
+
+        const tileTargets = Object.entries(
+            dateZoomConfig.tileTargets ?? {},
+        ).reduce<Record<string, DateZoomTileTarget>>(
+            (acc, [tileSlug, target]) => {
+                const tileUuid = tilesWithUuids.find(
+                    (t) =>
+                        isAnyChartTile(t) &&
+                        // Match first by tileSlug, then by chartSlug (for the case of tile not having a slug)
+                        (t.tileSlug === tileSlug ||
+                            t.properties.chartSlug === tileSlug),
+                )?.uuid;
+                if (!tileUuid) {
+                    console.error(
+                        `Tile with slug ${tileSlug} not found for date zoom target`,
+                    );
+                    return acc;
+                }
+                return { ...acc, [tileUuid]: target };
+            },
+            {},
+        );
+
+        return {
+            ...config,
+            dateZoomConfig: { ...dateZoomConfig, tileTargets },
+        };
+    }
+
     private static transformDashboard(
         dashboard: DashboardDAO,
         spaceSummary: Pick<SpaceSummaryBase, 'uuid' | 'name' | 'path'>[],
@@ -468,7 +538,13 @@ export class CoderService extends BaseService {
             filters: CoderService.getFiltersWithTileSlugs(dashboard),
             tabs: dashboard.tabs,
             slug: dashboard.slug,
-            ...(dashboard.config ? { config: dashboard.config } : {}),
+            ...(dashboard.config
+                ? {
+                      config: CoderService.getConfigWithDateZoomTileSlugs(
+                          dashboard,
+                      ),
+                  }
+                : {}),
             ...(dashboard.parameters
                 ? { parameters: dashboard.parameters }
                 : {}),
@@ -1494,6 +1570,28 @@ export class CoderService extends BaseService {
         });
         const existingSqlChart = sqlChartRows[0];
 
+        // Saving a SQL chart via content-as-code requires the same permissions
+        // as the UI path (SavedSqlService): manage:CustomSql plus space-level
+        // create/update on SavedChart. ContentAsCode alone is not sufficient.
+        // manage:CustomSql is project-level, so check it before resolving the
+        // space so a forbidden save can't orphan a newly created space.
+        const isUpdate = existingSqlChart !== undefined;
+        if (
+            auditedAbility.cannot(
+                'manage',
+                subject('CustomSql', {
+                    organizationUuid: project.organizationUuid,
+                    projectUuid: project.projectUuid,
+                    metadata:
+                        existingSqlChart !== undefined
+                            ? { savedSqlUuid: existingSqlChart.saved_sql_uuid }
+                            : {},
+                }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+
         const { space, created: spaceCreated } = await this.getOrCreateSpace(
             projectUuid,
             sqlChartAsCode.spaceSlug,
@@ -1502,6 +1600,37 @@ export class CoderService extends BaseService {
             publicSpaceCreate,
             spaceNames,
         );
+
+        // Space-level create/update on SavedChart. On a move (update with a
+        // different target space) require access to both the current and the
+        // target space, mirroring SavedSqlService.hasAccess.
+        const savedChartAction = isUpdate ? 'update' : 'create';
+        const spaceUuidsToCheck =
+            existingSqlChart !== undefined &&
+            existingSqlChart.space_uuid !== space.uuid
+                ? [space.uuid, existingSqlChart.space_uuid]
+                : [space.uuid];
+        const spaceAccessContexts =
+            await this.spacePermissionService.getSpacesAccessContext(
+                user.userUuid,
+                spaceUuidsToCheck,
+            );
+        const lacksSavedChartAccess = spaceUuidsToCheck.some((spaceUuid) =>
+            auditedAbility.cannot(
+                savedChartAction,
+                subject('SavedChart', {
+                    ...spaceAccessContexts[spaceUuid],
+                    metadata: {
+                        savedSqlUuid: existingSqlChart?.saved_sql_uuid ?? null,
+                    },
+                }),
+            ),
+        );
+        if (lacksSavedChartAccess) {
+            throw new ForbiddenError(
+                `You don't have access to ${savedChartAction} this Saved SQL chart`,
+            );
+        }
 
         if (existingSqlChart === undefined) {
             // Create new SQL chart
@@ -1809,6 +1938,12 @@ export class CoderService extends BaseService {
             dashboardWithDefaults,
             tilesWithUuids,
         );
+        const dashboardConfig = dashboardWithDefaults.config
+            ? CoderService.getConfigWithDateZoomTileUuids(
+                  dashboardWithDefaults.config,
+                  tilesWithUuids,
+              )
+            : dashboardWithDefaults.config;
         // If chart does not exist, we can't use promoteService,
         // since it relies on information that's not available in ChartAsCode, and other uuids
         if (dashboardSummary === undefined) {
@@ -1829,6 +1964,7 @@ export class CoderService extends BaseService {
                     tiles: tilesWithUuids,
                     forceSlug: shouldUseExactSlug,
                     filters: dashboardFilters,
+                    config: dashboardConfig,
                 },
                 user,
                 projectUuid,
@@ -1875,6 +2011,7 @@ export class CoderService extends BaseService {
         const dashboardWithUuids = {
             ...dashboardWithDefaults,
             tiles: tilesWithUuids,
+            config: dashboardConfig,
         };
         const { promotedDashboard, upstreamDashboard } =
             await this.promoteService.getPromotedDashboard(

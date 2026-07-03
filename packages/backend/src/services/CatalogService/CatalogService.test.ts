@@ -32,6 +32,8 @@ const buildUser = (canManageMetricsTree: boolean): SessionUser => ({
     organizationCreatedAt: new Date(),
     isTrackingAnonymized: false,
     isMarketingOptedIn: false,
+    avatarUrl: null,
+    avatarGradient: null,
     timezone: null,
     isSetupComplete: true,
     userId: 0,
@@ -55,23 +57,23 @@ const buildUser = (canManageMetricsTree: boolean): SessionUser => ({
 
 const buildService = (overrides?: { catalogModel?: Partial<CatalogModel> }) => {
     const projectModel = {
-        getSummary: jest.fn(async () => ({
+        getSummary: vi.fn(async () => ({
             organizationUuid: ORG_UUID,
             name: 'Test Project',
         })),
     } as unknown as ProjectModel;
 
     const catalogModel = {
-        acquireTreeLock: jest.fn(async () => ({
+        acquireTreeLock: vi.fn(async () => ({
             metricsTreeUuid: TREE_UUID,
             lockedByUserUuid: 'user-uuid',
             expiresAt: new Date(Date.now() + 60_000),
         })),
-        refreshTreeLockHeartbeat: jest.fn(async () => true),
-        releaseTreeLock: jest.fn(async () => undefined),
-        getTreeLock: jest.fn(async () => null),
-        updateMetricsTree: jest.fn(async () => ({})),
-        deleteMetricsTree: jest.fn(async () => undefined),
+        refreshTreeLockHeartbeat: vi.fn(async () => true),
+        releaseTreeLock: vi.fn(async () => undefined),
+        getTreeLock: vi.fn(async () => null),
+        updateMetricsTree: vi.fn(async () => ({})),
+        deleteMetricsTree: vi.fn(async () => undefined),
         ...overrides?.catalogModel,
     } as unknown as CatalogModel;
 
@@ -93,7 +95,7 @@ const buildService = (overrides?: { catalogModel?: Partial<CatalogModel> }) => {
 
 describe('CatalogService tree-lock ability checks', () => {
     afterEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
     });
 
     describe('acquireTreeLock', () => {
@@ -203,7 +205,7 @@ describe('CatalogService tree-lock ability checks', () => {
         it('throws when user does not hold the lock', async () => {
             const { service } = buildService({
                 catalogModel: {
-                    getTreeLock: jest.fn(async () => ({
+                    getTreeLock: vi.fn(async () => ({
                         metricsTreeUuid: TREE_UUID,
                         lockedByUserUuid: 'someone-else',
                         lockedByUserName: 'Someone Else',
@@ -258,7 +260,7 @@ describe('CatalogService tree-lock ability checks', () => {
         it('throws when a foreign lock is held', async () => {
             const { service, catalogModel } = buildService({
                 catalogModel: {
-                    getTreeLock: jest.fn(async () => ({
+                    getTreeLock: vi.fn(async () => ({
                         metricsTreeUuid: TREE_UUID,
                         lockedByUserUuid: 'someone-else',
                         lockedByUserName: 'Someone Else',

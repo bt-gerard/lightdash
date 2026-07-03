@@ -20,7 +20,7 @@ describe('ScimService', () => {
     const service = new ScimService(ScimServiceArgumentsMock);
 
     beforeEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
     });
 
     describe('convertLightdashUserToScimUser', () => {
@@ -44,6 +44,8 @@ describe('ScimService', () => {
                 userId: 0,
                 isTrackingAnonymized: false,
                 isMarketingOptedIn: false,
+                avatarUrl: null,
+                avatarGradient: null,
                 timezone: null,
                 isSetupComplete: false,
             };
@@ -119,6 +121,8 @@ describe('ScimService', () => {
                 userId: 0,
                 isTrackingAnonymized: false,
                 isMarketingOptedIn: false,
+                avatarUrl: null,
+                avatarGradient: null,
                 timezone: null,
                 isSetupComplete: false,
             };
@@ -280,9 +284,9 @@ describe('ScimService', () => {
                 organizationMemberProfileModel,
                 openIdIdentityModel,
             } = ScimServiceArgumentsMock;
-            (userModel.findUserByEmail as jest.Mock).mockResolvedValueOnce(
-                orphanUser,
-            );
+            (
+                userModel.findUserByEmail as import('vitest').Mock
+            ).mockResolvedValueOnce(orphanUser);
 
             const scimUser = {
                 schemas: [ScimSchemaType.USER],
@@ -320,9 +324,9 @@ describe('ScimService', () => {
                 organizationUuid: 'some-org-uuid',
             } as unknown as LightdashUser;
             const { userModel, openIdIdentityModel } = ScimServiceArgumentsMock;
-            (userModel.findUserByEmail as jest.Mock).mockResolvedValueOnce(
-                userWithOrg,
-            );
+            (
+                userModel.findUserByEmail as import('vitest').Mock
+            ).mockResolvedValueOnce(userWithOrg);
 
             const scimUser = {
                 schemas: [ScimSchemaType.USER],
@@ -389,7 +393,7 @@ describe('ScimService', () => {
                 ScimServiceArgumentsMock;
 
             // Force current org role to ADMIN so downgrade path is executed
-            jest.spyOn(
+            vi.spyOn(
                 organizationMemberProfileModel,
                 'getOrganizationMemberByUuid',
             ).mockResolvedValueOnce({
@@ -502,7 +506,7 @@ describe('ScimService', () => {
             };
 
             // Reset mocks to ensure clean state
-            jest.clearAllMocks();
+            vi.clearAllMocks();
 
             // Call updateUser with the valid role
             await service.updateUser({
@@ -566,7 +570,7 @@ describe('ScimService', () => {
             };
 
             // Reset mocks to ensure clean state
-            jest.clearAllMocks();
+            vi.clearAllMocks();
 
             // Call updateUser with roles
             await service.updateUser({
@@ -621,7 +625,7 @@ describe('ScimService', () => {
             };
 
             // Reset mocks to ensure clean state
-            jest.clearAllMocks();
+            vi.clearAllMocks();
 
             // Call updateUser with organization role
             await service.updateUser({
@@ -645,7 +649,7 @@ describe('ScimService', () => {
     describe('patchUser', () => {
         test('should update user role when a valid role is provided in patch operation with path', async () => {
             // Mock the updateUser method to return a SCIM user
-            const updateUserMethod = jest.spyOn(service, 'updateUser');
+            const updateUserMethod = vi.spyOn(service, 'updateUser');
 
             // Create a patch operation to update the role with path
             const patchOp: ScimPatch = {
@@ -713,8 +717,8 @@ describe('ScimService', () => {
             new ScimService({
                 ...ScimServiceArgumentsMock,
                 groupsModel: {
-                    getGroupWithMembers: jest.fn().mockResolvedValue(mockGroup),
-                    updateGroup: jest.fn().mockRejectedValue(error),
+                    getGroupWithMembers: vi.fn().mockResolvedValue(mockGroup),
+                    updateGroup: vi.fn().mockRejectedValue(error),
                 } as never,
             });
 

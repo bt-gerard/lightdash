@@ -1,6 +1,6 @@
 {
     "name": "e2e",
-    "version": "0.3230.1",
+    "version": "0.3308.0",
     "private": true,
     "license": "MIT",
     "main": "index.js",
@@ -25,6 +25,7 @@
         "js-yaml": "4.2.0"
     },
     "devDependencies": {
-        "typescript": "6.0.3"
+        "typescript": "npm:@typescript/typescript6@6.0.1",
+        "typescript-7": "npm:typescript@7.0.1-rc"
     }
 }

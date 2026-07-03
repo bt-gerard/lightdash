@@ -561,6 +561,87 @@ describe('convert tables from dbt models', () => {
         ).toStrictEqual(LIGHTDASH_TABLE_WITH_ADDITIONAL_DIMENSIONS);
     });
 
+    it('should convert dimension filter autocomplete config', () => {
+        const table = convertTable(
+            SupportedDbtAdapter.BIGQUERY,
+            {
+                ...MODEL_WITH_NO_METRICS,
+                columns: {
+                    user_id: {
+                        ...MODEL_WITH_NO_METRICS.columns.user_id,
+                        meta: {
+                            dimension: {
+                                filter_autocomplete: {
+                                    values: [
+                                        {
+                                            value: 'active',
+                                            label: 'Active customer',
+                                        },
+                                        { value: 'trial' },
+                                    ],
+                                    fetch_from_warehouse: false,
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            [],
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(table.dimensions.user_id.filterAutocomplete).toEqual({
+            values: [
+                { value: 'active', label: 'Active customer' },
+                { value: 'trial' },
+            ],
+            fetchFromWarehouse: false,
+        });
+    });
+
+    it('should warn and keep the first duplicate dimension filter autocomplete value', () => {
+        const table = convertTable(
+            SupportedDbtAdapter.BIGQUERY,
+            {
+                ...MODEL_WITH_NO_METRICS,
+                columns: {
+                    user_id: {
+                        ...MODEL_WITH_NO_METRICS.columns.user_id,
+                        meta: {
+                            dimension: {
+                                filter_autocomplete: {
+                                    values: [
+                                        {
+                                            value: 'active',
+                                            label: 'Active customer',
+                                        },
+                                        {
+                                            value: 'active',
+                                            label: 'Duplicate active',
+                                        },
+                                    ],
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            [],
+            DEFAULT_SPOTLIGHT_CONFIG,
+        );
+
+        expect(table.dimensions.user_id.filterAutocomplete?.values).toEqual([
+            { value: 'active', label: 'Active customer' },
+        ]);
+        expect(table.warnings).toEqual([
+            {
+                type: InlineErrorType.FIELD_ERROR,
+                message:
+                    'Duplicate filter autocomplete values found for dimension "user_id" in dbt model "myTable": active. Keeping the first value and ignoring duplicates.',
+            },
+        ]);
+    });
+
     it('should convert dbt model with groups meta block', async () => {
         expect(
             convertTable(
@@ -1937,5 +2018,168 @@ describe('convert_timezone dimension override', () => {
         expect(
             truthy.dimensions.created_at.skipTimezoneConversion,
         ).toBeUndefined();
+    });
+});
+
+describe('project default additional_time_intervals', () => {
+    const TIMESTAMP_MODEL: DbtModelNode & { relation_name: string } = {
+        ...model,
+        columns: {
+            created_at: {
+                name: 'created_at',
+                data_type: DimensionType.TIMESTAMP,
+                meta: { dimension: { type: DimensionType.TIMESTAMP } },
+            },
+        },
+    };
+
+    it('appends a standard grain (HOUR) to a timestamp column with no explicit time_intervals', () => {
+        const result = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            TIMESTAMP_MODEL,
+            [],
+            DEFAULT_SPOTLIGHT_CONFIG,
+            undefined, // startOfWeek
+            undefined, // disableTimestampConversion
+            undefined, // customGranularities
+            undefined, // allowPartialCompilation
+            { date: [], timestamp: [TimeFrames.HOUR] }, // additionalTimeIntervals
+        );
+        expect(result.dimensions).toHaveProperty('created_at_hour');
+        expect(result.dimensions).toHaveProperty('created_at_day');
+    });
+
+    it('appends a custom granularity to a timestamp column', () => {
+        const result = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            TIMESTAMP_MODEL,
+            [],
+            DEFAULT_SPOTLIGHT_CONFIG,
+            undefined,
+            undefined,
+            { fiscal_week: { label: 'Fiscal Week', sql: '${COLUMN}' } },
+            undefined,
+            { date: [], timestamp: ['fiscal_week'] },
+        );
+        expect(result.dimensions).toHaveProperty('created_at_fiscal_week');
+    });
+
+    it('does NOT add the project default to a column with explicit time_intervals', () => {
+        const EXPLICIT_MODEL: DbtModelNode & { relation_name: string } = {
+            ...model,
+            columns: {
+                created_at: {
+                    name: 'created_at',
+                    data_type: DimensionType.TIMESTAMP,
+                    meta: {
+                        dimension: {
+                            type: DimensionType.TIMESTAMP,
+                            time_intervals: [TimeFrames.DAY],
+                        },
+                    },
+                },
+            },
+        };
+        const result = convertTable(
+            SupportedDbtAdapter.POSTGRES,
+            EXPLICIT_MODEL,
+            [],
+            DEFAULT_SPOTLIGHT_CONFIG,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            { date: [], timestamp: [TimeFrames.HOUR] },
+        );
+        expect(result.dimensions).toHaveProperty('created_at_day');
+        expect(result.dimensions).not.toHaveProperty('created_at_hour');
+    });
+
+    it('flows from convertExplores via lightdashProjectConfig.defaults', async () => {
+        const explores = await convertExplores(
+            [TIMESTAMP_MODEL],
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            [],
+            warehouseClientMock,
+            {
+                spotlight: DEFAULT_SPOTLIGHT_CONFIG,
+                defaults: {
+                    additional_time_intervals: {
+                        timestamp: [TimeFrames.HOUR],
+                    },
+                },
+            },
+        );
+        const explore = explores[0];
+        expect('errors' in explore).toBe(false);
+        if (!('errors' in explore)) {
+            const table = explore.tables[explore.baseTable];
+            expect(table.dimensions).toHaveProperty('created_at_hour');
+        }
+    });
+});
+
+describe('granularity_labels overrides', () => {
+    const TS_MODEL: DbtModelNode & { relation_name: string } = {
+        ...model,
+        columns: {
+            created: {
+                name: 'created',
+                data_type: DimensionType.TIMESTAMP,
+                meta: { dimension: { type: DimensionType.TIMESTAMP } },
+            },
+        },
+    };
+
+    it('bakes the override verbatim into the week dimension label + timeIntervalLabel', async () => {
+        const explores = await convertExplores(
+            [TS_MODEL],
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            [],
+            warehouseClientMock,
+            {
+                spotlight: DEFAULT_SPOTLIGHT_CONFIG,
+                defaults: {
+                    granularity_labels: { week: 'Week starting Monday' },
+                },
+            },
+        );
+        const explore = explores[0];
+        expect('errors' in explore).toBe(false);
+        if (!('errors' in explore)) {
+            const dims = explore.tables[explore.baseTable].dimensions;
+            // Override is verbatim (not lowercased) in the compound label
+            expect(dims.created_week.label).toContain('Week starting Monday');
+            expect(dims.created_week.timeIntervalLabel).toBe(
+                'Week starting Monday',
+            );
+            // Non-overridden grain keeps default lowercased behaviour + no timeIntervalLabel
+            expect(dims.created_month.label).toContain('month');
+            expect(dims.created_month.timeIntervalLabel).toBeUndefined();
+            // The map is attached to the explore
+            expect(explore.granularityLabels).toEqual({
+                [TimeFrames.WEEK]: 'Week starting Monday',
+            });
+        }
+    });
+
+    it('is unchanged when no granularity_labels are configured', async () => {
+        const explores = await convertExplores(
+            [TS_MODEL],
+            false,
+            SupportedDbtAdapter.POSTGRES,
+            [],
+            warehouseClientMock,
+            { spotlight: DEFAULT_SPOTLIGHT_CONFIG },
+        );
+        const explore = explores[0];
+        if (!('errors' in explore)) {
+            const dims = explore.tables[explore.baseTable].dimensions;
+            expect(dims.created_week.label).toContain('week');
+            expect(dims.created_week.timeIntervalLabel).toBeUndefined();
+            expect(explore.granularityLabels).toBeUndefined();
+        }
     });
 });

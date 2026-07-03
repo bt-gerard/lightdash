@@ -3,6 +3,7 @@ import {
     PreAggregateMissReason,
     QueryExecutionContext,
     QueryHistoryStatus,
+    type WarehousePhaseTimings,
 } from '@lightdash/common';
 import { EventEmitter } from 'events';
 import express from 'express';
@@ -168,6 +169,15 @@ export default class PrometheusMetrics {
 
     public queryCacheHitCounter: prometheus.Counter<string> | null = null;
 
+    // Usage event stream writer metrics
+    public usageEventsPushedCounter: prometheus.Counter | null = null;
+
+    public usageEventsFlushedCounter: prometheus.Counter | null = null;
+
+    public usageEventsDroppedCounter: prometheus.Counter | null = null;
+
+    public usageEventsPutFailuresCounter: prometheus.Counter | null = null;
+
     public preAggregateMaterializationFileSizeHistogram: prometheus.Histogram<string> | null =
         null;
 
@@ -205,6 +215,8 @@ export default class PrometheusMetrics {
     private totalDurationHistogram: prometheus.Histogram | null = null;
 
     private warehouseDurationHistogram: prometheus.Histogram | null = null;
+
+    private warehousePhaseDurationHistogram: prometheus.Histogram | null = null;
 
     private overheadDurationHistogram: prometheus.Histogram | null = null;
 
@@ -297,6 +309,18 @@ export default class PrometheusMetrics {
                     buckets: [0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120],
                     ...rest,
                 });
+
+                this.warehousePhaseDurationHistogram = new prometheus.Histogram(
+                    {
+                        name: 'lightdash_query_warehouse_phase_duration_seconds',
+                        help: 'Warehouse query duration split by phase (connect/session/query/fetch)',
+                        labelNames: ['phase', 'warehouse_type', 'context'],
+                        buckets: [
+                            0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120,
+                        ],
+                        ...rest,
+                    },
+                );
 
                 this.overheadDurationHistogram = new prometheus.Histogram({
                     name: 'lightdash_query_overhead_duration_seconds',
@@ -744,6 +768,31 @@ export default class PrometheusMetrics {
                     ...rest,
                 });
 
+                // Usage event stream writer metrics
+                this.usageEventsPushedCounter = new prometheus.Counter({
+                    name: 'lightdash_usage_events_pushed_total',
+                    help: 'Total usage events pushed into the event stream buffer',
+                    ...rest,
+                });
+
+                this.usageEventsFlushedCounter = new prometheus.Counter({
+                    name: 'lightdash_usage_events_flushed_total',
+                    help: 'Total usage events flushed to the S3 raw zone',
+                    ...rest,
+                });
+
+                this.usageEventsDroppedCounter = new prometheus.Counter({
+                    name: 'lightdash_usage_events_dropped_total',
+                    help: 'Total usage events dropped because the buffer was full',
+                    ...rest,
+                });
+
+                this.usageEventsPutFailuresCounter = new prometheus.Counter({
+                    name: 'lightdash_usage_events_put_failures_total',
+                    help: 'Total usage event batches dropped after exhausting S3 PUT retries',
+                    ...rest,
+                });
+
                 const app = express();
                 this.server = http.createServer(app);
                 app.get(metricsPath, async (req, res) => {
@@ -1129,6 +1178,24 @@ export default class PrometheusMetrics {
         );
     }
 
+    public observeWarehousePhaseDurations(
+        phaseTimings: WarehousePhaseTimings,
+        warehouseType: string,
+        context: string,
+    ) {
+        const contextLabel = getQueryContextLabel(context);
+        Object.entries(phaseTimings).forEach(([phase, durationMs]) => {
+            this.warehousePhaseDurationHistogram?.observe(
+                {
+                    phase,
+                    warehouse_type: warehouseType,
+                    context: contextLabel,
+                },
+                durationMs / 1000,
+            );
+        });
+    }
+
     public observeOverheadDuration(durationMs: number, context: string) {
         if (durationMs < 0) {
             Logger.warn(
@@ -1306,6 +1373,22 @@ export default class PrometheusMetrics {
 
     public observeAiWritebackStageDuration(stage: string, durationMs: number) {
         this.aiWritebackStageDurationHistogram?.observe({ stage }, durationMs);
+    }
+
+    public incrementUsageEventsPushed() {
+        this.usageEventsPushedCounter?.inc();
+    }
+
+    public incrementUsageEventsFlushed(count: number) {
+        this.usageEventsFlushedCounter?.inc(count);
+    }
+
+    public incrementUsageEventsDropped() {
+        this.usageEventsDroppedCounter?.inc();
+    }
+
+    public incrementUsageEventsPutFailure() {
+        this.usageEventsPutFailuresCounter?.inc();
     }
 
     public monitorEventMetrics(eventEmitter: EventEmitter) {

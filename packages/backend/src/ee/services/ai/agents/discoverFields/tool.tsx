@@ -37,6 +37,28 @@ const renderResolved = (
                     ))}
                 </joinedTables>
             )}
+            {result.explore.requiredFilters &&
+                result.explore.requiredFilters.length > 0 && (
+                    <requiredFilters
+                        count={result.explore.requiredFilters.length}
+                    >
+                        {result.explore.requiredFilters.map((filter) => (
+                            <filter
+                                fieldId={filter.fieldId}
+                                fieldRef={filter.fieldRef}
+                                tableName={filter.tableName}
+                                operator={filter.operator}
+                                values={JSON.stringify(filter.values ?? [])}
+                                settings={
+                                    filter.settings
+                                        ? JSON.stringify(filter.settings)
+                                        : undefined
+                                }
+                                required={filter.required}
+                            />
+                        ))}
+                    </requiredFilters>
+                )}
         </explore>
         <fields count={result.fields.length}>
             {result.fields.map((f) => (
@@ -147,12 +169,15 @@ type ToolArgs = {
     availableExplores: Explore[];
     findExploresFieldSearchSize: number;
     findFieldsPageSize: number;
+    toolDescriptionMaxChars: number;
     promptUuid: string;
     telemetry: Pick<
         AiAgentArgs,
         | 'agentSettings'
         | 'threadUuid'
         | 'promptUuid'
+        | 'organizationId'
+        | 'userId'
         | 'telemetryEnabled'
         | 'model'
     >;
@@ -185,6 +210,7 @@ export const getDiscoverFields = (args: ToolArgs, dependencies: Dependencies) =>
                         findExploresFieldSearchSize:
                             args.findExploresFieldSearchSize,
                         findFieldsPageSize: args.findFieldsPageSize,
+                        toolDescriptionMaxChars: args.toolDescriptionMaxChars,
                         promptUuid: args.promptUuid,
                         parentToolCallId: toolCallId,
                         telemetry: args.telemetry,

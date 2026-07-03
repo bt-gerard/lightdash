@@ -52,6 +52,7 @@ import {
 } from 'react';
 import { useBlocker, useLocation, useNavigate, useParams } from 'react-router';
 import { AskAiAgentMenuItem } from '../../../ee/features/aiCopilot/components/AskAiAgentMenuItem/AskAiAgentMenuItem';
+import { CreateIssueMenuItem } from '../../../ee/features/aiCopilot/components/CreateIssue/CreateIssueMenuItem';
 import {
     explorerActions,
     selectHasUnsavedChanges,
@@ -114,7 +115,9 @@ import ShareShortLinkButton from '../../common/ShareShortLinkButton';
 import TransferItemsModal from '../../common/TransferItemsModal/TransferItemsModal';
 import ExploreFromHereButton from '../../ExploreFromHereButton';
 import AddTilesToDashboardModal from '../../SavedDashboards/AddTilesToDashboardModal';
-import SaveChartButton from '../SaveChartButton';
+import SaveChartButton, {
+    type VerificationSavePrompt,
+} from '../SaveChartButton';
 import { TitleBreadCrumbs } from './TitleBreadcrumbs';
 
 const SavedChartsHeader: FC = () => {
@@ -360,6 +363,17 @@ const SavedChartsHeader: FC = () => {
         savedChart?.verification !== null &&
         savedChart?.verification !== undefined;
 
+    const isOwnVerification =
+        savedChart?.verification?.verifiedBy.userUuid === user.data?.userUuid;
+
+    let verificationSavePrompt: VerificationSavePrompt | undefined;
+    if (isChartVerified) {
+        verificationSavePrompt =
+            canManageContentVerification || isOwnVerification
+                ? 'confirm-keep'
+                : 'warn-removal';
+    }
+
     const userCanPinChart = user.data?.ability.can(
         'manage',
         subject('PinnedItems', {
@@ -418,6 +432,7 @@ const SavedChartsHeader: FC = () => {
                     onClose={() => {
                         blocker.reset();
                     }}
+                    role="alertdialog"
                     title="Unsaved changes"
                     icon={IconAlertCircle}
                     cancelLabel="Stay"
@@ -585,9 +600,8 @@ const SavedChartsHeader: FC = () => {
                                             onSaveModalOpenChange={
                                                 setIsSaveModalOpen
                                             }
-                                            showVerificationSaveOptions={
-                                                isChartVerified &&
-                                                canManageContentVerification
+                                            verificationSavePrompt={
+                                                verificationSavePrompt
                                             }
                                         />
                                         <Button
@@ -635,12 +649,18 @@ const SavedChartsHeader: FC = () => {
                         >
                             <Menu.Dropdown>
                                 {savedChart && (
-                                    <AskAiAgentMenuItem
-                                        projectUuid={projectUuid}
-                                        chartUuid={savedChart.uuid}
-                                        clickedFrom="saved_chart_header"
-                                        withDivider
-                                    />
+                                    <>
+                                        <AskAiAgentMenuItem
+                                            projectUuid={projectUuid}
+                                            chartUuid={savedChart.uuid}
+                                            clickedFrom="saved_chart_header"
+                                        />
+                                        <CreateIssueMenuItem
+                                            projectUuid={projectUuid}
+                                            chartUuid={savedChart.uuid}
+                                            withDivider
+                                        />
+                                    </>
                                 )}
                                 <Menu.Label>Manage</Menu.Label>
                                 {userCanManageChart &&

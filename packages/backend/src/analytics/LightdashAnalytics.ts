@@ -214,6 +214,8 @@ export const getContextFromQueryOrHeader = (
 };
 
 export type MetricQueryExecutionProperties = {
+    exploreName: string;
+    dashboardId: string | null;
     chartId?: string;
     metricsCount: number;
     dimensionsCount: number;
@@ -274,6 +276,7 @@ type QueryReadyEvent = BaseTrack & {
     event: 'query.ready';
     properties: {
         queryId: string;
+        organizationId: string;
         projectId: string;
         warehouseType: WarehouseTypes;
         executionSource: QueryExecutionSource;
@@ -287,6 +290,7 @@ type QueryErrorEvent = BaseTrack & {
     event: 'query.error';
     properties: {
         queryId: string;
+        organizationId: string;
         projectId: string;
         warehouseType: WarehouseTypes | undefined;
         executionSource: QueryExecutionSource;
@@ -1734,7 +1738,7 @@ export type UserAttributeCreateAndUpdateEvent = BaseTrack & {
             groupIds: string[];
             groupValues: string[];
         };
-        defaultValue: string | null;
+        defaultValue: string[] | null;
     };
 };
 

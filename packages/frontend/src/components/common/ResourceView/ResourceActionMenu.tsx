@@ -11,10 +11,12 @@ import { ActionIcon, Box, Menu, Tooltip } from '@mantine-8/core';
 import {
     IconCircleCheck,
     IconCircleCheckFilled,
+    IconCode,
     IconCopy,
     IconDatabaseExport,
     IconDots,
     IconEdit,
+    IconFolderPlus,
     IconFolderSymlink,
     IconLayoutGridAdd,
     IconPin,
@@ -27,6 +29,7 @@ import {
 import { type FC, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router';
 import { AskAiAgentMenuItem } from '../../../ee/features/aiCopilot/components/AskAiAgentMenuItem/AskAiAgentMenuItem';
+import { CreateIssueMenuItem } from '../../../ee/features/aiCopilot/components/CreateIssue/CreateIssueMenuItem';
 import { PromoteAppModal } from '../../../features/apps/components/PromoteAppModal';
 import { useDuplicateApp } from '../../../features/apps/hooks/useDuplicateApp';
 import { PromotionConfirmDialog } from '../../../features/promotion/components/PromotionConfirmDialog';
@@ -127,12 +130,21 @@ const ResourceViewActionMenu: FC<ResourceViewActionMenuProps> = ({
     // an upstream exists but the user has no promote access there.
     const promoteSubjectName =
         item.type === ResourceViewItemType.CHART ? 'SavedChart' : 'Dashboard';
+    const promoteItemAccess = isChartOrDashboard
+        ? (() => {
+              const userAccess = spaces.find(
+                  (space) => space.uuid === item.data.spaceUuid,
+              )?.userAccess;
+              return userAccess ? [userAccess] : [];
+          })()
+        : [];
     const userCanPromoteChart =
         user.data?.ability?.can(
             'promote',
             subject(promoteSubjectName, {
                 organizationUuid,
                 projectUuid,
+                access: promoteItemAccess,
             }),
         ) &&
         (project?.upstreamProjectUuid === undefined ||
@@ -141,12 +153,26 @@ const ResourceViewActionMenu: FC<ResourceViewActionMenuProps> = ({
                 subject(promoteSubjectName, {
                     organizationUuid,
                     projectUuid: project.upstreamProjectUuid,
+                    access: promoteItemAccess,
                 }),
             ));
 
     const isSqlChart =
         item.type === ResourceViewItemType.CHART &&
         item.data.source === ChartSourceType.SQL;
+
+    // Personal (space-less) data apps can't be pinned — the backend rejects it.
+    const isPersonalDataApp =
+        item.type === ResourceViewItemType.DATA_APP && !item.data.spaceUuid;
+
+    // Match the app builder's wording: apps not yet in a space are "added",
+    // apps already in one are "moved".
+    const moveActionLabel =
+        item.type === ResourceViewItemType.DATA_APP
+            ? isPersonalDataApp
+                ? 'Add to space'
+                : 'Move to space'
+            : 'Move';
 
     const favoritesContext = useFavoritesContext();
     const isFavorited = favoritesContext?.isFavorited(item.data.uuid) ?? false;
@@ -302,27 +328,63 @@ const ResourceViewActionMenu: FC<ResourceViewActionMenuProps> = ({
                     )}
 
                     {isChartOrDashboard && !isSqlChart && (
-                        <AskAiAgentMenuItem
-                            projectUuid={projectUuid}
-                            chartUuid={
-                                isResourceViewItemChart(item)
-                                    ? item.data.uuid
-                                    : undefined
-                            }
-                            dashboardUuid={
-                                isResourceViewItemDashboard(item)
-                                    ? item.data.uuid
-                                    : undefined
-                            }
-                            clickedFrom="resource_action_menu"
-                            withDivider={userCanManage && !favoritesContext}
-                        />
+                        <>
+                            <AskAiAgentMenuItem
+                                projectUuid={projectUuid}
+                                chartUuid={
+                                    isResourceViewItemChart(item)
+                                        ? item.data.uuid
+                                        : undefined
+                                }
+                                dashboardUuid={
+                                    isResourceViewItemDashboard(item)
+                                        ? item.data.uuid
+                                        : undefined
+                                }
+                                clickedFrom="resource_action_menu"
+                            />
+                            <CreateIssueMenuItem
+                                projectUuid={projectUuid}
+                                chartUuid={
+                                    isResourceViewItemChart(item)
+                                        ? item.data.uuid
+                                        : undefined
+                                }
+                                dashboardUuid={
+                                    isResourceViewItemDashboard(item)
+                                        ? item.data.uuid
+                                        : undefined
+                                }
+                                withDivider={userCanManage && !favoritesContext}
+                            />
+                        </>
                     )}
 
                     {userCanManage && favoritesContext && <Menu.Divider />}
 
                     {userCanManage && (
                         <>
+                            {item.type === ResourceViewItemType.DATA_APP && (
+                                <Menu.Item
+                                    component="button"
+                                    role="menuitem"
+                                    leftSection={
+                                        <MantineIcon
+                                            icon={IconCode}
+                                            size={18}
+                                        />
+                                    }
+                                    onClick={() => {
+                                        if (!projectUuid) return;
+                                        void navigate(
+                                            `/projects/${projectUuid}/apps/${item.data.uuid}`,
+                                        );
+                                    }}
+                                >
+                                    Continue building
+                                </Menu.Item>
+                            )}
+
                             <Menu.Item
                                 component="button"
                                 role="menuitem"
@@ -498,7 +560,9 @@ const ResourceViewActionMenu: FC<ResourceViewActionMenuProps> = ({
                                         });
                                     }}
                                     style={
-                                        isSqlChart ? { display: 'none' } : {}
+                                        isSqlChart || isPersonalDataApp
+                                            ? { display: 'none' }
+                                            : {}
                                     }
                                 >
                                     {isPinned
@@ -566,7 +630,13 @@ const ResourceViewActionMenu: FC<ResourceViewActionMenuProps> = ({
                             <Menu.Item
                                 component="button"
                                 role="menuitem"
-                                leftSection={<IconFolderSymlink size={18} />}
+                                leftSection={
+                                    isPersonalDataApp ? (
+                                        <IconFolderPlus size={18} />
+                                    ) : (
+                                        <IconFolderSymlink size={18} />
+                                    )
+                                }
                                 onClick={() => {
                                     onAction({
                                         type: ResourceViewItemAction.TRANSFER_TO_SPACE,
@@ -574,7 +644,7 @@ const ResourceViewActionMenu: FC<ResourceViewActionMenuProps> = ({
                                     });
                                 }}
                             >
-                                Move
+                                {moveActionLabel}
                             </Menu.Item>
 
                             {item.type === ResourceViewItemType.SPACE && (

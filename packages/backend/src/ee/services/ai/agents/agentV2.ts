@@ -32,7 +32,15 @@ import { getGenerateUuids } from '../tools/generateUuids';
 import { getGenerateVisualization } from '../tools/generateVisualization';
 import { getGetDashboardCharts } from '../tools/getDashboardCharts';
 import { getGetKnowledgeDocumentContent } from '../tools/getKnowledgeDocumentContent';
+import { getGetMetadata } from '../tools/getMetadata';
 import { getGetProjectInfo } from '../tools/getProjectInfo';
+import { getGrepFields } from '../tools/grepFields';
+import {
+    buildFieldIndex,
+    extractKeywords,
+    renderCandidateBlock,
+    selectCandidateFields,
+} from '../tools/grepFieldsIndex';
 import { getImproveContext } from '../tools/improveContext';
 import { getListContent } from '../tools/listContent';
 import { getListKnowledgeDocuments } from '../tools/listKnowledgeDocuments';
@@ -62,6 +70,7 @@ import {
 } from '../utils/errorMessages';
 import { summarizeToolCall, summarizeToolResult } from '../utils/toolSummaries';
 import { getDiscoverFields } from './discoverFields/tool';
+import { buildQueryRetryStepOverride } from './queryRetryCap';
 import { getAgentTelemetryConfig, getAiAgentModelName } from './telemetry';
 
 const createAiAgentLogger =
@@ -89,6 +98,49 @@ const withToolHints = (
         typeof lastUser.content === 'string'
             ? `${lastUser.content}${hint}`
             : [...lastUser.content, { type: 'text' as const, text: hint }];
+    return [
+        ...messageHistory.slice(0, lastUserIndex),
+        { ...lastUser, content: updatedContent } as ModelMessage,
+        ...messageHistory.slice(lastUserIndex + 1),
+    ];
+};
+
+/**
+ * Zero-LLM discovery seed: deterministically grep the catalog for the latest
+ * user question's keywords and append the candidate fields to that message, so
+ * the agent often has the right fields on its first turn and can skip the
+ * discovery round-trip. Advisory only — the agent still verifies and can grep
+ * for itself. Appended to the (uncached) user message, never the system prompt.
+ */
+const withPreGrepCandidates = (
+    messageHistory: ModelMessage[],
+    availableExplores: Explore[],
+    verifiedFieldUsage: Map<string, number>,
+): ModelMessage[] => {
+    const lastUserIndex = messageHistory.findLastIndex(
+        (m) => m.role === 'user',
+    );
+    if (lastUserIndex === -1) return messageHistory;
+    const lastUser = messageHistory[lastUserIndex];
+    if (lastUser.role !== 'user') return messageHistory;
+    const userText =
+        typeof lastUser.content === 'string'
+            ? lastUser.content
+            : lastUser.content
+                  .map((part) => (part.type === 'text' ? part.text : ''))
+                  .join(' ');
+    const keywords = extractKeywords(userText);
+    if (keywords.length === 0) return messageHistory;
+    const candidates = selectCandidateFields(
+        buildFieldIndex(availableExplores, verifiedFieldUsage),
+        keywords,
+    );
+    if (candidates.length === 0) return messageHistory;
+    const seed = `\n\n${renderCandidateBlock(candidates)}`;
+    const updatedContent =
+        typeof lastUser.content === 'string'
+            ? `${lastUser.content}${seed}`
+            : [...lastUser.content, { type: 'text' as const, text: seed }];
     return [
         ...messageHistory.slice(0, lastUserIndex),
         { ...lastUser, content: updatedContent } as ModelMessage,
@@ -177,30 +229,54 @@ const buildPrepareStep = ({
         messages: ModelMessage[];
     }) => {
         const forced = forcedFirstStep?.({ stepNumber }) ?? {};
+
+        const extraMessages: ModelMessage[] = [];
+        let activeTools: string[] | undefined;
+
+        // ZAP-574: bound repeated query-tool failures so a slow/looping
+        // visualization can't stack multi-minute warehouse scans in one turn.
+        const retryOverride = buildQueryRetryStepOverride(
+            messages,
+            Object.keys(tools),
+        );
+        if (retryOverride) {
+            activeTools = retryOverride.activeTools;
+            extraMessages.push({
+                role: 'user' as const,
+                content: retryOverride.nudge,
+            });
+            logger(
+                'Prepare Step',
+                `Query retry cap tripped for prompt UUID: ${args.promptUuid}`,
+            );
+        }
+
         const steers = await dependencies.consumePromptSteers({
             promptUuid: args.promptUuid,
             stepNumber,
         });
+        if (steers.length > 0) {
+            logger(
+                'Prepare Step',
+                `Injecting ${steers.length} steer(s) for prompt UUID: ${args.promptUuid}`,
+            );
+            extraMessages.push({
+                role: 'user' as const,
+                content: [
+                    'Additional guidance from the user while you were working:',
+                    ...steers.map((steer) => `- ${steer.message}`),
+                ].join('\n'),
+            });
+        }
 
-        if (steers.length === 0) return forced;
-
-        logger(
-            'Prepare Step',
-            `Injecting ${steers.length} steer(s) for prompt UUID: ${args.promptUuid}`,
-        );
+        if (extraMessages.length === 0 && activeTools === undefined) {
+            return forced;
+        }
 
         return {
             ...forced,
-            messages: [
-                ...messages,
-                {
-                    role: 'user' as const,
-                    content: [
-                        'Additional guidance from the user while you were working:',
-                        ...steers.map((steer) => `- ${steer.message}`),
-                    ].join('\n'),
-                },
-            ],
+            ...(activeTools !== undefined ? { activeTools } : {}),
+            messages: [...messages, ...extraMessages],
         };
     };
 };
@@ -210,6 +286,7 @@ const getAgentTools = (
     dependencies: AiAgentDependencies,
     availableExplores: Explore[],
     mcpToolSetup: AgentMcpToolSetup,
+    verifiedFieldUsage: Map<string, number>,
 ): ToolSet => {
     const logger = createAiAgentLogger(args.debugLoggingEnabled);
     logger(
@@ -225,11 +302,14 @@ const getAgentTools = (
             availableExplores,
             findExploresFieldSearchSize: args.findExploresFieldSearchSize,
             findFieldsPageSize: args.findFieldsPageSize,
+            toolDescriptionMaxChars: args.toolDescriptionMaxChars,
             promptUuid: args.promptUuid,
             telemetry: {
                 agentSettings: args.agentSettings,
                 threadUuid: args.threadUuid,
                 promptUuid: args.promptUuid,
+                organizationId: args.organizationId,
+                userId: args.userId,
                 telemetryEnabled: args.telemetryEnabled,
                 model: args.model,
             },
@@ -244,9 +324,26 @@ const getAgentTools = (
         },
     );
 
+    // Experimental swap: when on, the main agent greps the in-memory annotated
+    // explores itself instead of delegating to the discoverFields sub-agent.
+    const grepFields = args.enableGrepFields
+        ? getGrepFields({
+              availableExplores,
+              findExplores: dependencies.findExplores,
+              verifiedFieldUsage,
+          })
+        : null;
+
+    // Companion to grepFields: rich detail for the explores/fields the agent
+    // selected (joined tables, required filters, filter types, hints).
+    const getMetadata = args.enableGrepFields
+        ? getGetMetadata({ availableExplores })
+        : null;
+
     const findContent = getFindContent({
         findContent: dependencies.findContent,
         siteUrl: args.siteUrl,
+        toolDescriptionMaxChars: args.toolDescriptionMaxChars,
         trackCoverage: (coverage) => {
             dependencies.trackEvent({
                 event: 'ai_agent.find_content_coverage',
@@ -309,6 +406,7 @@ const getAgentTools = (
               siteUrl: args.siteUrl,
               waitForSqlApproval: dependencies.waitForSqlApproval,
               recordSqlApproval: dependencies.recordSqlApproval,
+              isThreadSqlAutoApproved: dependencies.isThreadSqlAutoApproved,
               storeToolResults: dependencies.storeToolResults,
               maxQueryLimit: args.runSqlMaxLimit,
               autoApproveSql: args.autoApproveSql,
@@ -406,6 +504,7 @@ const getAgentTools = (
         // unbounded payload while still letting an audit grab the inventory in
         // one or two round-trips.
         maxPageSize: 500,
+        toolDescriptionMaxChars: args.toolDescriptionMaxChars,
     });
 
     const listKnowledgeDocuments = getListKnowledgeDocuments({
@@ -443,14 +542,14 @@ const getAgentTools = (
           })
         : null;
 
-    const enableContentTools =
-        args.enableAgentRevamp &&
-        args.enableDataAccess &&
-        args.enableContentTools;
+    const enableContentTools = args.enableDataAccess && args.enableContentTools;
 
     const tools: ToolSet = {
         findContent,
-        discoverFields,
+        // grepFields replaces discoverFields when the ai-grep-fields flag is on,
+        // with getMetadata as its rich-detail companion.
+        ...(grepFields ? { grepFields } : { discoverFields }),
+        ...(getMetadata ? { getMetadata } : {}),
         analyzeFieldImpact,
         ...(args.enableSearchSemanticLayer ? { searchSemanticLayer } : {}),
         listProjects,
@@ -561,11 +660,18 @@ const getAgentMessages = (
     args: AiAgentArgs,
     availableExplores: Explore[],
     mcpToolSetup: AgentMcpToolSetup,
+    verifiedFieldUsage: Map<string, number>,
 ) => {
     const logger = createAiAgentLogger(args.debugLoggingEnabled);
     logger('Agent Messages', 'Getting agent messages.');
 
-    const messageHistory = withToolHints(args.messageHistory, args.toolHints);
+    const messageHistory = args.enableGrepFields
+        ? withPreGrepCandidates(
+              withToolHints(args.messageHistory, args.toolHints),
+              availableExplores,
+              verifiedFieldUsage,
+          )
+        : withToolHints(args.messageHistory, args.toolHints);
 
     // Project context is loaded on demand via the loadProjectContext tool; the
     // system prompt only advertises that it exists (when enabled + non-empty).
@@ -576,6 +682,7 @@ const getAgentMessages = (
         getSystemPromptV2({
             agentName: args.agentSettings.name,
             instructions: args.agentSettings.instruction || undefined,
+            requestingUser: args.requestingUser,
             availableExplores,
             availableSkills: args.availableSkills,
             knowledgeDocuments: args.knowledgeDocuments,
@@ -588,10 +695,9 @@ const getAgentMessages = (
             enableRepoDiscovery: args.enableRepoDiscovery,
             repoFsRoot: args.repoFsRoot,
             repoFsSupportsCodeSearch: args.repoFsSupportsCodeSearch,
+            enableGrepFields: args.enableGrepFields,
             enableContentTools:
-                args.enableAgentRevamp &&
-                args.enableDataAccess &&
-                args.enableContentTools,
+                args.enableDataAccess && args.enableContentTools,
             canRunSql: args.canRunSql,
             warehouseType: args.warehouseType,
             warehouseSchema: args.warehouseSchema,
@@ -653,14 +759,28 @@ export const generateAgentResponse = async ({
 
     try {
         const availableExplores = await dependencies.listExplores();
+        // Verified-chart usage powers verified-first ranking in grep discovery;
+        // degrade to an empty map if it can't be fetched.
+        const verifiedFieldUsage = args.enableGrepFields
+            ? await dependencies
+                  .getVerifiedFieldUsage()
+                  .catch(() => new Map<string, number>())
+            : new Map<string, number>();
         const tools = withEarlyToolProgress(
-            getAgentTools(args, dependencies, availableExplores, mcpToolSetup),
+            getAgentTools(
+                args,
+                dependencies,
+                availableExplores,
+                mcpToolSetup,
+                verifiedFieldUsage,
+            ),
             dependencies.updateProgress,
         );
         const messages = getAgentMessages(
             args,
             availableExplores,
             mcpToolSetup,
+            verifiedFieldUsage,
         );
         logger(
             'Generate Agent Response',
@@ -892,16 +1012,23 @@ export const streamAgentResponse = async ({
 
     try {
         const availableExplores = await dependencies.listExplores();
+        const verifiedFieldUsage = args.enableGrepFields
+            ? await dependencies
+                  .getVerifiedFieldUsage()
+                  .catch(() => new Map<string, number>())
+            : new Map<string, number>();
         const tools = getAgentTools(
             args,
             dependencies,
             availableExplores,
             mcpToolSetup,
+            verifiedFieldUsage,
         );
         const messages = getAgentMessages(
             args,
             availableExplores,
             mcpToolSetup,
+            verifiedFieldUsage,
         );
         logger(
             'Stream Agent Response',

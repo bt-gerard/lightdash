@@ -18,6 +18,7 @@ import {
     WarehouseCatalog,
     WarehouseResults,
     WarehouseTypes,
+    type WarehouseQueryPhase,
 } from '@lightdash/common';
 import { createHash } from 'crypto';
 import fs from 'fs/promises';
@@ -274,7 +275,24 @@ const BLOCKED_STATEMENT_TYPES_INTERNAL_SQL = new Set([
 ]);
 
 const BLOCKED_FUNCTION_PATTERN =
-    /\b(current_setting|duckdb_settings|duckdb_secrets)\s*\(/i;
+    /\b(current_setting|duckdb_settings|duckdb_secrets|query|query_table)\s*\(/i;
+
+const BLOCKED_USER_SQL_FILE_FUNCTION_PATTERN =
+    /\b(read_(?:blob|csv(?:_auto)?|json(?:_auto|_objects(?:_auto)?)?|ndjson(?:_auto|_objects(?:_auto)?)?|parquet|text|xlsx))\s*\(/i;
+
+const BLOCKED_USER_SQL_FILE_TABLE_PATTERN = /\b(?:from|join)\s+'[^']*'/i;
+
+const buildMotherduckConnectionString = ({
+    database,
+    token,
+}: Pick<CreateDuckdbMotherduckCredentials, 'database' | 'token'>): string => {
+    const params = new URLSearchParams({
+        motherduck_token: token,
+        saas_mode: 'true',
+    });
+
+    return `md:${encodeURIComponent(database)}?${params.toString()}`;
+};
 
 export type DuckdbWarehouseClientArgs = {
     databasePath?: string;
@@ -377,7 +395,10 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbMothe
                     'MotherDuck token is required for DuckDB warehouse connections',
                 );
             }
-            this.databasePath = `md:${effectiveCredentials.database}?motherduck_token=${token}`;
+            this.databasePath = buildMotherduckConnectionString({
+                database: effectiveCredentials.database,
+                token,
+            });
         }
 
         this.resourceLimits = options?.resourceLimits;
@@ -1244,7 +1265,6 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbMothe
         const connectMs = performance.now() - connectStart;
 
         try {
-            await DuckdbWarehouseClient.hardenInstance(connection);
             const queryStart = performance.now();
             const result = await callback(connection);
             const queryMs = performance.now() - queryStart;
@@ -1423,10 +1443,31 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbMothe
         }
     }
 
+    private static validateUserSqlFileAccess(sql: string): void {
+        const stripped = DuckdbWarehouseClient.stripSqlComments(sql);
+        const functionMatch = stripped.match(
+            BLOCKED_USER_SQL_FILE_FUNCTION_PATTERN,
+        );
+        if (functionMatch) {
+            throw new Error(
+                `SQL validation error: function '${functionMatch[1]}' is not allowed`,
+            );
+        }
+
+        if (BLOCKED_USER_SQL_FILE_TABLE_PATTERN.test(stripped)) {
+            throw new Error(
+                'SQL validation error: file table paths are not allowed',
+            );
+        }
+    }
+
     private async validateUserSql(
         db: DuckdbConnection,
         sql: string,
     ): Promise<void> {
+        DuckdbWarehouseClient.validateSqlFunctions(sql);
+        DuckdbWarehouseClient.validateUserSqlFileAccess(sql);
+
         const extracted = await db.extractStatements(sql);
 
         if (extracted.count === 0) {
@@ -1449,8 +1490,6 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbMothe
         } finally {
             stmt.destroySync();
         }
-
-        DuckdbWarehouseClient.validateSqlFunctions(sql);
     }
 
     private async validateInternalSql(
@@ -1490,9 +1529,15 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbMothe
             queryParams?: Record<string, AnyType>;
             tags?: Record<string, string>;
             timezone?: string;
+            onPhaseTiming?: (
+                phase: WarehouseQueryPhase,
+                durationMs: number,
+            ) => void;
         },
     ): Promise<void> {
+        const reportPhase = options?.onPhaseTiming;
         await this.withSession(async (db) => {
+            const sessionStart = performance.now();
             if (options?.timezone) {
                 await db.run(
                     `SET TimeZone = '${this.escapeString(options.timezone)}';`,
@@ -1512,7 +1557,9 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbMothe
             }
 
             await this.validateUserSql(db, sql);
+            reportPhase?.('session', performance.now() - sessionStart);
 
+            const queryStart = performance.now();
             const result = await db.stream(
                 this.getSQLWithMetadata(sql, options?.tags),
                 this.getBindValues(options),
@@ -1520,9 +1567,20 @@ export class DuckdbWarehouseClient extends WarehouseBaseClient<CreateDuckdbMothe
             const fields =
                 DuckdbWarehouseClient.getFieldsFromStreamResult(result);
 
+            let fetchStart: number | undefined;
             // eslint-disable-next-line no-restricted-syntax
             for await (const rows of result.yieldRowObjectJson()) {
+                if (fetchStart === undefined) {
+                    reportPhase?.('query', performance.now() - queryStart);
+                    fetchStart = performance.now();
+                }
                 await streamCallback({ fields, rows });
+            }
+            if (fetchStart === undefined) {
+                reportPhase?.('query', performance.now() - queryStart);
+                reportPhase?.('fetch', 0);
+            } else {
+                reportPhase?.('fetch', performance.now() - fetchStart);
             }
 
             if (profilePath) {

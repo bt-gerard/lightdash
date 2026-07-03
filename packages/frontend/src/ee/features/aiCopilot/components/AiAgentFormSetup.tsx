@@ -1,4 +1,4 @@
-import { FeatureFlags } from '@lightdash/common';
+import { FeatureFlags, type AiAgentModelConfig } from '@lightdash/common';
 import {
     Anchor,
     Badge,
@@ -14,6 +14,7 @@ import {
     MultiSelect,
     Paper,
     Radio,
+    Select,
     Stack,
     Switch,
     TagsInput,
@@ -43,6 +44,7 @@ import { memo, useCallback, useMemo, useState } from 'react';
 import { z } from 'zod';
 import MantineIcon from '../../../../components/common/MantineIcon';
 import MantineModal from '../../../../components/common/MantineModal';
+import { getModelKey } from '../../../../components/common/ModelSelector/utils';
 import { SlackChannelSelect } from '../../../../components/common/SlackChannelSelect';
 import { useGetSlack } from '../../../../hooks/slack/useSlack';
 import { useOrganizationGroups } from '../../../../hooks/useOrganizationGroups';
@@ -51,6 +53,12 @@ import { useServerFeatureFlag } from '../../../../hooks/useServerOrClientFeature
 import useApp from '../../../../providers/App/useApp';
 import { UserAccessMultiSelect } from '../../../components/UserAccessMultiSelect';
 import AiExploreAccessTree from '../../../pages/AiAgents/AiExploreAccessTree';
+import {
+    getAiAgentModelConfig,
+    getModelOptionByKey,
+    useDefaultAiAgentModel,
+} from '../hooks/useAiAgentModelSelection';
+import { useAiOrganizationSettings } from '../hooks/useAiOrganizationSettings';
 import { useDeleteAiAgentMutation } from '../hooks/useProjectAiAgents';
 import { useGetAgentExploreAccessSummary } from '../hooks/useUserAgentPreferences';
 import { AiAgentKnowledgeFilesSection } from './AiAgentKnowledgeFilesSection';
@@ -77,7 +85,9 @@ const formSchema = z.object({
     enableDataAccess: z.boolean(),
     enableSelfImprovement: z.boolean(),
     enableContentTools: z.boolean(),
+    enableUserContext: z.boolean(),
     adminOnly: z.boolean(),
+    modelConfig: z.custom<AiAgentModelConfig>().nullable(),
     version: z.number(),
 });
 
@@ -127,6 +137,8 @@ export const AiAgentFormSetup = ({
     onAvatarRevert: (() => void) | null;
 }) => {
     const { data: project } = useProject(projectUuid);
+    const { data: aiOrganizationSettings } = useAiOrganizationSettings();
+    const modelOptions = aiOrganizationSettings?.defaultAiAgentModelOptions;
     const exploreAccessSummaryQuery = useGetAgentExploreAccessSummary(
         projectUuid!,
         {
@@ -157,6 +169,17 @@ export const AiAgentFormSetup = ({
 
     const [isExploreAccessSummaryOpen, { toggle: toggleExploreAccessSummary }] =
         useDisclosure(false);
+    const {
+        fallbackModelLabel: organizationDefaultModelLabel,
+        selectedModel,
+        selectedModelKey,
+        showReasoningDefault,
+    } = useDefaultAiAgentModel({
+        modelOptions,
+        modelConfig: form.values.modelConfig,
+        fallbackModelConfig: aiOrganizationSettings?.defaultAiAgentModelConfig,
+        fallbackLabel: 'Organization default',
+    });
 
     const slackChannelsConfigured = useMemo(
         () =>
@@ -175,12 +198,6 @@ export const AiAgentFormSetup = ({
     const isGroupsEnabled =
         userGroupsFeatureFlagQuery.isSuccess &&
         userGroupsFeatureFlagQuery.data.enabled;
-    const agentRevampFeatureFlagQuery = useServerFeatureFlag(
-        FeatureFlags.AiAgentRevamp,
-    );
-    const isAgentRevampEnabled =
-        agentRevampFeatureFlagQuery.isSuccess &&
-        agentRevampFeatureFlagQuery.data.enabled;
 
     const handlePersistedMcpServerChange = useCallback(
         (value: string[]) => {
@@ -409,6 +426,82 @@ export const AiAgentFormSetup = ({
                                     )}
                                 </Group>
                             </Box>
+                        </Stack>
+                    </Paper>
+
+                    <Paper p="xl">
+                        <Stack gap="md">
+                            <Group align="center" gap="xs">
+                                <Paper p="xxs" withBorder radius="sm">
+                                    <MantineIcon
+                                        icon={IconSparkles}
+                                        size="md"
+                                    />
+                                </Paper>
+                                <Title order={5} c="ldGray.9" fw={700}>
+                                    Model
+                                </Title>
+                            </Group>
+
+                            <Select
+                                variant="subtle"
+                                label="Default model"
+                                description="Used for new chats with this agent. Users can still change it in each chat."
+                                value={selectedModelKey}
+                                disabled={
+                                    isSavingAgent || !modelOptions?.length
+                                }
+                                placeholder={organizationDefaultModelLabel}
+                                clearable
+                                data={(modelOptions ?? []).map((model) => ({
+                                    value: getModelKey(model),
+                                    label: model.displayName,
+                                }))}
+                                onChange={(modelKey) => {
+                                    const model = getModelOptionByKey(
+                                        modelOptions,
+                                        modelKey,
+                                    );
+                                    form.setFieldValue(
+                                        'modelConfig',
+                                        model
+                                            ? (getAiAgentModelConfig(
+                                                  model,
+                                                  form.values.modelConfig
+                                                      ?.reasoning ??
+                                                      aiOrganizationSettings
+                                                          ?.defaultAiAgentModelConfig
+                                                          ?.reasoning ??
+                                                      false,
+                                              ) ?? null)
+                                            : null,
+                                    );
+                                }}
+                            />
+
+                            {showReasoningDefault && (
+                                <Switch
+                                    variant="subtle"
+                                    label="High reasoning"
+                                    description="Use high reasoning for new chats with this agent."
+                                    checked={
+                                        form.values.modelConfig?.reasoning ===
+                                        true
+                                    }
+                                    disabled={isSavingAgent}
+                                    onChange={(event) => {
+                                        if (!selectedModel) return;
+                                        form.setFieldValue('modelConfig', {
+                                            ...form.values.modelConfig,
+                                            modelName: selectedModel.name,
+                                            modelProvider:
+                                                selectedModel.provider,
+                                            reasoning:
+                                                event.currentTarget.checked,
+                                        });
+                                    }}
+                                />
+                            )}
                         </Stack>
                     </Paper>
 
@@ -665,53 +758,76 @@ export const AiAgentFormSetup = ({
                                     }
                                 }}
                             />
-                            {isAgentRevampEnabled && (
-                                <Switch
-                                    variant="subtle"
-                                    label={
-                                        <Group gap="xs">
-                                            <Text fz="sm" fw={500}>
-                                                Allow agent to manage Lightdash
-                                                content
-                                            </Text>
-                                            <Tooltip
-                                                label="Requires data access to be enabled. Only works for users with content-as-code access (admins and developers)."
-                                                withArrow
-                                                withinPortal
-                                                multiline
-                                                position="right"
-                                                maw="300px"
-                                            >
+                            <Switch
+                                variant="subtle"
+                                label={
+                                    <Group gap="xs">
+                                        <Text fz="sm" fw={500}>
+                                            Allow agent to manage Lightdash
+                                            content
+                                        </Text>
+                                        <Tooltip
+                                            label="Requires data access to be enabled. Only works for users with content-as-code access (admins and developers)."
+                                            withArrow
+                                            withinPortal
+                                            multiline
+                                            position="right"
+                                            maw="300px"
+                                        >
+                                            <MantineIcon
+                                                icon={IconInfoCircle}
+                                            />
+                                        </Tooltip>
+                                        <Badge
+                                            color="indigo"
+                                            radius="sm"
+                                            variant="light"
+                                            leftSection={
                                                 <MantineIcon
-                                                    icon={IconInfoCircle}
+                                                    icon={IconSparkles}
                                                 />
-                                            </Tooltip>
-                                            <Badge
-                                                color="indigo"
-                                                radius="sm"
-                                                variant="light"
-                                                leftSection={
-                                                    <MantineIcon
-                                                        icon={IconSparkles}
-                                                    />
-                                                }
-                                            >
-                                                Beta
-                                            </Badge>
-                                        </Group>
-                                    }
-                                    description={
-                                        'Agent can build new dashboards and charts and update existing ones — add or rearrange tiles, organize tabs, change filters, and more.'
-                                    }
-                                    {...form.getInputProps(
-                                        'enableContentTools',
-                                        {
-                                            type: 'checkbox',
-                                        },
-                                    )}
-                                    disabled={!form.values.enableDataAccess}
-                                />
-                            )}
+                                            }
+                                        >
+                                            Beta
+                                        </Badge>
+                                    </Group>
+                                }
+                                description={
+                                    'Agent can build new dashboards and charts and update existing ones — add or rearrange tiles, organize tabs, change filters, and more.'
+                                }
+                                {...form.getInputProps('enableContentTools', {
+                                    type: 'checkbox',
+                                })}
+                                disabled={!form.values.enableDataAccess}
+                            />
+                            <Switch
+                                variant="subtle"
+                                label={
+                                    <Group gap="xs">
+                                        <Text fz="sm" fw={500}>
+                                            Pass user information
+                                        </Text>
+                                        <Tooltip
+                                            label="Only applies when the agent knows who is asking — on Slack this requires the OAuth requirement to be enabled in the organization's Slack settings."
+                                            withArrow
+                                            withinPortal
+                                            multiline
+                                            position="right"
+                                            maw="300px"
+                                        >
+                                            <MantineIcon
+                                                icon={IconInfoCircle}
+                                            />
+                                        </Tooltip>
+                                    </Group>
+                                }
+                                description={
+                                    "Shares the requesting user's name, role, and group memberships with the agent so it can tailor answers to who is asking."
+                                }
+                                {...form.getInputProps('enableUserContext', {
+                                    type: 'checkbox',
+                                })}
+                            />
                         </Stack>
                     </Paper>
 

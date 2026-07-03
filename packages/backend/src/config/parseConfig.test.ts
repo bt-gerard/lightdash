@@ -24,9 +24,9 @@ import {
     parseOrganizationMemberRoleArray,
 } from './parseConfig';
 
-jest.mock('fs/promises', () => ({
-    readFile: jest.fn(),
-    writeFile: jest.fn(),
+vi.mock('fs/promises', () => ({
+    readFile: vi.fn(),
+    writeFile: vi.fn(),
 }));
 
 beforeEach(() => {
@@ -247,6 +247,16 @@ test('Should parse bedrock inference profile prefix from env', () => {
         region: 'ap-northeast-1',
         inferenceProfilePrefix: 'jp',
     });
+});
+
+test('Should default AI tool description max chars to 600', () => {
+    expect(parseConfig().ai.copilot.toolDescriptionMaxChars).toEqual(600);
+});
+
+test('Should parse AI tool description max chars from env', () => {
+    process.env.AI_TOOL_DESCRIPTION_MAX_CHARS = '2500';
+
+    expect(parseConfig().ai.copilot.toolDescriptionMaxChars).toEqual(2500);
 });
 
 test('Should parse valid integer', () => {
@@ -642,8 +652,8 @@ describe('process.env.LIGHTDASH_IFRAME_EMBEDDING_DOMAINS', () => {
 
     describe('environment variables for API tokens', () => {
         beforeEach(() => {
-            jest.useFakeTimers();
-            jest.setSystemTime(new Date('2025-06-19'));
+            vi.useFakeTimers();
+            vi.setSystemTime(new Date('2025-06-19'));
 
             process.env.LD_SETUP_ADMIN_EMAIL = 'admin@example.com';
             process.env.LD_SETUP_SERVICE_ACCOUNT_EXPIRATION = '0';
@@ -651,7 +661,7 @@ describe('process.env.LIGHTDASH_IFRAME_EMBEDDING_DOMAINS', () => {
         });
 
         afterEach(() => {
-            jest.useRealTimers();
+            vi.useRealTimers();
         });
 
         test('should parse service account token', () => {
@@ -734,7 +744,39 @@ describe('getUserAttributesSetupConfig', () => {
                 name: 'is_privileged',
                 description: 'PII access',
                 attributeDefault: null,
-                groups: [{ group: 'Privileged Data Analyst', value: 'true' }],
+                groups: [
+                    { group: 'Privileged Data Analyst', values: ['true'] },
+                ],
+            },
+        ]);
+    });
+
+    test('accepts array values and array attributeDefault', () => {
+        process.env.LD_SETUP_USER_ATTRIBUTES = JSON.stringify([
+            {
+                name: 'region',
+                attributeDefault: ['US', 'CA'],
+                groups: [{ group: 'Analysts', values: ['US', 'UK'] }],
+            },
+        ]);
+        expect(getUserAttributesSetupConfig()).toEqual([
+            {
+                name: 'region',
+                attributeDefault: ['US', 'CA'],
+                groups: [{ group: 'Analysts', values: ['US', 'UK'] }],
+            },
+        ]);
+    });
+
+    test('normalizes a scalar attributeDefault to an array', () => {
+        process.env.LD_SETUP_USER_ATTRIBUTES = JSON.stringify([
+            { name: 'region', attributeDefault: 'US' },
+        ]);
+        expect(getUserAttributesSetupConfig()).toEqual([
+            {
+                name: 'region',
+                attributeDefault: ['US'],
+                groups: [],
             },
         ]);
     });
@@ -788,7 +830,7 @@ describe('getUpdateSetupConfig userAttributes', () => {
             {
                 name: 'is_privileged',
                 attributeDefault: null,
-                groups: [{ group: 'G', value: 'true' }],
+                groups: [{ group: 'G', values: ['true'] }],
             },
         ]);
     });
@@ -963,11 +1005,11 @@ describe('parseAndSanitizeSchedulerTasks', () => {
         delete process.env.SCHEDULER_INCLUDE_TASKS;
         delete process.env.SCHEDULER_EXCLUDE_TASKS;
         // Mock console.warn to capture warning messages
-        jest.spyOn(console, 'warn').mockImplementation(() => {});
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
     });
 
     afterEach(() => {
-        jest.restoreAllMocks();
+        vi.restoreAllMocks();
     });
 
     describe('Default behavior', () => {

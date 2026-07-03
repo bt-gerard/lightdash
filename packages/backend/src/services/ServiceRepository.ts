@@ -57,6 +57,7 @@ import { PersonalAccessTokenService } from './PersonalAccessTokenService';
 import { PinningService } from './PinningService/PinningService';
 import { PivotTableService } from './PivotTableService/PivotTableService';
 import { ProjectCompileLogService } from './ProjectCompileLogService/ProjectCompileLogService';
+import { ProjectDbtSourcesService } from './ProjectDbtSourcesService';
 import { ProjectParametersService } from './ProjectParametersService';
 import { ProjectService } from './ProjectService/ProjectService';
 import { PromoteService } from './PromoteService/PromoteService';
@@ -141,10 +142,12 @@ interface ServiceManifest {
     asyncQueryService: AsyncQueryService;
     renameService: RenameService;
     projectParametersService: ProjectParametersService;
+    projectDbtSourcesService: ProjectDbtSourcesService;
     projectCompileLogService: ProjectCompileLogService;
     permissionsService: PermissionsService;
     /** An implementation signature for these services are not available at this stage */
     aiWritebackService: unknown;
+    aiAgentReviewNotificationService: unknown;
     writebackPreviewService: unknown;
     previewDeploySetupService: unknown;
     appGenerateService: unknown;
@@ -157,6 +160,7 @@ interface ServiceManifest {
     aiAgentReviewClassifierService: unknown;
     aiRouterService: unknown;
     aiOrganizationSettingsService: unknown;
+    schedulerAiAugmentationService: unknown;
     projectContextService: unknown;
     scimService: unknown;
     supportService: unknown;
@@ -764,6 +768,8 @@ export class ServiceRepository
                     lightdashConfig: this.context.lightdashConfig,
                     analytics: this.context.lightdashAnalytics,
                     projectModel: this.models.getProjectModel(),
+                    projectDbtSourcesModel:
+                        this.models.getProjectDbtSourcesModel(),
                     preAggregateModel: this.models.getPreAggregateModel(),
                     onboardingModel: this.models.getOnboardingModel(),
                     savedChartModel: this.models.getSavedChartModel(),
@@ -829,6 +835,8 @@ export class ServiceRepository
                     lightdashConfig: this.context.lightdashConfig,
                     analytics: this.context.lightdashAnalytics,
                     projectModel: this.models.getProjectModel(),
+                    projectDbtSourcesModel:
+                        this.models.getProjectDbtSourcesModel(),
                     preAggregateModel: this.models.getPreAggregateModel(),
                     onboardingModel: this.models.getOnboardingModel(),
                     savedChartModel: this.models.getSavedChartModel(),
@@ -871,6 +879,8 @@ export class ServiceRepository
                     permissionsService: this.getPermissionsService(),
                     persistentDownloadFileService:
                         this.getPersistentDownloadFileService(),
+                    organizationAccessService:
+                        this.getOrganizationAccessService(),
                     projectCompileLogModel:
                         this.models.getProjectCompileLogModel(),
                     adminNotificationService:
@@ -1093,6 +1103,7 @@ export class ServiceRepository
                         this.models.getWarehouseAvailableTablesModel(),
                     projectModel: this.models.getProjectModel(),
                     featureFlagModel: this.models.getFeatureFlagModel(),
+                    userAvatarModel: this.models.getUserAvatarModel(),
                 }),
         );
     }
@@ -1386,6 +1397,12 @@ export class ServiceRepository
         return this.getService('aiOrganizationSettingsService');
     }
 
+    public getSchedulerAiAugmentationService<
+        SchedulerAiAugmentationServiceImplT,
+    >(): SchedulerAiAugmentationServiceImplT {
+        return this.getService('schedulerAiAugmentationService');
+    }
+
     public getAiAgentDocumentService<
         AiAgentDocumentServiceImplT,
     >(): AiAgentDocumentServiceImplT {
@@ -1396,6 +1413,12 @@ export class ServiceRepository
         AiAgentReviewClassifierServiceImplT,
     >(): AiAgentReviewClassifierServiceImplT {
         return this.getService('aiAgentReviewClassifierService');
+    }
+
+    public getAiAgentReviewNotificationService<
+        AiAgentReviewNotificationServiceImplT,
+    >(): AiAgentReviewNotificationServiceImplT {
+        return this.getService('aiAgentReviewNotificationService');
     }
 
     public getAiRouterService<AiRouterServiceImplT>(): AiRouterServiceImplT {
@@ -1502,6 +1525,20 @@ export class ServiceRepository
                     projectParametersModel:
                         this.models.getProjectParametersModel(),
                     projectModel: this.models.getProjectModel(),
+                }),
+        );
+    }
+
+    public getProjectDbtSourcesService(): ProjectDbtSourcesService {
+        return this.getService(
+            'projectDbtSourcesService',
+            () =>
+                new ProjectDbtSourcesService({
+                    lightdashConfig: this.context.lightdashConfig,
+                    analytics: this.context.lightdashAnalytics,
+                    projectModel: this.models.getProjectModel(),
+                    projectDbtSourcesModel:
+                        this.models.getProjectDbtSourcesModel(),
                 }),
         );
     }

@@ -1,9 +1,9 @@
 import { AgentToolOutput, Explore } from '@lightdash/common';
 import {
+    hasToolCall,
     smoothStream,
     stepCountIs,
     streamText,
-    tool,
     type CallSettings,
     type LanguageModel,
     type ModelMessage,
@@ -12,13 +12,14 @@ import {
 import Logger from '../../../../../logging/logger';
 import { getFindExplores } from '../../tools/findExplores';
 import { getFindFields } from '../../tools/findFields';
+import { getSubmitDiscoverFieldsResult } from '../../tools/submitDiscoverFieldsResult';
 import type { AiAgentArgs, AiAgentDependencies } from '../../types/aiAgent';
 import { AgentContext } from '../../utils/AgentContext';
 import { getAgentTelemetryConfig } from '../telemetry';
-import { DiscoverFieldsInput, discoverFieldsResultSchema } from './schema';
+import type { DiscoverFieldsInput } from './schema';
 import { getDiscoverFieldsSystemPrompt } from './systemPrompt';
 
-const SUBAGENT_STEP_CAP = 15;
+const SUBAGENT_STEP_CAP = 50;
 
 const SUBAGENT_PERSISTED_TOOL_NAMES = ['findExplores', 'findFields'] as const;
 type SubagentPersistedToolName = (typeof SUBAGENT_PERSISTED_TOOL_NAMES)[number];
@@ -45,6 +46,7 @@ export type DiscoverFieldsAgentArgs = {
     providerOptions: AiAgentArgs['providerOptions'];
     findExploresFieldSearchSize: number;
     findFieldsPageSize: number;
+    toolDescriptionMaxChars: number;
     abortSignal?: AbortSignal;
     promptUuid: string;
     parentToolCallId: string;
@@ -53,30 +55,17 @@ export type DiscoverFieldsAgentArgs = {
         | 'agentSettings'
         | 'threadUuid'
         | 'promptUuid'
+        | 'organizationId'
+        | 'userId'
         | 'telemetryEnabled'
         | 'model'
     >;
 };
 
-/**
- * Internal tool the subagent must call as its FINAL step. Its inputSchema
- * IS `discoverFieldsResultSchema`, so AI SDK validates the handoff payload
- * at the tool-call boundary — there's no free-form JSON to parse and no
- * fence stripping. If validation fails, the model gets a tool-call error
- * and retries (or hits the step cap). The handoff is then extracted from
- * the tool call's `input` field after the stream completes.
- */
-const submitResult = tool({
-    description:
-        'Submit the final discovery handoff. Call this as your LAST step after deciding the explore + fields (or that the query is ambiguous / has no match). The arguments are returned to the parent agent verbatim.',
-    inputSchema: discoverFieldsResultSchema,
-    execute: async (input) => input,
-});
-
 export type DiscoverFieldsSubagentTools = {
     findExplores: ReturnType<typeof getFindExplores>;
     findFields: ReturnType<typeof getFindFields>;
-    submitResult: typeof submitResult;
+    submitResult: ReturnType<typeof getSubmitDiscoverFieldsResult>;
 };
 
 export type DiscoverFieldsAgentHandle = {
@@ -98,6 +87,7 @@ export const runDiscoverFieldsAgent = (
         fieldSearchSize: args.findExploresFieldSearchSize,
         findExplores: dependencies.findExplores,
         updateProgress: dependencies.updateProgress,
+        toolDescriptionMaxChars: args.toolDescriptionMaxChars,
     });
 
     const findFields = getFindFields({
@@ -105,7 +95,10 @@ export const runDiscoverFieldsAgent = (
         findFields: dependencies.findFields,
         updateProgress: dependencies.updateProgress,
         pageSize: args.findFieldsPageSize,
+        toolDescriptionMaxChars: args.toolDescriptionMaxChars,
     });
+
+    const submitResult = getSubmitDiscoverFieldsResult();
 
     const messages: ModelMessage[] = [
         getDiscoverFieldsSystemPrompt({
@@ -126,7 +119,7 @@ export const runDiscoverFieldsAgent = (
         providerOptions: args.providerOptions,
         tools: { findExplores, findFields, submitResult },
         toolChoice: 'auto',
-        stopWhen: stepCountIs(SUBAGENT_STEP_CAP),
+        stopWhen: [hasToolCall('submitResult'), stepCountIs(SUBAGENT_STEP_CAP)],
         messages,
         abortSignal: args.abortSignal,
         experimental_context: new AgentContext(args.availableExplores),
@@ -137,6 +130,7 @@ export const runDiscoverFieldsAgent = (
         experimental_telemetry: getAgentTelemetryConfig(
             'discoverFieldsSubagent',
             args.telemetry,
+            'agent-subtask',
         ),
         onChunk: ({ chunk }) => {
             if (chunk.type === 'tool-call') {

@@ -10,6 +10,13 @@ export const DEFAULT_OPENAI_EMBEDDING_MODEL = 'text-embedding-3-small';
 export const DEFAULT_AZURE_EMBEDDING_MODEL = 'text-embedding-3-small';
 export const DEFAULT_BEDROCK_EMBEDDING_MODEL = 'cohere.embed-english-v3';
 
+/**
+ * Caps tool-result descriptions to keep AI agent context windows under control.
+ * Oversized tool outputs accumulate across the agent loop and can exceed the
+ * model's context limit.
+ */
+export const DEFAULT_AI_TOOL_DESCRIPTION_MAX_CHARS = 600;
+
 const customHeadersSchema = z.record(z.string()).default({});
 
 // Capability of the gateway/endpoint the provider points at, not a feature
@@ -144,6 +151,12 @@ export const aiCopilotConfigSchema = z
             .max(1)
             .default(0.6),
         mcpConnectionTimeoutMs: z.number().positive().default(20_000),
+        mcpAllowPrivateAddresses: z.boolean().default(false),
+        toolDescriptionMaxChars: z
+            .number()
+            .int()
+            .positive()
+            .default(DEFAULT_AI_TOOL_DESCRIPTION_MAX_CHARS),
     })
     .refine(
         ({ providers, defaultProvider, enabled }) =>

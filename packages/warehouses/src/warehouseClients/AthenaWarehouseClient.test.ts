@@ -1,3 +1,4 @@
+/* eslint-disable prefer-arrow-callback, func-names */
 import {
     AthenaAuthenticationType,
     CreateAthenaCredentials,
@@ -7,15 +8,21 @@ import {
     WarehouseTypes,
 } from '@lightdash/common';
 
-const mockAthenaClient = jest.fn();
-jest.mock('@aws-sdk/client-athena', () => ({
-    ...jest.requireActual('@aws-sdk/client-athena'),
+const { mockAthenaClient } = vi.hoisted(() => ({
+    mockAthenaClient: vi.fn(),
+}));
+vi.mock('@aws-sdk/client-athena', async () => ({
+    ...(await vi.importActual<typeof import('@aws-sdk/client-athena')>(
+        '@aws-sdk/client-athena',
+    )),
     AthenaClient: mockAthenaClient,
 }));
 
-const mockFromTemporaryCredentials = jest.fn(() => 'sts-credentials');
+const { mockFromTemporaryCredentials } = vi.hoisted(() => ({
+    mockFromTemporaryCredentials: vi.fn(() => 'sts-credentials'),
+}));
 
-jest.mock('@aws-sdk/credential-providers', () => ({
+vi.mock('@aws-sdk/credential-providers', () => ({
     fromTemporaryCredentials: mockFromTemporaryCredentials,
 }));
 
@@ -51,8 +58,10 @@ describe('convertDataTypeToDimensionType', () => {
 
 describe('AthenaWarehouseClient', () => {
     beforeEach(() => {
-        jest.clearAllMocks();
-        mockAthenaClient.mockImplementation(() => ({}));
+        vi.clearAllMocks();
+        mockAthenaClient.mockImplementation(function () {
+            return {};
+        });
     });
 
     describe('authentication', () => {
@@ -65,6 +74,26 @@ describe('AthenaWarehouseClient', () => {
                 credentials: {
                     accessKeyId: 'AKID',
                     secretAccessKey: 'SECRET',
+                },
+            });
+        });
+
+        test('should forward sessionToken for temporary STS credentials', () => {
+            const creds: CreateAthenaCredentials = {
+                ...baseCredentials,
+                accessKeyId: 'ASIATEST',
+                secretAccessKey: 'SECRET',
+                sessionToken: 'SESSIONTOKEN',
+            };
+            // eslint-disable-next-line no-new
+            new AthenaWarehouseClient(creds);
+
+            expect(mockAthenaClient).toHaveBeenCalledWith({
+                region: 'us-east-1',
+                credentials: {
+                    accessKeyId: 'ASIATEST',
+                    secretAccessKey: 'SECRET',
+                    sessionToken: 'SESSIONTOKEN',
                 },
             });
         });
@@ -107,6 +136,31 @@ describe('AthenaWarehouseClient', () => {
             expect(mockAthenaClient).toHaveBeenCalledWith({
                 region: 'us-east-1',
                 credentials: 'sts-credentials',
+            });
+        });
+
+        test('should chain assume role using temporary credentials (sessionToken in masterCredentials)', () => {
+            const creds: CreateAthenaCredentials = {
+                ...baseCredentials,
+                accessKeyId: 'ASIATEST',
+                secretAccessKey: 'SECRET',
+                sessionToken: 'SESSIONTOKEN',
+                assumeRoleArn: 'arn:aws:iam::123456789012:role/my-role',
+            };
+            // eslint-disable-next-line no-new
+            new AthenaWarehouseClient(creds);
+
+            expect(mockFromTemporaryCredentials).toHaveBeenCalledWith({
+                masterCredentials: {
+                    accessKeyId: 'ASIATEST',
+                    secretAccessKey: 'SECRET',
+                    sessionToken: 'SESSIONTOKEN',
+                },
+                params: {
+                    RoleArn: 'arn:aws:iam::123456789012:role/my-role',
+                    RoleSessionName: 'lightdash-athena-session',
+                    ExternalId: undefined,
+                },
             });
         });
 
@@ -161,9 +215,9 @@ describe('AthenaWarehouseClient', () => {
         };
 
         const setMockSendToReject = (error: Error) => {
-            mockAthenaClient.mockImplementation(() => ({
-                send: jest.fn().mockRejectedValue(error),
-            }));
+            mockAthenaClient.mockImplementation(function () {
+                return { send: vi.fn().mockRejectedValue(error) };
+            });
         };
 
         test('translates UnrecognizedClientException into WarehouseConnectionError with hint', async () => {

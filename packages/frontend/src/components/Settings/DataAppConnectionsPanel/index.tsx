@@ -1,14 +1,15 @@
 import { type ExternalConnection } from '@lightdash/common';
 import { Button, Group, Skeleton, Stack, Text, Title } from '@mantine-8/core';
 import { IconPlug, IconPlus } from '@tabler/icons-react';
-import { type FC, useState } from 'react';
+import { useCallback, useState, type FC } from 'react';
+import { useSearchParams } from 'react-router';
 import { useExternalConnections } from '../../../features/externalConnections/hooks/useExternalConnections';
+import Callout from '../../common/Callout';
 import { EmptyState } from '../../common/EmptyState';
 import MantineIcon from '../../common/MantineIcon';
 import { SettingsCard } from '../../common/Settings/SettingsCard';
-import { ConnectionDrawer } from './ConnectionDrawer';
+import { AddConnectionWizard } from './AddConnectionWizard';
 import { ConnectionsTable } from './ConnectionsTable';
-import { CreateConnectionModal } from './CreateConnectionModal';
 import { DeleteConnectionModal } from './DeleteConnectionModal';
 import { EditConnectionModal } from './EditConnectionModal';
 
@@ -19,15 +20,25 @@ type Props = {
 const DataAppConnectionsPanel: FC<Props> = ({ projectUuid }) => {
     const { data: connections, isLoading } =
         useExternalConnections(projectUuid);
-    const [isCreating, setIsCreating] = useState(false);
+    // Deep-link support: the builder's connection picker links here with
+    // `?create=1` to open the wizard straight away.
+    const [searchParams, setSearchParams] = useSearchParams();
+    const [isCreating, setIsCreating] = useState(
+        () => searchParams.get('create') === '1',
+    );
+    const closeCreate = useCallback(() => {
+        setIsCreating(false);
+        if (searchParams.has('create')) {
+            searchParams.delete('create');
+            setSearchParams(searchParams, { replace: true });
+        }
+    }, [searchParams, setSearchParams]);
     const [connectionToEdit, setConnectionToEdit] = useState<
         ExternalConnection | undefined
     >(undefined);
     const [connectionToDelete, setConnectionToDelete] = useState<
         ExternalConnection | undefined
     >(undefined);
-    const [drawerConnection, setDrawerConnection] =
-        useState<ExternalConnection | null>(null);
 
     return (
         <>
@@ -55,6 +66,16 @@ const DataAppConnectionsPanel: FC<Props> = ({ projectUuid }) => {
                             </Button>
                         </Group>
 
+                        <Callout
+                            variant="warning"
+                            title="Data leaves Lightdash"
+                        >
+                            Apps linked to a connection can send any data they
+                            can query to that connection&apos;s external host.
+                            Only add connections to hosts you trust with this
+                            project&apos;s data.
+                        </Callout>
+
                         {isLoading ? (
                             <Stack gap="xs">
                                 <Skeleton height={48} />
@@ -65,7 +86,6 @@ const DataAppConnectionsPanel: FC<Props> = ({ projectUuid }) => {
                                 connections={connections}
                                 setConnectionToEdit={setConnectionToEdit}
                                 setConnectionToDelete={setConnectionToDelete}
-                                onSelectConnection={setDrawerConnection}
                             />
                         ) : (
                             <EmptyState
@@ -87,16 +107,10 @@ const DataAppConnectionsPanel: FC<Props> = ({ projectUuid }) => {
                 </SettingsCard>
             </Stack>
 
-            <ConnectionDrawer
-                projectUuid={projectUuid}
-                connection={drawerConnection}
-                onClose={() => setDrawerConnection(null)}
-            />
-
             {isCreating && (
-                <CreateConnectionModal
+                <AddConnectionWizard
                     opened={isCreating}
-                    onClose={() => setIsCreating(false)}
+                    onClose={closeCreate}
                     projectUuid={projectUuid}
                 />
             )}

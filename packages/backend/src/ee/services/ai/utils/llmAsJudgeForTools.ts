@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { DbAiAgentToolCall } from '../../../database/entities/ai';
 import { defaultAgentOptions } from '../agents/agentV2';
 import { getOpenaiGptmodel } from '../models/openai-gpt';
+import { getAiCallTelemetry } from './aiCallTelemetry';
 
 const TOOL_NAME_TO_DB_TOOL_NAME = {
     findExplores: 'find_explores',
@@ -17,6 +18,8 @@ const TOOL_NAME_TO_DB_TOOL_NAME = {
     searchSemanticLayer: 'search_semantic_layer',
     analyzeFieldImpact: 'analyze_field_impact',
     discoverFields: 'discover_fields',
+    grepFields: 'grep_fields',
+    getMetadata: 'get_metadata',
     searchFieldValues: 'search_field_values',
     findContent: 'find_content',
     listContent: 'list_content',
@@ -282,6 +285,10 @@ export const evaluateToolCallSequence = async (
         model: judge,
         ...defaultAgentOptions,
         ...callOptions,
+        experimental_telemetry: getAiCallTelemetry({
+            functionId: 'evaluateToolCallSequence',
+            feature: 'llm-judge',
+        }),
         schema: toolEvaluationSchema,
         prompt: `
 You are evaluating AI agent tool usage for business logic testing. Here is the data:

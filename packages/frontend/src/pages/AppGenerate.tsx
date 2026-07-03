@@ -1,11 +1,9 @@
 import { subject } from '@casl/ability';
 import {
     ChartKind,
-    ContentType,
     DEFAULT_DATA_APP_CLAUDE_MODEL,
     FeatureFlags,
     isAppVersionInProgress,
-    ResourceViewItemType,
     type ApiAppVersionSummary,
     type AppChartReference,
     type AppClarification,
@@ -13,6 +11,7 @@ import {
     type AppExternalConnectionReference,
     type DataAppClaudeModel,
     type DataAppTemplate,
+    type DataAppVizContext,
 } from '@lightdash/common';
 import {
     ActionIcon,
@@ -26,7 +25,6 @@ import {
     Stack,
     Text,
     Textarea,
-    Title,
     Tooltip,
 } from '@mantine-8/core';
 import {
@@ -34,26 +32,17 @@ import {
     IconAppWindow,
     IconCheck,
     IconArrowUp,
-    IconCopy,
-    IconDatabase,
-    IconDatabaseExport,
     IconBrush,
-    IconDots,
     IconExternalLink,
     IconArrowBackUp,
-    IconFolderPlus,
-    IconFolderSymlink,
-    IconPencil,
     IconLayoutDashboard,
+    IconLink,
     IconPlayerStop,
-    IconRefresh,
     IconRestore,
-    IconTrash,
     IconPlugConnected,
     IconX,
 } from '@tabler/icons-react';
 import { useQueryClient } from '@tanstack/react-query';
-import ReactMarkdownPreview from '@uiw/react-markdown-preview';
 import {
     forwardRef,
     useCallback,
@@ -73,17 +62,16 @@ import {
     useParams,
 } from 'react-router';
 import { v4 as uuid4 } from 'uuid';
+import { AiMarkdown } from '../components/common/AiMarkdown';
 import Callout from '../components/common/Callout';
 import MantineIcon from '../components/common/MantineIcon';
 import MantineModal from '../components/common/MantineModal';
-import AppDeleteModal from '../components/common/modal/AppDeleteModal';
-import AppUpdateModal from '../components/common/modal/AppUpdateModal';
 import { getChartIcon } from '../components/common/ResourceIcon/utils';
 import SuboptimalState from '../components/common/SuboptimalState/SuboptimalState';
-import TransferItemsModal from '../components/common/TransferItemsModal/TransferItemsModal';
 import AppIframePreview, {
     type AppIframePreviewHandle,
 } from '../features/apps/AppIframePreview';
+import AppInspectorPanel from '../features/apps/AppInspectorPanel';
 import AppPromptEditor, {
     type AppPromptEditorHandle,
     type ElementRef,
@@ -103,23 +91,30 @@ import {
 import AppTemplatePicker from '../features/apps/AppTemplatePicker';
 import ChatBubbleMeta from '../features/apps/ChatBubbleMeta';
 import ChatMessageContent from '../features/apps/ChatMessageContent';
-import { PromoteAppModal } from '../features/apps/components/PromoteAppModal';
+import AppHeader from '../features/apps/components/AppHeader';
+import AppHeaderActions from '../features/apps/components/AppHeaderActions';
+import AppSpaceChip from '../features/apps/components/AppSpaceChip';
+import DataAppVizResultCard from '../features/apps/components/DataAppVizResultCard';
+import DataAppVizTestPanel from '../features/apps/components/DataAppVizTestPanel';
 import { useAppBuildPoller } from '../features/apps/hooks/useAppBuildPoller';
 import { useAppImageUpload } from '../features/apps/hooks/useAppImageUpload';
 import { useAppImageUrl } from '../features/apps/hooks/useAppImageUrl';
 import { useAppPreviewToken } from '../features/apps/hooks/useAppPreviewToken';
-import type { QueryEvent } from '../features/apps/hooks/useAppSdkBridge';
+import type {
+    ExternalRequestEvent,
+    QueryEvent,
+} from '../features/apps/hooks/useAppSdkBridge';
+import { useAppThumbnailUpload } from '../features/apps/hooks/useAppThumbnail';
 import { useBuildNotification } from '../features/apps/hooks/useBuildNotification';
 import { useCancelAppVersion } from '../features/apps/hooks/useCancelAppVersion';
 import { useClarifyApp } from '../features/apps/hooks/useClarifyApp';
-import { useDuplicateApp } from '../features/apps/hooks/useDuplicateApp';
 import { useGenerateApp } from '../features/apps/hooks/useGenerateApp';
 import { useGetApp } from '../features/apps/hooks/useGetApp';
 import { useIterateApp } from '../features/apps/hooks/useIterateApp';
 import { useRestoreAppVersion } from '../features/apps/hooks/useRestoreAppVersion';
 import { useTrackedAppQueries } from '../features/apps/hooks/useTrackedAppQueries';
+import { useTrackedExternalRequests } from '../features/apps/hooks/useTrackedExternalRequests';
 import { usePreviewOrigin } from '../features/apps/previewOrigin';
-import QueryInspector from '../features/apps/QueryInspector';
 import { getTemplate } from '../features/apps/templates';
 import {
     mergeChatMessages,
@@ -131,8 +126,6 @@ import { useAppExternalConnections } from '../features/externalConnections/hooks
 import { ThemePicker } from '../features/organizationDesigns/components/ThemePicker';
 import { useOrganizationDesigns } from '../features/organizationDesigns/hooks/useOrganizationDesigns';
 import useToaster from '../hooks/toaster/useToaster';
-import { useContentAction } from '../hooks/useContent';
-import { useProject } from '../hooks/useProject';
 import { useServerFeatureFlag } from '../hooks/useServerOrClientFeatureFlag';
 import { useSpaceSummaries } from '../hooks/useSpaces';
 import { useAbilityContext } from '../providers/Ability/useAbilityContext';
@@ -201,11 +194,18 @@ type AppPreviewProps = {
      *  refresh button so a manual refresh always re-runs against the warehouse. */
     invalidateCache?: boolean;
     onQueryEvent?: (event: QueryEvent) => void;
+    onExternalRequestEvent?: (event: ExternalRequestEvent) => void;
     inspectorEnabled?: boolean;
     onElementSelected?: (event: { label: string }) => void;
     onInspectorAvailabilityChange?: (available: boolean) => void;
     onScreenshotAvailabilityChange?: (available: boolean) => void;
     onInspectorCancelled?: () => void;
+    lineageEnabled?: boolean;
+    onLineageAvailabilityChange?: (available: boolean) => void;
+    onLineageSelected?: (event: { queryUuid: string }) => void;
+    lineageHighlightQueryUuid?: string | null;
+    onLineageCancelled?: () => void;
+    dataAppVizContext?: DataAppVizContext;
 };
 
 const AppPreview = forwardRef<AppIframePreviewHandle, AppPreviewProps>(
@@ -217,11 +217,18 @@ const AppPreview = forwardRef<AppIframePreviewHandle, AppPreviewProps>(
             refreshKey,
             invalidateCache,
             onQueryEvent,
+            onExternalRequestEvent,
             inspectorEnabled,
             onElementSelected,
             onInspectorAvailabilityChange,
             onScreenshotAvailabilityChange,
             onInspectorCancelled,
+            lineageEnabled,
+            onLineageAvailabilityChange,
+            onLineageSelected,
+            lineageHighlightQueryUuid,
+            onLineageCancelled,
+            dataAppVizContext,
         },
         ref,
     ) => {
@@ -268,12 +275,19 @@ const AppPreview = forwardRef<AppIframePreviewHandle, AppPreviewProps>(
                 identityKey={appUuid}
                 invalidateCache={invalidateCache}
                 onQueryEvent={onQueryEvent}
+                onExternalRequestEvent={onExternalRequestEvent}
                 inspectorEnabled={inspectorEnabled}
                 onElementSelected={onElementSelected}
                 onInspectorAvailabilityChange={onInspectorAvailabilityChange}
                 onScreenshotAvailabilityChange={onScreenshotAvailabilityChange}
                 onInspectorCancelled={onInspectorCancelled}
+                lineageEnabled={lineageEnabled}
+                onLineageAvailabilityChange={onLineageAvailabilityChange}
+                onLineageSelected={onLineageSelected}
+                lineageHighlightQueryUuid={lineageHighlightQueryUuid}
+                onLineageCancelled={onLineageCancelled}
                 capabilities={{ gsheetExport: true }}
+                dataAppVizContext={dataAppVizContext}
             />
         );
     },
@@ -508,6 +522,14 @@ const AppGenerate: FC = () => {
     // Screenshot button stays hidden — they keep working as before.
     const [screenshotAvailable, setScreenshotAvailable] = useState(false);
     const [isCapturingScreenshot, setIsCapturingScreenshot] = useState(false);
+    const [lineageEnabled, setLineageEnabled] = useState(false);
+    const [lineageAvailable, setLineageAvailable] = useState(false);
+    const [hoveredQueryUuid, setHoveredQueryUuid] = useState<string | null>(
+        null,
+    );
+    const [focusedQueryUuid, setFocusedQueryUuid] = useState<string | null>(
+        null,
+    );
     const previewRef = useRef<AppIframePreviewHandle>(null);
     const {
         queries: trackedQueries,
@@ -517,11 +539,17 @@ const AppGenerate: FC = () => {
         clearQueries,
         interruptInFlightQueries,
     } = useTrackedAppQueries();
+    const {
+        externalRequests,
+        handleExternalRequestEvent,
+        clearExternalRequests,
+        interruptInFlightRequests,
+    } = useTrackedExternalRequests();
     // Parent-owned visibility so the X dismisses the panel completely and the
     // user re-opens it from the dots menu — same model as preview, for
     // consistency. Defaults to visible because the builder is the technical
     // workflow where seeing queries as they fire is the point.
-    const [queriesPanelHidden, setQueriesPanelHidden] = useState(false);
+    const [networkPanelHidden, setNetworkPanelHidden] = useState(false);
     const handleElementSelected = useCallback((event: { label: string }) => {
         const ref = parseElementRefLabel(event.label);
         if (!ref) {
@@ -537,6 +565,31 @@ const AppGenerate: FC = () => {
     // every render of this page.
     const handleInspectorCancelled = useCallback(() => {
         setInspectorEnabled(false);
+    }, []);
+    const handleLineageSelected = useCallback(
+        (event: { queryUuid: string }) => {
+            setNetworkPanelHidden(false);
+            // Selection persists (row highlight + in-app element outline);
+            // re-clicking the selected element deselects it.
+            setFocusedQueryUuid((prev) =>
+                prev === event.queryUuid ? null : event.queryUuid,
+            );
+        },
+        [],
+    );
+
+    const handleLineageCancelled = useCallback(() => {
+        setLineageEnabled(false);
+        setFocusedQueryUuid(null);
+    }, []);
+
+    const handleToggleLineage = useCallback(() => {
+        setLineageEnabled((v) => {
+            const next = !v;
+            if (next) setInspectorEnabled(false);
+            return next;
+        });
+        setFocusedQueryUuid(null);
     }, []);
     const [localMessages, setLocalMessages] = useState<ChatMessage[]>([]);
     // Pre-build clarification round: captured submission args that we need
@@ -589,6 +642,19 @@ const AppGenerate: FC = () => {
     const availableConnectionAliases = availableConnectionLinks.map(
         (l) => l.alias,
     );
+    const invalidateAppData = useCallback(
+        (appUuid: string | undefined) => {
+            if (!projectUuid || !appUuid) return;
+
+            void queryClient.invalidateQueries({
+                queryKey: ['app', projectUuid, appUuid],
+            });
+            void queryClient.invalidateQueries({
+                queryKey: ['app-external-connections', projectUuid, appUuid],
+            });
+        },
+        [projectUuid, queryClient],
+    );
     // Track the previous app UUID so we can detect intentional navigation
     // vs. the post-submit URL update (undefined → newUuid).
     const prevUrlAppUuid = useRef(urlAppUuid);
@@ -602,21 +668,27 @@ const AppGenerate: FC = () => {
         setLocalMessages([]);
         setPin(null);
         clearQueries();
+        clearExternalRequests();
         setInspectorEnabled(false);
         setInspectorAvailable(false);
         setScreenshotAvailable(false);
         setIsCapturingScreenshot(false);
+        setLineageEnabled(false);
+        setLineageAvailable(false);
+        setHoveredQueryUuid(null);
+        setFocusedQueryUuid(null);
         setSelectedTemplate(null);
         setThemeChipOverride(null);
         setPendingClarification(null);
         setClarificationAnswers([]);
+        setTestVizContext(null);
         versionCacheRef.current.clear();
         versionCacheAppRef.current = undefined;
         sentImagesByPrompt.current.forEach((urls) =>
             urls.forEach((url) => URL.revokeObjectURL(url)),
         );
         sentImagesByPrompt.current.clear();
-    }, [clearQueries]);
+    }, [clearQueries, clearExternalRequests]);
     useEffect(() => {
         const prev = prevUrlAppUuid.current;
         prevUrlAppUuid.current = urlAppUuid;
@@ -642,8 +714,6 @@ const AppGenerate: FC = () => {
         useClarifyApp();
     const { mutate: cancelMutate, isLoading: isCancelling } =
         useCancelAppVersion();
-    const { mutate: duplicateMutate, isLoading: isDuplicating } =
-        useDuplicateApp();
     const {
         mutate: restoreVersionMutate,
         isLoading: isRestoringVersion,
@@ -658,6 +728,7 @@ const AppGenerate: FC = () => {
     >(null);
     const { mutateAsync: uploadImage } = useAppImageUpload();
     const { showToastError, showToastWarning } = useToaster();
+    const { mutateAsync: uploadThumbnail } = useAppThumbnailUpload();
     const dataAppsFlag = useServerFeatureFlag(FeatureFlags.EnableDataApps);
     const { user } = useApp();
     const ability = useAbilityContext();
@@ -677,23 +748,13 @@ const AppGenerate: FC = () => {
     const appName = appData?.pages?.[0]?.name ?? '';
     const appDescription = appData?.pages?.[0]?.description ?? '';
     const appSpaceUuid = appData?.pages?.[0]?.spaceUuid ?? null;
+    const appSpaceName = appData?.pages?.[0]?.spaceName ?? null;
     const appCreatedByUserUuid = appData?.pages?.[0]?.createdByUserUuid ?? null;
     const appPersistedTemplate = appData?.pages?.[0]?.template ?? null;
 
     // Used to resolve the user's space role when checking manage rights for
     // an existing app — space editors/admins inherit manage on its data app.
     const { data: spaces = [] } = useSpaceSummaries(projectUuid, true, {});
-
-    const [isMoveToSpaceOpen, setIsMoveToSpaceOpen] = useState(false);
-    const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
-    const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
-    const [isPromoteModalOpen, setIsPromoteModalOpen] = useState(false);
-
-    // Promotion is only offered from a preview project linked to an upstream.
-    const { data: project } = useProject(projectUuid);
-    const isPreviewProject = !!project?.upstreamProjectUuid;
-    const { mutateAsync: contentAction, isLoading: isMovingToSpace } =
-        useContentAction(projectUuid);
 
     // Accumulate all versions ever seen in this session. Refetches may lose
     // older versions when new ones shift pagination boundaries, but we keep
@@ -764,6 +825,7 @@ const AppGenerate: FC = () => {
                     name: c.chartName,
                     uuid: c.chartUuid,
                     chartKind: undefined,
+                    linkLive: c.linkLive,
                 })) ?? [];
             const charts =
                 serverCharts.length > 0
@@ -811,6 +873,7 @@ const AppGenerate: FC = () => {
                     version: null,
                     timestamp: new Date(v.createdAt),
                     userName: authorName,
+                    vizSchema: null,
                 },
             ];
             if (v.status === 'ready') {
@@ -831,11 +894,13 @@ const AppGenerate: FC = () => {
                     version: v.version,
                     timestamp: new Date(replyTimestamp),
                     userName: null,
+                    vizSchema: v.resources?.vizSchema ?? null,
                 });
             } else if (v.status === 'error') {
                 msgs.push({
                     role: 'assistant',
                     content:
+                        v.error ??
                         v.statusMessage ??
                         'Generation failed. Please try again.',
                     imagePreviewUrls: [],
@@ -848,6 +913,7 @@ const AppGenerate: FC = () => {
                     version: null,
                     timestamp: new Date(replyTimestamp),
                     userName: null,
+                    vizSchema: null,
                 });
             }
             // 'building' status is not rendered as a history message —
@@ -1015,6 +1081,7 @@ const AppGenerate: FC = () => {
                         [user.data?.firstName, user.data?.lastName]
                             .filter((s): s is string => !!s && s.length > 0)
                             .join(' ') || null,
+                    vizSchema: null,
                     submittedAtVersion: maxHistoryVersion,
                 },
             ]);
@@ -1031,9 +1098,7 @@ const AppGenerate: FC = () => {
                 {
                     onSuccess: (data: { appUuid: string; version: number }) => {
                         setActiveAppUuid(data.appUuid);
-                        void queryClient.invalidateQueries({
-                            queryKey: ['app', projectUuid, data.appUuid],
-                        });
+                        invalidateAppData(data.appUuid);
                     },
                     onError: (err: unknown) => {
                         setThemeChipOverride(null);
@@ -1055,6 +1120,7 @@ const AppGenerate: FC = () => {
                                 version: null,
                                 timestamp: new Date(),
                                 userName: null,
+                                vizSchema: null,
                             },
                         ]);
                     },
@@ -1070,7 +1136,7 @@ const AppGenerate: FC = () => {
             maxHistoryVersion,
             orgThemes,
             projectUuid,
-            queryClient,
+            invalidateAppData,
             resetIterate,
             selectedModel,
             user.data?.firstName,
@@ -1193,14 +1259,18 @@ const AppGenerate: FC = () => {
         if (prev === null) return; // Initial render — nothing to clean up.
         if (persistLogs) {
             interruptInFlightQueries();
+            interruptInFlightRequests();
         } else {
             clearQueries();
+            clearExternalRequests();
         }
     }, [
         previewApp?.version,
         persistLogs,
         interruptInFlightQueries,
         clearQueries,
+        interruptInFlightRequests,
+        clearExternalRequests,
     ]);
 
     // Manual refresh counter for the preview iframe. The iframe URL embeds
@@ -1209,6 +1279,11 @@ const AppGenerate: FC = () => {
     // semantic-layer change and wants to see it reflected without waiting
     // on the in-progress code-gen iteration.
     const [previewRefreshKey, setPreviewRefreshKey] = useState(0);
+    // Set imperatively by the "test with data" panel (later task) when the
+    // user runs a query; pushed into the preview iframe so the generated
+    // data-app-viz renders with real result rows instead of mock data.
+    const [testVizContext, setTestVizContext] =
+        useState<DataAppVizContext | null>(null);
     // Latched on by the first manual refresh: a refresh means "show me fresh
     // data", so from then on the preview's queries bypass the warehouse cache.
     // Starts false so the initial load can still serve cached results fast.
@@ -1218,10 +1293,18 @@ const AppGenerate: FC = () => {
         setInvalidatePreviewCache(true);
         if (persistLogs) {
             interruptInFlightQueries();
+            interruptInFlightRequests();
         } else {
             clearQueries();
+            clearExternalRequests();
         }
-    }, [persistLogs, interruptInFlightQueries, clearQueries]);
+    }, [
+        persistLogs,
+        interruptInFlightQueries,
+        clearQueries,
+        interruptInFlightRequests,
+        clearExternalRequests,
+    ]);
 
     const scrollToBottom = useCallback(() => {
         // Scroll the chat container itself rather than calling scrollIntoView
@@ -1389,6 +1472,26 @@ const AppGenerate: FC = () => {
         setIsCapturingScreenshot(true);
         try {
             const file = await capture();
+            if (projectUuid && activeAppUuid) {
+                try {
+                    await uploadThumbnail({
+                        projectUuid,
+                        appUuid: activeAppUuid,
+                        file,
+                    });
+                    void queryClient.invalidateQueries({
+                        queryKey: ['app-thumbnail', projectUuid, activeAppUuid],
+                    });
+                } catch (err) {
+                    showToastWarning({
+                        title: 'Thumbnail not saved',
+                        subtitle:
+                            err instanceof Error
+                                ? err.message
+                                : 'Unknown error',
+                    });
+                }
+            }
             handleImageAttach(file, 'screenshot');
         } catch (err) {
             showToastError({
@@ -1403,9 +1506,7 @@ const AppGenerate: FC = () => {
     const buildSubmitCallbacks = () => ({
         onSuccess: (data: { appUuid: string; version: number }) => {
             setActiveAppUuid(data.appUuid);
-            void queryClient.invalidateQueries({
-                queryKey: ['app', projectUuid, data.appUuid],
-            });
+            invalidateAppData(data.appUuid);
             if (!urlAppUuid) {
                 void navigate(`/projects/${projectUuid}/apps/${data.appUuid}`, {
                     replace: true,
@@ -1431,6 +1532,7 @@ const AppGenerate: FC = () => {
                     version: null,
                     timestamp: new Date(),
                     userName: null,
+                    vizSchema: null,
                 },
             ]);
         },
@@ -1452,6 +1554,12 @@ const AppGenerate: FC = () => {
             setIsSubmitting(true);
         }
 
+        // Starter template selected in the picker, if any. `data_app_viz` is a
+        // template like the others — it flows through the same clarify + build
+        // path; the pipeline keys the viz behaviour off the app's stored template.
+        const starterTemplate: DataAppTemplate | undefined =
+            selectedTemplate ?? undefined;
+
         try {
             // Send structured chart refs (uuid + per-chart sample-data opt-in).
             // The backend resolves these server-side so the client never sees
@@ -1461,6 +1569,7 @@ const AppGenerate: FC = () => {
                     ? selectedCharts.map((c) => ({
                           uuid: c.uuid,
                           includeSampleData: c.includeSampleData,
+                          linkLive: c.linkLive,
                       }))
                     : undefined;
             const externalConnections:
@@ -1529,6 +1638,7 @@ const AppGenerate: FC = () => {
                 name: c.name,
                 uuid: c.uuid,
                 chartKind: c.chartKind,
+                linkLive: c.linkLive,
             }));
             if (sentCharts.length > 0) {
                 sentChartsByPrompt.current.set(trimmed, sentCharts);
@@ -1573,6 +1683,7 @@ const AppGenerate: FC = () => {
                         [user.data?.firstName, user.data?.lastName]
                             .filter((s): s is string => !!s && s.length > 0)
                             .join(' ') || null,
+                    vizSchema: null,
                     // Snapshot the highest server version known at submit time.
                     // Once history catches up past this number the optimistic
                     // bubble is dropped by `mergeChatMessages` — even if the
@@ -1602,7 +1713,7 @@ const AppGenerate: FC = () => {
                     const { questions } = await clarifyMutateAsync({
                         projectUuid: projectUuid!,
                         prompt: trimmed,
-                        template: selectedTemplate ?? undefined,
+                        template: starterTemplate,
                         charts,
                         dashboard,
                         imageIds,
@@ -1611,7 +1722,7 @@ const AppGenerate: FC = () => {
                         setPendingClarification({
                             questions,
                             prompt: trimmed,
-                            template: selectedTemplate ?? undefined,
+                            template: starterTemplate,
                             imageIds,
                             appUuid: newAppUuid,
                             charts,
@@ -1660,7 +1771,7 @@ const AppGenerate: FC = () => {
                     {
                         projectUuid,
                         prompt: trimmed,
-                        template: selectedTemplate ?? undefined,
+                        template: starterTemplate,
                         imageIds,
                         appUuid: newAppUuid,
                         charts,
@@ -1760,9 +1871,7 @@ const AppGenerate: FC = () => {
             },
             {
                 onSuccess: () => {
-                    void queryClient.invalidateQueries({
-                        queryKey: ['app', projectUuid, activeAppUuid],
-                    });
+                    invalidateAppData(activeAppUuid);
                 },
             },
         );
@@ -1932,6 +2041,17 @@ const AppGenerate: FC = () => {
                                                                                     chart.name
                                                                                 }
                                                                             </Text>
+                                                                            {chart.linkLive && (
+                                                                                <MantineIcon
+                                                                                    icon={
+                                                                                        IconLink
+                                                                                    }
+                                                                                    size={
+                                                                                        12
+                                                                                    }
+                                                                                    color="blue.6"
+                                                                                />
+                                                                            )}
                                                                         </Box>
                                                                     ),
                                                                 )}
@@ -2140,15 +2260,33 @@ const AppGenerate: FC = () => {
                                                                     : undefined
                                                             }
                                                         />
-                                                        {msg.appUuid ? (
-                                                            <ReactMarkdownPreview
-                                                                source={
-                                                                    msg.content
-                                                                }
-                                                                className={
-                                                                    classes.markdown
-                                                                }
-                                                            />
+                                                        {msg.vizSchema ? (
+                                                            msg.version !==
+                                                                null &&
+                                                            msg.version ===
+                                                                latestReadyVersion?.version ? (
+                                                                <DataAppVizTestPanel
+                                                                    projectUuid={
+                                                                        projectUuid
+                                                                    }
+                                                                    schema={
+                                                                        msg.vizSchema
+                                                                    }
+                                                                    onContextChange={
+                                                                        setTestVizContext
+                                                                    }
+                                                                />
+                                                            ) : (
+                                                                <DataAppVizResultCard
+                                                                    schema={
+                                                                        msg.vizSchema
+                                                                    }
+                                                                />
+                                                            )
+                                                        ) : msg.appUuid ? (
+                                                            <AiMarkdown>
+                                                                {msg.content}
+                                                            </AiMarkdown>
                                                         ) : (
                                                             <Text
                                                                 size="sm"
@@ -2268,11 +2406,10 @@ const AppGenerate: FC = () => {
                                                                 <LoadingDots />
                                                             </Text>
                                                         ) : latestBuildingVersion?.statusMessage ? (
-                                                            <ReactMarkdownPreview
-                                                                source={
-                                                                    latestBuildingVersion.statusMessage
+                                                            <AiMarkdown
+                                                                className={
+                                                                    classes.statusMarkdown
                                                                 }
-                                                                className={`${classes.markdown} ${classes.markdownDimmed} ${classes.markdownInline}`}
                                                                 components={{
                                                                     p: ({
                                                                         node: _node,
@@ -2289,7 +2426,11 @@ const AppGenerate: FC = () => {
                                                                         </p>
                                                                     ),
                                                                 }}
-                                                            />
+                                                            >
+                                                                {
+                                                                    latestBuildingVersion.statusMessage
+                                                                }
+                                                            </AiMarkdown>
                                                         ) : (
                                                             <Text
                                                                 size="sm"
@@ -2304,6 +2445,9 @@ const AppGenerate: FC = () => {
                                                             latestBuildingVersion?.status ===
                                                                 'generating' && (
                                                                 <Text
+                                                                    className={
+                                                                        classes.buildingHint
+                                                                    }
                                                                     fz={11}
                                                                     c="dimmed"
                                                                     mt={6}
@@ -2509,6 +2653,25 @@ const AppGenerate: FC = () => {
                                                                 ),
                                                         )
                                                     }
+                                                    onToggleLink={(uuid) =>
+                                                        setSelectedCharts(
+                                                            (prev) =>
+                                                                prev.map((c) =>
+                                                                    c.uuid ===
+                                                                    uuid
+                                                                        ? {
+                                                                              ...c,
+                                                                              linkLive:
+                                                                                  !c.linkLive,
+                                                                              includeSampleData:
+                                                                                  c.linkLive
+                                                                                      ? c.includeSampleData
+                                                                                      : false,
+                                                                          }
+                                                                        : c,
+                                                                ),
+                                                        )
+                                                    }
                                                     disabled={isLoading}
                                                 />
                                             )}
@@ -2677,11 +2840,20 @@ const AppGenerate: FC = () => {
                                             />
                                             <InspectButton
                                                 enabled={inspectorEnabled}
-                                                onToggle={() =>
-                                                    setInspectorEnabled(
-                                                        (v) => !v,
-                                                    )
-                                                }
+                                                onToggle={() => {
+                                                    setInspectorEnabled((v) => {
+                                                        const next = !v;
+                                                        if (next)
+                                                            setLineageEnabled(
+                                                                false,
+                                                            );
+                                                        return next;
+                                                    });
+                                                    // Entering inspector mode
+                                                    // force-disables lineage —
+                                                    // drop its selection too.
+                                                    setFocusedQueryUuid(null);
+                                                }}
                                                 disabled={!inspectorAvailable}
                                             />
                                             <ModelPicker
@@ -2753,210 +2925,15 @@ const AppGenerate: FC = () => {
                     <Panel minSize={40}>
                         <Box className={classes.previewPanel}>
                             {activeAppUuid && (
-                                <Box className={classes.previewHeader}>
-                                    <Box className={classes.previewHeaderInfo}>
-                                        <Title order={6} fw={600} lineClamp={1}>
-                                            {appName || 'Untitled app'}
-                                        </Title>
-                                        {appDescription && (
-                                            <Text
-                                                size="xs"
-                                                c="dimmed"
-                                                lineClamp={1}
-                                            >
-                                                {appDescription}
-                                            </Text>
-                                        )}
-                                    </Box>
-                                    <Tooltip
-                                        label="Refresh preview to re-run queries"
-                                        withArrow
-                                        position="bottom"
-                                    >
-                                        <ActionIcon
-                                            variant="subtle"
-                                            size="sm"
-                                            color="ldGray.6"
-                                            ml="auto"
-                                            disabled={!previewApp}
-                                            onClick={handleRefreshPreview}
-                                            aria-label="Refresh preview"
-                                        >
-                                            <MantineIcon
-                                                icon={IconRefresh}
-                                                size={16}
-                                            />
-                                        </ActionIcon>
-                                    </Tooltip>
-                                    <Menu
-                                        position="bottom-end"
-                                        shadow="md"
-                                        withinPortal
-                                        withArrow
-                                        arrowPosition="center"
-                                    >
-                                        <Menu.Target>
-                                            <ActionIcon
-                                                variant="subtle"
-                                                size="sm"
-                                                color="ldGray.6"
-                                                aria-label="App actions"
-                                            >
-                                                <MantineIcon
-                                                    icon={IconDots}
-                                                    size={16}
-                                                />
-                                            </ActionIcon>
-                                        </Menu.Target>
-                                        <Menu.Dropdown>
-                                            {previewApp && (
-                                                <Menu.Item
-                                                    component={Link}
-                                                    to={`/projects/${projectUuid}/apps/${previewApp.appUuid}/preview`}
-                                                    target="_blank"
-                                                    leftSection={
-                                                        <MantineIcon
-                                                            icon={
-                                                                IconExternalLink
-                                                            }
-                                                            size={14}
-                                                        />
-                                                    }
-                                                >
-                                                    Preview latest
-                                                </Menu.Item>
-                                            )}
-                                            <Menu.Item
-                                                leftSection={
-                                                    <MantineIcon
-                                                        icon={IconDatabase}
-                                                        size={14}
-                                                    />
-                                                }
-                                                onClick={() =>
-                                                    setQueriesPanelHidden(false)
-                                                }
-                                            >
-                                                View queries
-                                            </Menu.Item>
-                                            <Menu.Divider />
-                                            <Menu.Item
-                                                leftSection={
-                                                    <MantineIcon
-                                                        icon={IconCopy}
-                                                        size={14}
-                                                    />
-                                                }
-                                                disabled={
-                                                    isDuplicating ||
-                                                    !activeAppUuid
-                                                }
-                                                onClick={() => {
-                                                    if (!activeAppUuid) return;
-                                                    duplicateMutate(
-                                                        {
-                                                            projectUuid,
-                                                            appUuid:
-                                                                activeAppUuid,
-                                                        },
-                                                        {
-                                                            onSuccess: ({
-                                                                appUuid:
-                                                                    newAppUuid,
-                                                            }) => {
-                                                                void navigate(
-                                                                    `/projects/${projectUuid}/apps/${newAppUuid}`,
-                                                                );
-                                                            },
-                                                        },
-                                                    );
-                                                }}
-                                            >
-                                                Duplicate
-                                            </Menu.Item>
-                                            <Menu.Item
-                                                leftSection={
-                                                    <MantineIcon
-                                                        icon={IconPencil}
-                                                        size={14}
-                                                    />
-                                                }
-                                                onClick={() =>
-                                                    setIsUpdateModalOpen(true)
-                                                }
-                                            >
-                                                Rename
-                                            </Menu.Item>
-                                            <Menu.Item
-                                                leftSection={
-                                                    <MantineIcon
-                                                        icon={
-                                                            appSpaceUuid
-                                                                ? IconFolderSymlink
-                                                                : IconFolderPlus
-                                                        }
-                                                        size={14}
-                                                    />
-                                                }
-                                                onClick={() =>
-                                                    setIsMoveToSpaceOpen(true)
-                                                }
-                                            >
-                                                {appSpaceUuid
-                                                    ? 'Move to space'
-                                                    : 'Add to space'}
-                                            </Menu.Item>
-                                            {isPreviewProject &&
-                                                latestReadyVersion && (
-                                                    <Menu.Item
-                                                        leftSection={
-                                                            <MantineIcon
-                                                                icon={
-                                                                    IconDatabaseExport
-                                                                }
-                                                                size={14}
-                                                            />
-                                                        }
-                                                        disabled={
-                                                            !activeAppUuid
-                                                        }
-                                                        onClick={() =>
-                                                            setIsPromoteModalOpen(
-                                                                true,
-                                                            )
-                                                        }
-                                                    >
-                                                        Promote
-                                                    </Menu.Item>
-                                                )}
-                                            <Menu.Divider />
-                                            <Menu.Item
-                                                color="red"
-                                                leftSection={
-                                                    <MantineIcon
-                                                        icon={IconTrash}
-                                                        size={14}
-                                                    />
-                                                }
-                                                onClick={() =>
-                                                    setIsDeleteModalOpen(true)
-                                                }
-                                            >
-                                                Delete
-                                            </Menu.Item>
-                                        </Menu.Dropdown>
-                                    </Menu>
-                                </Box>
-                            )}
-                            {isMoveToSpaceOpen && activeAppUuid && (
-                                <TransferItemsModal
-                                    projectUuid={projectUuid}
-                                    opened
-                                    onClose={() => setIsMoveToSpaceOpen(false)}
-                                    items={[
-                                        {
-                                            type: ResourceViewItemType.DATA_APP,
-                                            data: {
+                                <AppHeader
+                                    appUuid={activeAppUuid}
+                                    name={appName}
+                                    description={appDescription || null}
+                                    spaceChip={
+                                        <AppSpaceChip
+                                            projectUuid={projectUuid}
+                                            spaceName={appSpaceName}
+                                            app={{
                                                 uuid: activeAppUuid,
                                                 name: appName,
                                                 description:
@@ -2964,76 +2941,66 @@ const AppGenerate: FC = () => {
                                                 spaceUuid: appSpaceUuid,
                                                 createdByUserUuid:
                                                     appCreatedByUserUuid,
-                                                updatedAt: new Date(),
-                                                updatedByUser: null,
-                                                views: 0,
-                                                firstViewedAt: null,
-                                                latestVersionNumber: null,
-                                                latestVersionStatus: null,
-                                                pinnedListUuid: null,
-                                                pinnedListOrder: null,
-                                            },
-                                        },
-                                    ]}
-                                    isLoading={isMovingToSpace}
-                                    onConfirm={async (targetSpaceUuid) => {
-                                        if (!targetSpaceUuid) return;
-                                        await contentAction({
-                                            action: {
-                                                type: 'move',
-                                                targetSpaceUuid,
-                                            },
-                                            item: {
-                                                uuid: activeAppUuid,
-                                                contentType:
-                                                    ContentType.DATA_APP,
-                                            },
-                                        });
-                                        await queryClient.invalidateQueries({
-                                            queryKey: [
-                                                'app',
-                                                projectUuid,
-                                                activeAppUuid,
-                                            ],
-                                        });
-                                        setIsMoveToSpaceOpen(false);
-                                    }}
-                                />
-                            )}
-                            {isUpdateModalOpen && activeAppUuid && (
-                                <AppUpdateModal
-                                    opened
-                                    projectUuid={projectUuid}
-                                    uuid={activeAppUuid}
-                                    initialName={appName}
-                                    initialDescription={appDescription}
-                                    onClose={() => setIsUpdateModalOpen(false)}
-                                    onConfirm={() =>
-                                        setIsUpdateModalOpen(false)
+                                                latestVersionNumber:
+                                                    latestReadyVersion?.version ??
+                                                    null,
+                                                latestVersionStatus:
+                                                    latestReadyVersion?.status ??
+                                                    null,
+                                            }}
+                                        />
                                     }
-                                />
-                            )}
-                            {isPromoteModalOpen && activeAppUuid && (
-                                <PromoteAppModal
-                                    projectUuid={projectUuid}
-                                    appUuid={activeAppUuid}
-                                    opened
-                                    onClose={() => setIsPromoteModalOpen(false)}
-                                />
-                            )}
-                            {isDeleteModalOpen && activeAppUuid && (
-                                <AppDeleteModal
-                                    opened
-                                    projectUuid={projectUuid}
-                                    uuid={activeAppUuid}
-                                    name={appName}
-                                    onClose={() => setIsDeleteModalOpen(false)}
-                                    onConfirm={() => {
-                                        setIsDeleteModalOpen(false);
-                                        void navigate(
-                                            `/projects/${projectUuid}/apps/generate`,
-                                        );
-                                    }}
+                                    rightSection={
+                                        <AppHeaderActions
+                                            projectUuid={projectUuid}
+                                            appUuid={activeAppUuid}
+                                            appName={appName}
+                                            appDescription={
+                                                appDescription || null
+                                            }
+                                            appSpaceUuid={appSpaceUuid}
+                                            appCreatedByUserUuid={
+                                                appCreatedByUserUuid
+                                            }
+                                            latestVersionNumber={
+                                                latestReadyVersion?.version ??
+                                                null
+                                            }
+                                            latestVersionStatus={
+                                                latestReadyVersion?.status ??
+                                                null
+                                            }
+                                            onRefresh={handleRefreshPreview}
+                                            refreshDisabled={!previewApp}
+                                            onViewNetwork={() =>
+                                                setNetworkPanelHidden(false)
+                                            }
+                                            onDeleted={() =>
+                                                void navigate(
+                                                    `/projects/${projectUuid}/apps/generate`,
+                                                )
+                                            }
+                                            navItem={
+                                                previewApp ? (
+                                                    <Menu.Item
+                                                        component={Link}
+                                                        to={`/projects/${projectUuid}/apps/${previewApp.appUuid}/preview`}
+                                                        target="_blank"
+                                                        leftSection={
+                                                            <MantineIcon
+                                                                icon={
+                                                                    IconExternalLink
+                                                                }
+                                                                size={14}
+                                                            />
+                                                        }
+                                                    >
+                                                        Preview latest
+                                                    </Menu.Item>
+                                                ) : null
+                                            }
+                                        />
+                                    }
                                 />
                             )}
                             {restoreTargetVersion !== null && activeAppUuid && (
@@ -3095,6 +3062,9 @@ const AppGenerate: FC = () => {
                                         refreshKey={previewRefreshKey}
                                         invalidateCache={invalidatePreviewCache}
                                         onQueryEvent={handleQueryEvent}
+                                        onExternalRequestEvent={
+                                            handleExternalRequestEvent
+                                        }
                                         inspectorEnabled={inspectorEnabled}
                                         onElementSelected={
                                             handleElementSelected
@@ -3108,6 +3078,24 @@ const AppGenerate: FC = () => {
                                         onInspectorCancelled={
                                             handleInspectorCancelled
                                         }
+                                        lineageEnabled={lineageEnabled}
+                                        onLineageAvailabilityChange={
+                                            setLineageAvailable
+                                        }
+                                        onLineageSelected={
+                                            handleLineageSelected
+                                        }
+                                        lineageHighlightQueryUuid={
+                                            // Hover overrides; falls back to
+                                            // the persistent click-selection.
+                                            hoveredQueryUuid ?? focusedQueryUuid
+                                        }
+                                        onLineageCancelled={
+                                            handleLineageCancelled
+                                        }
+                                        dataAppVizContext={
+                                            testVizContext ?? undefined
+                                        }
                                     />
                                 ) : (
                                     <Box className={classes.previewEmpty}>
@@ -3117,16 +3105,25 @@ const AppGenerate: FC = () => {
                                         </Text>
                                     </Box>
                                 )}
-                                {!queriesPanelHidden && (
-                                    <QueryInspector
+                                {!networkPanelHidden && (
+                                    <AppInspectorPanel
                                         queries={trackedQueries}
                                         projectUuid={projectUuid!}
-                                        onClear={clearQueries}
+                                        onClearQueries={clearQueries}
+                                        externalRequests={externalRequests}
+                                        onClearExternalRequests={
+                                            clearExternalRequests
+                                        }
                                         persistLogs={persistLogs}
                                         onPersistLogsChange={setPersistLogs}
                                         onDismiss={() =>
-                                            setQueriesPanelHidden(true)
+                                            setNetworkPanelHidden(true)
                                         }
+                                        onHoverQuery={setHoveredQueryUuid}
+                                        focusedQueryUuid={focusedQueryUuid}
+                                        lineageEnabled={lineageEnabled}
+                                        lineageAvailable={lineageAvailable}
+                                        onToggleLineage={handleToggleLineage}
                                     />
                                 )}
                             </Box>

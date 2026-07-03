@@ -3,6 +3,7 @@ export * from './aiWriteback/types';
 export * from './externalConnections/types';
 export * from './AiRouter';
 export * from './apps/types';
+export * from './apps/code';
 export * from './ambientAi';
 export * from './commercialFeatureFlags';
 export * from './designs/types';
@@ -13,6 +14,7 @@ export * as preAggregateUtils from './preAggregates/utils';
 export * from './scim/errors';
 export * from './scim/types';
 export * from './serviceAccounts/types';
+export * from './types/aiReviewNotification';
 export * from './types/managedAgent';
 
 export enum ScimSchemaType {

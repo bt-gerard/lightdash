@@ -1,6 +1,6 @@
-// Jest Snapshot v1, https://goo.gl/fbAQLP
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`AI agent tool contracts matches the current agent tool contract snapshot 1`] = `
+exports[`AI agent tool contracts > matches the current agent tool contract snapshot 1`] = `
 [
   {
     "description": "Tool: describe_warehouse_table
@@ -173,6 +173,43 @@ Re-call this tool if the user pivots mid-thread to a different data topic and yo
                             },
                             "name": {
                               "type": "string",
+                            },
+                            "requiredFilters": {
+                              "description": "Explore-level required/default filters from findExplores. Only include when findExplores returned requiredFilters for the selected explore.",
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "fieldId": {
+                                    "type": "string",
+                                  },
+                                  "fieldRef": {
+                                    "type": "string",
+                                  },
+                                  "operator": {
+                                    "type": "string",
+                                  },
+                                  "required": {
+                                    "type": "boolean",
+                                  },
+                                  "settings": {},
+                                  "tableName": {
+                                    "type": "string",
+                                  },
+                                  "values": {
+                                    "items": {},
+                                    "type": "array",
+                                  },
+                                },
+                                "required": [
+                                  "fieldId",
+                                  "fieldRef",
+                                  "tableName",
+                                  "operator",
+                                  "required",
+                                ],
+                                "type": "object",
+                              },
+                              "type": "array",
                             },
                           },
                           "required": [
@@ -842,7 +879,7 @@ Usage tips:
     "description": "Tool: findExplores
 
 Purpose:
-Returns explores matching the query with their joined tables, AI hints and descriptions, plus the top 50 matching fields across ALL explores. Search matches explore and field name, label, and description. A follow-up query runs against a single explore, so this tool is meant to identify the explore whose fields can answer the user's question.
+Returns explores matching the query with their joined tables, required filters, AI hints and descriptions, plus the top 50 matching fields across ALL explores. Search matches explore and field name, label, and description. A follow-up query runs against a single explore, so this tool is meant to identify the explore whose fields can answer the user's question.
 IMPORTANT: Each explore may include fields from multiple joined tables. Check the "joinedTables" elements to see which tables are included in the explore.
 
 Parameters:
@@ -851,6 +888,7 @@ Parameters:
 Output:
 - Matching explores with searchRank scores
 - Top matching fields with their explore names and searchRank scores
+- Required filters set on matching explores, including default values
 ",
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
@@ -899,6 +937,42 @@ Output:
                       },
                       "name": {
                         "type": "string",
+                      },
+                      "requiredFilters": {
+                        "items": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "fieldId": {
+                              "type": "string",
+                            },
+                            "fieldRef": {
+                              "type": "string",
+                            },
+                            "operator": {
+                              "type": "string",
+                            },
+                            "required": {
+                              "type": "boolean",
+                            },
+                            "settings": {},
+                            "tableName": {
+                              "type": "string",
+                            },
+                            "values": {
+                              "items": {},
+                              "type": "array",
+                            },
+                          },
+                          "required": [
+                            "fieldId",
+                            "fieldRef",
+                            "tableName",
+                            "operator",
+                            "required",
+                          ],
+                          "type": "object",
+                        },
+                        "type": "array",
                       },
                       "searchRank": {
                         "type": [
@@ -1066,6 +1140,9 @@ Usage tips:
                   "items": {
                     "additionalProperties": false,
                     "properties": {
+                      "error": {
+                        "type": "string",
+                      },
                       "label": {
                         "type": "string",
                       },
@@ -1137,6 +1214,13 @@ Usage tips:
                           "type": "object",
                         },
                         "type": "array",
+                      },
+                      "status": {
+                        "enum": [
+                          "success",
+                          "error",
+                        ],
+                        "type": "string",
                       },
                     },
                     "required": [
@@ -1380,7 +1464,7 @@ Recommended Dashboard Structure:
                               "additionalProperties": false,
                               "properties": {
                                 "baseDimensionName": {
-                                  "description": "Name of the base dimension/column this metric calculates from",
+                                  "description": "Field ID (e.g. "customers_age") or bare column name (e.g. "age") of the base dimension to aggregate. Must be a dimension that already EXISTS in this explore — find it via findFields / getMetadata. Do NOT guess an id/primary-key column: many explores do not expose "<table>_id" as a queryable dimension.",
                                   "type": "string",
                                 },
                                 "description": {
@@ -4486,7 +4570,7 @@ Notes:
                         "additionalProperties": false,
                         "properties": {
                           "baseDimensionName": {
-                            "description": "Name of the base dimension/column this metric calculates from",
+                            "description": "Field ID (e.g. "customers_age") or bare column name (e.g. "age") of the base dimension to aggregate. Must be a dimension that already EXISTS in this explore — find it via findFields / getMetadata. Do NOT guess an id/primary-key column: many explores do not expose "<table>_id" as a queryable dimension.",
                             "type": "string",
                           },
                           "description": {
@@ -6882,7 +6966,7 @@ Usage Tips:
 ]
 `;
 
-exports[`AI agent tool contracts matches the shared agent tool definition names snapshot 1`] = `
+exports[`AI agent tool contracts > matches the shared agent tool definition names snapshot 1`] = `
 [
   "findExplores",
   "findFields",
@@ -6894,6 +6978,8 @@ exports[`AI agent tool contracts matches the shared agent tool definition names 
   "runQuery",
   "runSql",
   "discoverFields",
+  "grepFields",
+  "getMetadata",
   "generateDashboard",
   "generateHashes",
   "generateUuids",

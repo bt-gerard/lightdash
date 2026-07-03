@@ -1,5 +1,20 @@
-export type ExternalConnectionAuthType = 'none' | 'api_key' | 'bearer_token';
-export type ExternalConnectionMethod = 'GET' | 'POST';
+export type ExternalConnectionAuthType =
+    | 'none'
+    | 'api_key'
+    | 'bearer_token'
+    | 'google_service_account';
+
+/** HTTP methods an admin can opt a connection into. Single source of truth for
+ *  the backend validation allowlist and the frontend method pickers. */
+export const EXTERNAL_CONNECTION_METHODS = [
+    'GET',
+    'POST',
+    'PUT',
+    'PATCH',
+    'DELETE',
+] as const;
+export type ExternalConnectionMethod =
+    (typeof EXTERNAL_CONNECTION_METHODS)[number];
 export type ApiKeyLocation = 'header' | 'query';
 
 /** READ shape returned by the API — NEVER includes the secret value. */
@@ -10,6 +25,7 @@ export type ExternalConnection = {
     name: string;
     type: ExternalConnectionAuthType;
     origin: string;
+    instructions: string | null;
     allowedPathPrefixes: string[];
     allowedMethods: ExternalConnectionMethod[];
     allowedContentTypes: string[];
@@ -19,6 +35,8 @@ export type ExternalConnection = {
     rateLimitPerMinute: number | null;
     apiKeyName: string | null;
     apiKeyLocation: ApiKeyLocation | null;
+    // OAuth scopes for type 'google_service_account'; null for other types.
+    oauthScopes: string[] | null;
     hasSecret: boolean;
     createdByUserUuid: string | null;
     updatedByUserUuid: string | null;
@@ -31,6 +49,7 @@ export type CreateExternalConnection = {
     name: string;
     type: ExternalConnectionAuthType;
     origin: string;
+    instructions?: string | null;
     allowedPathPrefixes: string[];
     allowedMethods: ExternalConnectionMethod[];
     allowedContentTypes: string[];
@@ -40,7 +59,8 @@ export type CreateExternalConnection = {
     rateLimitPerMinute?: number | null;
     apiKeyName?: string | null;
     apiKeyLocation?: ApiKeyLocation | null;
-    secret?: string | null; // bearer token or api key value; null for type 'none'
+    oauthScopes?: string[] | null; // OAuth scopes for type 'google_service_account'
+    secret?: string | null; // bearer token, api key, or service account keyfile JSON; null for type 'none'
 };
 
 /** Omitted/blank `secret` means the stored secret is left unchanged. */
@@ -74,11 +94,18 @@ export type ExternalFetchResponse = {
 };
 
 export type ApiTestExternalConnectionRequest = {
-    method?: 'GET' | 'POST';
+    method?: ExternalConnectionMethod;
     path: string;
     query?: Record<string, string>;
     body?: unknown;
 };
+
+/** Test an unsaved connection config (incl. plaintext secret) before creating
+ *  it. Runs through the same SSRF-guarded proxy core, persisting nothing. */
+export type ApiTestExternalConnectionConfigRequest =
+    ApiTestExternalConnectionRequest & {
+        config: CreateExternalConnection;
+    };
 
 export type ApiTestExternalConnectionResponse = {
     status: 'ok';

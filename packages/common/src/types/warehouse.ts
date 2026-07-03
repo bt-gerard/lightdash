@@ -10,6 +10,7 @@ export type RunQueryTags = {
     project_uuid?: string;
     user_uuid?: string;
     organization_uuid?: string;
+    app_uuid?: string;
     chart_uuid?: string;
     dashboard_uuid?: string;
     saved_sql_uuid?: string;
@@ -60,11 +61,24 @@ export type WarehouseExecuteAsyncQueryArgs = {
     sql: string;
 };
 
+// `query` is execution up to the first row; `fetch` is streaming the rest.
+export type WarehouseQueryPhase =
+    | 'ssh_tunnel'
+    | 'connect'
+    | 'session'
+    | 'query'
+    | 'fetch';
+
+export type WarehousePhaseTimings = Partial<
+    Record<WarehouseQueryPhase, number>
+>;
+
 export type WarehouseExecuteAsyncQuery = {
     queryId: string | null;
     queryMetadata: WarehouseQueryMetadata | null;
     totalRows: number;
     durationMs: number;
+    phaseTimings: WarehousePhaseTimings;
 };
 
 export enum TimeIntervalUnit {
@@ -80,6 +94,7 @@ export enum TimeIntervalUnit {
 export interface WarehouseSqlBuilder {
     getStartOfWeek: () => WeekDay | null | undefined;
     getAdapterType: () => SupportedDbtAdapter;
+    supportsCteMaterialization: () => boolean;
     getStringQuoteChar: () => string;
     getEscapeStringQuoteChar: () => string;
     getFieldQuoteChar: () => string;

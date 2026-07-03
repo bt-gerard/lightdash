@@ -1,5 +1,6 @@
 import {
     ContentType,
+    getAppDisplayName,
     ResourceViewItemType,
     type ApiAppSummary,
 } from '@lightdash/common';
@@ -11,18 +12,19 @@ import {
     Loader,
     Menu,
     Stack,
+    Switch,
     Text,
 } from '@mantine-8/core';
 import {
     IconClock,
     IconCode,
     IconDots,
+    IconEdit,
     IconExternalLink,
     IconFolder,
     IconFolderPlus,
     IconFolderSymlink,
     IconLayoutDashboard,
-    IconPencil,
     IconRadar,
     IconTextCaption,
     IconTrash,
@@ -37,6 +39,7 @@ import {
     type FC,
 } from 'react';
 import { Link } from 'react-router';
+import AppThumbnailHoverCard from '../../../features/apps/components/AppThumbnailHoverCard';
 import { useMyApps } from '../../../features/apps/hooks/useMyApps';
 import { useContentAction } from '../../../hooks/useContent';
 import {
@@ -115,9 +118,46 @@ const statusColor = (status: string | null) => {
     }
 };
 
-const MyAppsPanel: FC = () => {
+const AppNameCell: FC<{ app: ApiAppSummary }> = ({ app }) => {
+    const displayName = getAppDisplayName(app.name, app.appUuid);
+
+    return (
+        <AppThumbnailHoverCard
+            projectUuid={app.projectUuid}
+            appUuid={app.appUuid}
+            appName={displayName}
+            hasReadyVersion={hasReadyVersion(app)}
+        >
+            <Anchor
+                component={Link}
+                to={`/projects/${app.projectUuid}/apps/${app.appUuid}`}
+                fz="sm"
+                fw={500}
+                c="inherit"
+                underline="hover"
+                truncate="end"
+                display="block"
+            >
+                {displayName}
+            </Anchor>
+        </AppThumbnailHoverCard>
+    );
+};
+
+type MyAppsPanelProps = {
+    includePreviewAppsByDefault?: boolean;
+};
+
+const MyAppsPanel: FC<MyAppsPanelProps> = ({
+    includePreviewAppsByDefault = false,
+}) => {
     const tableContainerRef = useRef<HTMLDivElement>(null);
-    const { data, fetchNextPage, isFetching, isLoading, isError } = useMyApps();
+    const [includePreviewApps, setIncludePreviewApps] = useState(
+        includePreviewAppsByDefault,
+    );
+    const { data, fetchNextPage, isFetching, isLoading, isError } = useMyApps({
+        excludePreviewProjects: !includePreviewApps,
+    });
     const [appToDelete, setAppToDelete] = useState<ApiAppSummary | null>(null);
     const [appToMove, setAppToMove] = useState<ApiAppSummary | null>(null);
     const [appToRename, setAppToRename] = useState<ApiAppSummary | null>(null);
@@ -166,23 +206,7 @@ const MyAppsPanel: FC = () => {
                 ),
                 Cell: ({ row }) => {
                     const app = row.original;
-                    const displayName =
-                        app.name || `Untitled app ${app.appUuid.slice(0, 8)}`;
-
-                    return (
-                        <Anchor
-                            component={Link}
-                            to={`/projects/${app.projectUuid}/apps/${app.appUuid}`}
-                            fz="sm"
-                            fw={500}
-                            c="inherit"
-                            underline="hover"
-                            truncate="end"
-                            display="block"
-                        >
-                            {displayName}
-                        </Anchor>
-                    );
+                    return <AppNameCell app={app} />;
                 },
             },
             {
@@ -342,7 +366,7 @@ const MyAppsPanel: FC = () => {
                                 <Menu.Item
                                     leftSection={
                                         <MantineIcon
-                                            icon={IconPencil}
+                                            icon={IconEdit}
                                             size={14}
                                         />
                                     }
@@ -425,17 +449,26 @@ const MyAppsPanel: FC = () => {
         );
     }
 
-    if (!isLoading && !isError && flatData.length === 0) {
-        return (
-            <Text c="dimmed" fz="sm" p="md">
-                You haven't created any apps yet.
-            </Text>
-        );
-    }
-
     return (
         <Stack gap="md">
-            <ContentTable table={table} />
+            <Group justify="flex-end">
+                <Switch
+                    label="Include apps in previews"
+                    checked={includePreviewApps}
+                    onChange={(event) =>
+                        setIncludePreviewApps(event.currentTarget.checked)
+                    }
+                />
+            </Group>
+            {!isLoading && !isError && flatData.length === 0 ? (
+                <Text c="dimmed" fz="sm" p="md">
+                    {includePreviewApps
+                        ? "You haven't created any apps yet."
+                        : 'No apps in production projects. Turn on Include apps in previews to show apps from preview projects.'}
+                </Text>
+            ) : (
+                <ContentTable table={table} />
+            )}
             {appToDelete && (
                 <AppDeleteModal
                     opened

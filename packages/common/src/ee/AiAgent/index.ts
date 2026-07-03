@@ -17,9 +17,11 @@ import type {
 } from '../..';
 import { type AiEvalRunResultAssessment } from './aiEvalAssessment';
 import {
+    type AiAgentModelConfig,
     type AiPromptContext,
     type AiPromptContextInput,
     type AiPromptTokenUsage,
+    type AiThreadCreatedFrom,
 } from './requestTypes';
 import { type AgentToolOutput } from './schemas';
 import { ToolNameSchema } from './schemas/visualizations';
@@ -143,7 +145,9 @@ export const baseAgentSchema = z.object({
     enableDataAccess: z.boolean(),
     enableSelfImprovement: z.boolean(),
     enableContentTools: z.boolean(),
+    enableUserContext: z.boolean(),
     adminOnly: z.boolean(),
+    modelConfig: z.custom<AiAgentModelConfig>().nullable(),
     version: z.number(),
 });
 
@@ -169,7 +173,9 @@ export type AiAgent = Pick<
     | 'enableDataAccess'
     | 'enableSelfImprovement'
     | 'enableContentTools'
+    | 'enableUserContext'
     | 'adminOnly'
+    | 'modelConfig'
     | 'version'
 >;
 
@@ -193,7 +199,9 @@ export type AiAgentSummary = Pick<
     | 'enableDataAccess'
     | 'enableSelfImprovement'
     | 'enableContentTools'
+    | 'enableUserContext'
     | 'adminOnly'
+    | 'modelConfig'
     | 'version'
 >;
 
@@ -272,11 +280,7 @@ export type AiAgentMessageAssistant = {
 
     artifacts: AiAgentMessageAssistantArtifact[] | null;
     referencedArtifacts: AiAgentMessageAssistantArtifact[] | null;
-    modelConfig: {
-        modelName: string;
-        modelProvider: string;
-        reasoning?: boolean;
-    } | null;
+    modelConfig: AiAgentModelConfig | null;
     tokenUsage: AiPromptTokenUsage | null;
 };
 
@@ -288,7 +292,7 @@ export type AiAgentThreadSummary<TUser extends AiAgentUser = AiAgentUser> = {
     uuid: string;
     agentUuid: string;
     createdAt: string;
-    createdFrom: string;
+    createdFrom: AiThreadCreatedFrom;
     title: string | null;
     titleGeneratedAt: string | null;
     firstMessage: {
@@ -347,8 +351,10 @@ export type ApiCreateAiAgent = Pick<
     | 'version'
 > & {
     enableContentTools?: boolean;
+    enableUserContext?: boolean;
     adminOnly?: boolean;
     mcpServerUuids?: string[];
+    modelConfig?: AiAgentModelConfig | null;
 };
 
 export type ApiUpdateAiAgent = Partial<
@@ -367,7 +373,9 @@ export type ApiUpdateAiAgent = Partial<
         | 'enableDataAccess'
         | 'enableSelfImprovement'
         | 'enableContentTools'
+        | 'enableUserContext'
         | 'adminOnly'
+        | 'modelConfig'
         | 'version'
     >
 > & {
@@ -437,7 +445,7 @@ export type ApiAiAgentThreadSummaryListResponse = {
 
 export type AiAgentThreadFilters = {
     agentUuid?: string;
-    createdFrom?: 'web_app' | 'slack';
+    createdFrom?: AiThreadCreatedFrom;
     search?: string;
 };
 
@@ -482,11 +490,7 @@ export type ApiAiAgentThreadPullRequestResponse =
 export type ApiAiAgentThreadCreateRequest = {
     prompt?: string;
     context?: AiPromptContextInput;
-    modelConfig?: {
-        modelName: string;
-        modelProvider: string;
-        reasoning?: boolean;
-    };
+    modelConfig?: AiAgentModelConfig;
 };
 
 export type ApiAiAgentThreadCreateResponse = ApiSuccess<AiAgentThreadSummary>;
@@ -494,11 +498,7 @@ export type ApiAiAgentThreadCreateResponse = ApiSuccess<AiAgentThreadSummary>;
 export type ApiAiAgentThreadMessageCreateRequest = {
     prompt: string;
     context?: AiPromptContextInput;
-    modelConfig?: {
-        modelName: string;
-        modelProvider: string;
-        reasoning?: boolean;
-    };
+    modelConfig?: AiAgentModelConfig;
     /**
      * Inject the prompt as a hidden turn — the agent responds to it, but the UI
      * does not render the user bubble. Used by the post-merge content-migration

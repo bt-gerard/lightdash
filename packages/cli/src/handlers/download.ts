@@ -4,8 +4,10 @@ import {
     ApiChartAsCodeListResponse,
     ApiChartAsCodeUpsertResponse,
     ApiChartValidationResponse,
+    ApiContentResponse,
     ApiDashboardAsCodeListResponse,
     ApiDashboardValidationResponse,
+    ApiImportAppCodeResponse,
     ApiSqlChartAsCodeListResponse,
     assertUnreachable,
     AuthorizationError,
@@ -16,21 +18,47 @@ import {
     getErrorMessage,
     isMalformedEmptyDashboardFilter,
     LightdashError,
+    ParameterError,
     Project,
     PromotionAction,
     PromotionChanges,
+    removePivotedSeriesValuesFromChartConfig,
     SqlChartAsCode,
+    type DataAppCodeDownload,
     type SpaceAsCode,
 } from '@lightdash/common';
 import { Dirent, promises as fs, type Stats } from 'fs';
+import inquirer from 'inquirer';
 import * as yaml from 'js-yaml';
 import groupBy from 'lodash/groupBy';
 import pLimit from 'p-limit';
 import * as path from 'path';
 import { LightdashAnalytics } from '../analytics/analytics';
 import { getConfig, setAnswer } from '../config';
+import { CLI_VERSION } from '../env';
 import GlobalState from '../globalState';
 import * as styles from '../styles';
+import {
+    appFolderName,
+    buildImportBody,
+    readBundleFromDir,
+    retargetManifest,
+    writeBundleToDir,
+    writeContextToDir,
+    writeFilesToDir,
+} from './apps/appCodeFiles';
+import {
+    appsDownloadSummary,
+    capListedApps,
+    classifyAppUpload,
+    ensureDownloadedAppContext,
+    manifestRetargetHint,
+    MAX_INCLUDE_APPS,
+    selectAppsToDownload,
+    shouldWarnAllSkipped,
+    type AppDownloadFailure,
+} from './apps/appsDownload';
+import { buildStaticAuthoringFiles } from './apps/scaffolding';
 import {
     checkLightdashVersion,
     lightdashApi,
@@ -48,6 +76,9 @@ export type DownloadHandlerOptions = {
     verbose: boolean;
     charts: string[]; // These can be slugs, uuids or urls
     dashboards: string[]; // These can be slugs, uuids or urls
+    apps: string[] | boolean | null; // download: string[] = specific UUIDs; upload: true = all app folders on disk; null/false/absent = skip
+    includeApps?: boolean; // download only: include the project's apps (space-scoped listing, capped)
+    createNew?: boolean; // upload only: always create a new app instead of updating the manifest's app
     force: boolean;
     path?: string; // New optional path parameter
     project?: string;
@@ -57,6 +88,10 @@ export type DownloadHandlerOptions = {
     includeCharts: boolean;
     nested: boolean; // Use nested folder structure (projectName/spaceSlug/charts|dashboards)
     skipSpaces: boolean; // Skip writing space metadata files during download
+    skipCharts: boolean; // Skip downloading charts and SQL charts
+    skipDashboards: boolean; // Skip downloading dashboards
+    appsOnly?: boolean; // download only: implies skipCharts + skipDashboards + skipSpaces
+    stripPivotSeries: boolean; // Strip per-value pivot series config for portable chart YAML
     validate?: boolean; // Validate charts and dashboards after upload
     concurrency: number;
     gzip?: boolean;
@@ -157,19 +192,36 @@ type MetadataEntry = {
     downloadedAt: string;
 };
 
+const sanitizeChartForDownload = (
+    chart: ChartAsCode,
+    stripPivotSeries: boolean,
+): ChartAsCode =>
+    stripPivotSeries
+        ? {
+              ...chart,
+              chartConfig: removePivotedSeriesValuesFromChartConfig(
+                  chart.chartConfig,
+              ),
+          }
+        : chart;
+
 const writeContent = async (
     contentAsCode: ContentAsCodeType,
     outputDir: string,
     languageMap: boolean,
+    stripPivotSeries: boolean = false,
 ): Promise<MetadataEntry> => {
+    const content =
+        contentAsCode.type === 'chart'
+            ? sanitizeChartForDownload(contentAsCode.content, stripPivotSeries)
+            : contentAsCode.content;
     const extension = getFileExtension(contentAsCode.type);
-    const itemPath = path.join(
-        outputDir,
-        `${contentAsCode.content.slug}${extension}`,
-    );
+    const itemPath = path.join(outputDir, `${content.slug}${extension}`);
     // Strip timestamps — they go to .lightdash-metadata.json instead
-    const { updatedAt, downloadedAt, ...cleanContent } =
-        contentAsCode.content as ChartAsCode | SqlChartAsCode | DashboardAsCode;
+    const { updatedAt, downloadedAt, ...cleanContent } = content as
+        | ChartAsCode
+        | SqlChartAsCode
+        | DashboardAsCode;
     const chartYml = yaml.dump(cleanContent, {
         quotingType: '"',
         sortKeys: true,
@@ -179,7 +231,7 @@ const writeContent = async (
     if (contentAsCode.translationMap && languageMap) {
         const translationPath = path.join(
             outputDir,
-            `${contentAsCode.content.slug}.language.map.yml`,
+            `${content.slug}.language.map.yml`,
         );
         await fs.writeFile(
             translationPath,
@@ -200,7 +252,7 @@ const writeContent = async (
     }
 
     return {
-        slug: contentAsCode.content.slug,
+        slug: content.slug,
         type: metadataType,
         downloadedAt: downloadedAtString,
     };
@@ -555,6 +607,7 @@ const writeSpaceContent = async <
     customPath,
     languageMap,
     folderScheme,
+    stripPivotSeries,
 }: {
     projectName: string;
     spaceSlug: string;
@@ -568,6 +621,7 @@ const writeSpaceContent = async <
     customPath?: string;
     languageMap: boolean;
     folderScheme: FolderScheme;
+    stripPivotSeries: boolean;
 }): Promise<MetadataEntry[]> => {
     const outputDir = await createDirForContent(
         projectName,
@@ -591,6 +645,7 @@ const writeSpaceContent = async <
             } as ContentAsCodeType,
             outputDir,
             languageMap,
+            stripPivotSeries,
         );
         entries.push(entry);
     }
@@ -656,6 +711,7 @@ export const downloadContent = async (
     languageMap: boolean = false,
     nested: boolean = false,
     skipSpaces: boolean = false,
+    stripPivotSeries: boolean = false,
 ): Promise<[number, string[], MetadataEntry[], SpaceAsCode[]]> => {
     const spinner = GlobalState.getActiveSpinner();
     const contentFilters = parseContentFilters(ids);
@@ -718,6 +774,7 @@ export const downloadContent = async (
                     customPath,
                     languageMap,
                     folderScheme,
+                    stripPivotSeries: false,
                 });
                 allMetadataEntries = [...allMetadataEntries, ...entries];
             }
@@ -736,6 +793,7 @@ export const downloadContent = async (
                     customPath,
                     languageMap,
                     folderScheme,
+                    stripPivotSeries: false,
                 });
                 allMetadataEntries = [...allMetadataEntries, ...entries];
             }
@@ -758,6 +816,7 @@ export const downloadContent = async (
                     customPath,
                     languageMap,
                     folderScheme,
+                    stripPivotSeries,
                 });
                 allMetadataEntries = [...allMetadataEntries, ...entries];
             }
@@ -784,6 +843,21 @@ export const downloadHandler = async (
     options: DownloadHandlerOptions,
 ): Promise<void> => {
     GlobalState.setVerbose(options.verbose);
+
+    if (options.appsOnly) {
+        const appsOnlySelection = selectAppsToDownload({
+            apps: Array.isArray(options.apps) ? options.apps : undefined,
+            includeApps: options.includeApps === true,
+        });
+        if (appsOnlySelection.mode === 'none') {
+            throw new ParameterError(
+                'Nothing to download: --apps-only requires --apps <appUuids...> or --include-apps.',
+            );
+        }
+        options.skipCharts = true;
+        options.skipDashboards = true;
+        options.skipSpaces = true;
+    }
 
     await checkLightdashVersion();
 
@@ -842,14 +916,19 @@ export const downloadHandler = async (
         let allMetadataEntries: MetadataEntry[] = [];
         let allSpaces: SpaceAsCode[] = [];
 
-        // Download regular charts
-        if (hasFilters && options.charts.length === 0) {
-            console.info(
-                styles.warning(`No charts filters provided, skipping`),
-            );
-        } else {
-            const [regularChartTotal, , regularChartMeta, regularChartSpaces] =
-                await downloadContent(
+        // Download regular charts and SQL charts
+        if (!options.skipCharts) {
+            if (hasFilters && options.charts.length === 0) {
+                console.info(
+                    styles.warning(`No charts filters provided, skipping`),
+                );
+            } else {
+                const [
+                    regularChartTotal,
+                    ,
+                    regularChartMeta,
+                    regularChartSpaces,
+                ] = await downloadContent(
                     options.charts,
                     'charts',
                     projectId,
@@ -858,64 +937,80 @@ export const downloadHandler = async (
                     options.languageMap,
                     options.nested,
                     skipSpaces,
+                    options.stripPivotSeries,
                 );
-            spinner.succeed(`Downloaded ${regularChartTotal} charts`);
-            allMetadataEntries = [...allMetadataEntries, ...regularChartMeta];
-            allSpaces = [...allSpaces, ...regularChartSpaces];
+                spinner.succeed(`Downloaded ${regularChartTotal} charts`);
+                allMetadataEntries = [
+                    ...allMetadataEntries,
+                    ...regularChartMeta,
+                ];
+                allSpaces = [...allSpaces, ...regularChartSpaces];
 
-            // Download SQL charts
-            spinner.start(`Downloading SQL charts`);
-            const [sqlChartTotal, , sqlChartMeta, sqlChartSpaces] =
-                await downloadContent(
-                    options.charts,
-                    'sqlCharts',
-                    projectId,
-                    projectName,
-                    options.path,
-                    options.languageMap,
-                    options.nested,
-                    skipSpaces,
-                );
-            spinner.succeed(`Downloaded ${sqlChartTotal} SQL charts`);
-            allMetadataEntries = [...allMetadataEntries, ...sqlChartMeta];
-            allSpaces = [...allSpaces, ...sqlChartSpaces];
+                // Download SQL charts
+                spinner.start(`Downloading SQL charts`);
+                const [sqlChartTotal, , sqlChartMeta, sqlChartSpaces] =
+                    await downloadContent(
+                        options.charts,
+                        'sqlCharts',
+                        projectId,
+                        projectName,
+                        options.path,
+                        options.languageMap,
+                        options.nested,
+                        skipSpaces,
+                        false,
+                    );
+                spinner.succeed(`Downloaded ${sqlChartTotal} SQL charts`);
+                allMetadataEntries = [...allMetadataEntries, ...sqlChartMeta];
+                allSpaces = [...allSpaces, ...sqlChartSpaces];
 
-            chartTotal = regularChartTotal + sqlChartTotal;
+                chartTotal = regularChartTotal + sqlChartTotal;
+            }
         }
 
         // Download dashboards
-        if (hasFilters && options.dashboards.length === 0) {
-            console.info(
-                styles.warning(`No dashboards filters provided, skipping`),
-            );
-        } else {
-            let chartSlugs: string[] = [];
-
-            let dashMeta: MetadataEntry[];
-            let dashSpaces: SpaceAsCode[];
-            [dashboardTotal, chartSlugs, dashMeta, dashSpaces] =
-                await downloadContent(
-                    options.dashboards,
-                    'dashboards',
-                    projectId,
-                    projectName,
-                    options.path,
-                    options.languageMap,
-                    options.nested,
-                    skipSpaces,
+        if (!options.skipDashboards) {
+            if (hasFilters && options.dashboards.length === 0) {
+                console.info(
+                    styles.warning(`No dashboards filters provided, skipping`),
                 );
-            allMetadataEntries = [...allMetadataEntries, ...dashMeta];
-            allSpaces = [...allSpaces, ...dashSpaces];
+            } else {
+                let chartSlugs: string[] = [];
 
-            spinner.succeed(`Downloaded ${dashboardTotal} dashboards`);
-
-            if (hasFilters && chartSlugs.length > 0) {
-                spinner.start(
-                    `Downloading ${chartSlugs.length} charts linked to dashboards`,
-                );
-
-                const [regularCharts, , linkedChartMeta, linkedChartSpaces] =
+                let dashMeta: MetadataEntry[];
+                let dashSpaces: SpaceAsCode[];
+                [dashboardTotal, chartSlugs, dashMeta, dashSpaces] =
                     await downloadContent(
+                        options.dashboards,
+                        'dashboards',
+                        projectId,
+                        projectName,
+                        options.path,
+                        options.languageMap,
+                        options.nested,
+                        skipSpaces,
+                        false,
+                    );
+                allMetadataEntries = [...allMetadataEntries, ...dashMeta];
+                allSpaces = [...allSpaces, ...dashSpaces];
+
+                spinner.succeed(`Downloaded ${dashboardTotal} dashboards`);
+
+                if (
+                    hasFilters &&
+                    chartSlugs.length > 0 &&
+                    !options.skipCharts
+                ) {
+                    spinner.start(
+                        `Downloading ${chartSlugs.length} charts linked to dashboards`,
+                    );
+
+                    const [
+                        regularCharts,
+                        ,
+                        linkedChartMeta,
+                        linkedChartSpaces,
+                    ] = await downloadContent(
                         chartSlugs,
                         'charts',
                         projectId,
@@ -924,32 +1019,174 @@ export const downloadHandler = async (
                         options.languageMap,
                         options.nested,
                         skipSpaces,
+                        options.stripPivotSeries,
                     );
-                allMetadataEntries = [
-                    ...allMetadataEntries,
-                    ...linkedChartMeta,
+                    allMetadataEntries = [
+                        ...allMetadataEntries,
+                        ...linkedChartMeta,
+                    ];
+                    allSpaces = [...allSpaces, ...linkedChartSpaces];
+
+                    const [sqlCharts, , linkedSqlMeta, linkedSqlSpaces] =
+                        await downloadContent(
+                            chartSlugs,
+                            'sqlCharts',
+                            projectId,
+                            projectName,
+                            options.path,
+                            options.languageMap,
+                            options.nested,
+                            skipSpaces,
+                        );
+                    allMetadataEntries = [
+                        ...allMetadataEntries,
+                        ...linkedSqlMeta,
+                    ];
+                    allSpaces = [...allSpaces, ...linkedSqlSpaces];
+
+                    spinner.succeed(
+                        `Downloaded ${
+                            regularCharts + sqlCharts
+                        } charts linked to dashboards`,
+                    );
+                }
+            }
+        }
+
+        // Download data apps (enterprise, opt-in via --apps / --include-apps)
+        const appsSelection = selectAppsToDownload({
+            apps: Array.isArray(options.apps) ? options.apps : undefined,
+            includeApps: options.includeApps === true,
+        });
+
+        if (appsSelection.mode !== 'none') {
+            let appUuidsToDownload: string[];
+
+            if (appsSelection.mode === 'explicit') {
+                appUuidsToDownload = appsSelection.appUuids;
+            } else {
+                // List all apps via content API (paginated)
+                spinner.start(`Listing data apps in project`);
+                const listedAppUuids: string[] = [];
+                let page = 1;
+                let totalPageCount = 1;
+
+                do {
+                    // eslint-disable-next-line no-await-in-loop
+                    const contentResult = await lightdashApi<
+                        ApiContentResponse['results']
+                    >({
+                        method: 'GET',
+                        url: `/api/v2/content?projectUuids=${projectId}&contentTypes=data_app&page=${page}&pageSize=100`,
+                        body: undefined,
+                    });
+
+                    listedAppUuids.push(
+                        ...contentResult.data
+                            .filter((item) => item.contentType === 'data_app')
+                            .map((item) => item.uuid),
+                    );
+
+                    totalPageCount =
+                        contentResult.pagination?.totalPageCount ?? 1;
+                    page += 1;
+                } while (page <= totalPageCount);
+
+                const { appUuids: cappedAppUuids, truncatedCount } =
+                    capListedApps(listedAppUuids);
+                if (truncatedCount > 0) {
+                    GlobalState.log(
+                        styles.warning(
+                            `--include-apps is capped at ${MAX_INCLUDE_APPS} apps (${listedAppUuids.length} found, ${truncatedCount} skipped). Pass --apps <uuids> to download specific apps.`,
+                        ),
+                    );
+                }
+                appUuidsToDownload = [
+                    ...new Set([
+                        ...cappedAppUuids,
+                        ...appsSelection.extraAppUuids,
+                    ]),
                 ];
-                allSpaces = [...allSpaces, ...linkedChartSpaces];
+            }
 
-                const [sqlCharts, , linkedSqlMeta, linkedSqlSpaces] =
-                    await downloadContent(
-                        chartSlugs,
-                        'sqlCharts',
-                        projectId,
-                        projectName,
-                        options.path,
-                        options.languageMap,
-                        options.nested,
-                        skipSpaces,
-                    );
-                allMetadataEntries = [...allMetadataEntries, ...linkedSqlMeta];
-                allSpaces = [...allSpaces, ...linkedSqlSpaces];
-
-                spinner.succeed(
-                    `Downloaded ${
-                        regularCharts + sqlCharts
-                    } charts linked to dashboards`,
+            if (appUuidsToDownload.length === 0) {
+                spinner.succeed(`No data apps found in project`);
+            } else {
+                spinner.start(
+                    `Downloading ${appUuidsToDownload.length} data app(s)…`,
                 );
+                const baseDir = getDownloadFolder(options.path);
+                const appsDir = path.join(baseDir, 'apps');
+                const takenFolders = new Set<string>();
+                let appSuccessCount = 0;
+                const appFailures: AppDownloadFailure[] = [];
+
+                for (const appUuid of appUuidsToDownload) {
+                    try {
+                        // eslint-disable-next-line no-await-in-loop
+                        const code = ensureDownloadedAppContext(
+                            appUuid,
+                            await lightdashApi<DataAppCodeDownload>({
+                                method: 'GET',
+                                url: `/api/v1/ee/projects/${projectId}/apps/${appUuid}/download`,
+                                body: undefined,
+                            }),
+                        );
+
+                        const folder = appFolderName(
+                            code.manifest.name,
+                            appUuid,
+                            takenFolders,
+                        );
+                        takenFolders.add(folder);
+
+                        const appDir = path.join(appsDir, folder);
+                        const manifest = {
+                            ...code.manifest,
+                            scaffoldingVersion: CLI_VERSION,
+                        };
+                        // eslint-disable-next-line no-await-in-loop
+                        await writeBundleToDir(appDir, { ...code, manifest });
+                        // eslint-disable-next-line no-await-in-loop
+                        await writeFilesToDir(
+                            appDir,
+                            buildStaticAuthoringFiles({
+                                appName: code.manifest.name,
+                                sdkVersion: CLI_VERSION,
+                            }),
+                        );
+                        // eslint-disable-next-line no-await-in-loop
+                        await writeContextToDir(appDir, code.context);
+                        appSuccessCount += 1;
+                    } catch (appErr) {
+                        const message =
+                            appErr instanceof LightdashError &&
+                            appErr.statusCode === 404
+                                ? `Data apps are not enabled on this instance, or app ${appUuid} was not found.`
+                                : getErrorMessage(appErr);
+                        appFailures.push({ appUuid, message });
+                        GlobalState.log(
+                            styles.error(
+                                `Failed to download app ${appUuid}: ${message}`,
+                            ),
+                        );
+                    }
+                }
+
+                const summary = appsDownloadSummary(
+                    appSuccessCount,
+                    appUuidsToDownload.length,
+                    appFailures,
+                    appsDir,
+                );
+                if (summary.ok) {
+                    spinner.succeed(summary.message);
+                } else {
+                    spinner.warn(styles.warning(summary.message));
+                    summary.failureLines.forEach((line) =>
+                        GlobalState.log(styles.warning(line)),
+                    );
+                }
             }
         }
 
@@ -1069,14 +1306,7 @@ const logUploadChanges = (changes: Record<string, number>) => {
         console.info(`Total ${key}: ${value} `);
     });
 
-    const totalSkipped = Object.entries(changes)
-        .filter(([key]) => key.includes('skipped'))
-        .reduce((sum, [, value]) => sum + value, 0);
-    const totalUpserted = Object.entries(changes)
-        .filter(([key]) => !key.includes('skipped'))
-        .reduce((sum, [, value]) => sum + value, 0);
-
-    if (totalSkipped > 0 && totalUpserted === 0) {
+    if (shouldWarnAllSkipped(changes)) {
         console.warn(
             styles.warning(
                 `\nAll content was skipped (no local changes detected). Use --force to upload all content, e.g. when uploading to a new project.`,
@@ -1663,6 +1893,215 @@ export const uploadHandler = async (
             changes = dashboardChanges;
             dashboardTotal = total;
         }
+
+        // Upload data apps (enterprise, opt-in via --apps, fire-and-forget)
+        const appsOption = options.apps;
+        const shouldUploadApps =
+            appsOption !== null &&
+            appsOption !== false &&
+            appsOption !== undefined;
+
+        let appsCreated = 0;
+        let appsUpdated = 0;
+        let appsFailed = 0;
+        let appsSkipped = 0;
+
+        if (shouldUploadApps) {
+            const filterUuids: Set<string> | null =
+                Array.isArray(appsOption) && appsOption.length > 0
+                    ? new Set(appsOption)
+                    : null;
+
+            const baseDir = getDownloadFolder(options.path);
+            const appsDir = path.join(baseDir, 'apps');
+
+            let appFolderEntries: import('fs').Dirent[];
+            try {
+                appFolderEntries = await fs.readdir(appsDir, {
+                    withFileTypes: true,
+                });
+            } catch (err) {
+                if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+                    GlobalState.log(
+                        styles.warning(
+                            `No apps directory found at ${appsDir}. Run 'lightdash download --apps' first.`,
+                        ),
+                    );
+                    appFolderEntries = [];
+                } else {
+                    throw err;
+                }
+            }
+
+            const subDirs = appFolderEntries.filter((e) => e.isDirectory());
+
+            if (subDirs.length === 0) {
+                GlobalState.log(
+                    styles.warning(`No app folders found in ${appsDir}.`),
+                );
+            }
+
+            for (const subDir of subDirs) {
+                const folderPath = path.join(appsDir, subDir.name);
+                try {
+                    // eslint-disable-next-line no-await-in-loop
+                    const code = await readBundleFromDir(folderPath);
+
+                    if (
+                        filterUuids &&
+                        !filterUuids.has(code.manifest.appUuid)
+                    ) {
+                        GlobalState.debug(
+                            `Skipping app folder "${subDir.name}" (uuid ${code.manifest.appUuid} not in filter)`,
+                        );
+                        // eslint-disable-next-line no-continue
+                        continue;
+                    }
+
+                    // Guard: cross-project create
+                    const uploadDecision = classifyAppUpload(
+                        code.manifest.projectUuid,
+                        projectId,
+                        options.createNew === true,
+                    );
+
+                    if (uploadDecision === 'needs-confirmation') {
+                        if (process.stdin.isTTY && process.stdout.isTTY) {
+                            // eslint-disable-next-line no-await-in-loop
+                            const { confirmed } = await inquirer.prompt<{
+                                confirmed: boolean;
+                            }>([
+                                {
+                                    type: 'confirm',
+                                    name: 'confirmed',
+                                    message: `"${subDir.name}" was downloaded from project ${code.manifest.projectUuid}, but you are uploading to project ${projectId}. This will CREATE a new app. Continue?`,
+                                    default: false,
+                                },
+                            ]);
+                            if (!confirmed) {
+                                GlobalState.log(
+                                    `Skipped "${subDir.name}" (cross-project create declined). Pass --create-new to make this explicit. If this app was already moved to the target project, set appUuid and projectUuid in lightdash-app.yml to the moved app instead.`,
+                                );
+                                appsSkipped += 1;
+                                // eslint-disable-next-line no-continue
+                                continue;
+                            }
+                        } else {
+                            GlobalState.log(
+                                styles.error(
+                                    `Cannot upload "${subDir.name}": its manifest targets project ${code.manifest.projectUuid} but you are uploading to project ${projectId}. Pass --create-new to create a new app in the target project. If this app was already moved there, set appUuid and projectUuid in lightdash-app.yml to the moved app instead.`,
+                                ),
+                            );
+                            appsFailed += 1;
+                            // eslint-disable-next-line no-continue
+                            continue;
+                        }
+                    }
+
+                    const body = buildImportBody(code, projectId, {
+                        createNew: options.createNew === true,
+                    });
+
+                    // eslint-disable-next-line no-await-in-loop
+                    const { appUuid, version, action } = await lightdashApi<
+                        ApiImportAppCodeResponse['results']
+                    >({
+                        method: 'POST',
+                        url: `/api/v1/ee/projects/${projectId}/apps/upload`,
+                        body: JSON.stringify(body),
+                    });
+
+                    if (action === 'create') {
+                        appsCreated += 1;
+                    } else {
+                        appsUpdated += 1;
+                    }
+
+                    const actionLabel =
+                        action === 'create' ? 'created' : 'updated';
+                    GlobalState.log(
+                        styles.success(
+                            `Uploaded "${code.manifest.name}" — ${actionLabel} v${version} (${appUuid}). Building in the background; the app will show "building" until the server finishes.`,
+                        ),
+                    );
+
+                    if (action === 'create') {
+                        GlobalState.log(
+                            `New app: ${config.context.serverUrl}/projects/${projectId}/apps/${appUuid}`,
+                        );
+                        if (process.stdin.isTTY && process.stdout.isTTY) {
+                            // eslint-disable-next-line no-await-in-loop
+                            const { retarget } = await inquirer.prompt<{
+                                retarget: boolean;
+                            }>([
+                                {
+                                    type: 'confirm',
+                                    name: 'retarget',
+                                    message: `Update ${subDir.name}/lightdash-app.yml to target the new app? This sets appUuid ${appUuid}, projectUuid ${projectId}, version ${version} — future uploads will update this app.`,
+                                    default: true,
+                                },
+                            ]);
+                            if (retarget) {
+                                // eslint-disable-next-line no-await-in-loop
+                                await retargetManifest(folderPath, {
+                                    appUuid,
+                                    projectUuid: projectId,
+                                    version,
+                                });
+                                GlobalState.log(
+                                    styles.success(
+                                        `Updated ${subDir.name}/lightdash-app.yml → appUuid ${appUuid}, projectUuid ${projectId}, version ${version}.`,
+                                    ),
+                                );
+                            } else {
+                                GlobalState.log(
+                                    styles.warning(
+                                        manifestRetargetHint({
+                                            folder: subDir.name,
+                                            appUuid,
+                                            projectUuid: projectId,
+                                        }),
+                                    ),
+                                );
+                            }
+                        } else {
+                            GlobalState.log(
+                                styles.warning(
+                                    manifestRetargetHint({
+                                        folder: subDir.name,
+                                        appUuid,
+                                        projectUuid: projectId,
+                                    }),
+                                ),
+                            );
+                        }
+                    }
+                } catch (appErr) {
+                    appsFailed += 1;
+                    const status =
+                        appErr instanceof LightdashError
+                            ? appErr.statusCode
+                            : undefined;
+                    const hint =
+                        status === 404
+                            ? ' — the enterprise "data apps" feature may not be enabled on this instance'
+                            : '';
+                    GlobalState.log(
+                        styles.error(
+                            `Failed to upload app folder "${subDir.name}"${
+                                status ? ` [HTTP ${status}]` : ''
+                            }: ${getErrorMessage(appErr)}${hint}`,
+                        ),
+                    );
+                }
+            }
+
+            if (appsCreated > 0) changes['data apps created'] = appsCreated;
+            if (appsUpdated > 0) changes['data apps updated'] = appsUpdated;
+            if (appsFailed > 0) changes['data apps failed'] = appsFailed;
+            if (appsSkipped > 0) changes['data apps skipped'] = appsSkipped;
+        }
+
         const end = Date.now();
 
         await LightdashAnalytics.track({
@@ -1696,5 +2135,6 @@ export const uploadHandler = async (
 
 export const testHelpers = {
     getDashboardChartSlugs,
+    sanitizeChartForDownload,
     sanitizeDashboardForUpload,
 };

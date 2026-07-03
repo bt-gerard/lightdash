@@ -5,7 +5,7 @@ import type {
     WarehouseTypes,
 } from '@lightdash/common';
 import type { AiWritebackFailureStage } from '../../../analytics/LightdashAnalytics';
-import type { AiWritebackThreadWithPrUrl } from '../../models/AiWritebackThreadModel';
+import type { ResumableWritebackThread } from '../../models/AiWritebackThreadModel';
 import type { GitProvider } from './providers/GitProvider';
 
 /**
@@ -110,7 +110,14 @@ export type TurnContext = {
     /** Resolved once from the dbt connection type; the service never re-branches. */
     provider: GitProvider;
     gitConnection: GitConnection;
-    existingRow: AiWritebackThreadWithPrUrl | null;
+    /**
+     * The dbt source this turn targets: a `project_dbt_sources` row uuid for an
+     * additional source, or null for the project's primary dbt connection.
+     * Persisted on the thread row when a PR is opened so resumes stay bound to
+     * the same source (one thread, one PR).
+     */
+    projectDbtSourceUuid: string | null;
+    existingRow: ResumableWritebackThread | null;
     isResume: boolean;
     /**
      * The project's warehouse dialect, used to pick the warehouse skill file
@@ -216,6 +223,15 @@ export type AiWritebackRunArgs = {
     user: SessionUser;
     projectUuid: string;
     prompt: string;
+    /**
+     * Which of the project's dbt sources to target, when it has more than one:
+     * the project's own uuid (or undefined) for the primary dbt connection, or
+     * a `project_dbt_sources` row uuid for an additional source. When undefined
+     * and the project has several sources, the run infers the target from the
+     * prompt and, failing that, returns the choices for the caller to pick from.
+     * Ignored on a resumed thread — it stays bound to its original source.
+     */
+    dbtSourceUuid?: string;
     // Honoured only when the thread has no writeback PR yet; the PR must live
     // in the project's own repo (validated before adoption).
     prUrl?: string | null;

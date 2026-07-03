@@ -1,6 +1,9 @@
 import {
+    DATA_APP_VIZ_TEMPLATE,
     NotFoundError,
+    ProjectType,
     type AppVersionResources,
+    type DataAppVizSchema,
     type KnexPaginateArgs,
     type KnexPaginatedData,
 } from '@lightdash/common';
@@ -332,6 +335,7 @@ export class AppModel {
         createdByUserUuid: string;
         organizationUuid: string;
         spaceUuid: string | null;
+        spaceName: string | null;
         template: DbApp['template'];
         pinnedListUuid: string | null;
         pinnedListOrder: number | null;
@@ -373,6 +377,13 @@ export class AppModel {
                 `${PinnedAppTableName}.app_uuid`,
                 `${AppsTableName}.app_id`,
             )
+            .leftJoin(SpaceTableName, function spaceJoin() {
+                void this.on(
+                    `${SpaceTableName}.space_uuid`,
+                    '=',
+                    `${AppsTableName}.space_uuid`,
+                ).andOnNull(`${SpaceTableName}.deleted_at`);
+            })
             .where(`${AppsTableName}.app_id`, appId)
             .andWhere(`${AppsTableName}.project_uuid`, projectUuid)
             .whereNull(`${AppsTableName}.deleted_at`)
@@ -382,6 +393,7 @@ export class AppModel {
                 `${AppsTableName}.description`,
                 `${AppsTableName}.created_by_user_uuid`,
                 `${AppsTableName}.space_uuid`,
+                `${SpaceTableName}.name as space_name`,
                 `${AppsTableName}.template`,
                 `${OrganizationTableName}.organization_uuid`,
                 `${PinnedAppTableName}.pinned_list_uuid`,
@@ -405,6 +417,7 @@ export class AppModel {
             description: string;
             created_by_user_uuid: string;
             space_uuid: string | null;
+            space_name: string | null;
             template: DbApp['template'];
             organization_uuid: string;
             pinned_list_uuid: string | null;
@@ -424,6 +437,7 @@ export class AppModel {
             description,
             created_by_user_uuid: createdByUserUuid,
             space_uuid: spaceUuid,
+            space_name: spaceName,
             template,
             organization_uuid: organizationUuid,
             pinned_list_uuid: pinnedListUuid,
@@ -439,6 +453,7 @@ export class AppModel {
                 description: string;
                 created_by_user_uuid: string;
                 space_uuid: string | null;
+                space_name: string | null;
                 template: DbApp['template'];
                 organization_uuid: string;
                 pinned_list_uuid: string | null;
@@ -454,6 +469,7 @@ export class AppModel {
             createdByUserUuid,
             organizationUuid,
             spaceUuid,
+            spaceName,
             template,
             pinnedListUuid,
             pinnedListOrder,
@@ -518,6 +534,121 @@ export class AppModel {
             .where({ project_uuid: projectUuid })
             .whereNull('deleted_at')
             .select('*');
+    }
+
+    // Derived table of each app's latest ready version number, for joining the
+    // latest ready version's schema onto a data app viz.
+    private latestReadyVersions() {
+        return this.database(AppVersionsTableName)
+            .select('app_id')
+            .max({ version: 'version' })
+            .where('status', 'ready')
+            .groupBy('app_id')
+            .as('lrv');
+    }
+
+    private joinLatestReadyVersion(
+        query: Knex.QueryBuilder,
+    ): Knex.QueryBuilder {
+        return query
+            .leftJoin(
+                this.latestReadyVersions(),
+                `${AppsTableName}.app_id`,
+                'lrv.app_id',
+            )
+            .leftJoin(AppVersionsTableName, function joinVersion() {
+                this.on(
+                    `${AppsTableName}.app_id`,
+                    `${AppVersionsTableName}.app_id`,
+                ).andOn('lrv.version', `${AppVersionsTableName}.version`);
+            });
+    }
+
+    /**
+     * A page of the project's bindable data app vizs — only those whose latest
+     * ready version has generated a schema, so pagination counts are exact.
+     */
+    async listDataAppVisualizations(
+        projectUuid: string,
+        paginateArgs?: KnexPaginateArgs,
+        search?: string,
+    ): Promise<
+        KnexPaginatedData<(DbApp & { viz_schema: DataAppVizSchema })[]>
+    > {
+        const query = this.joinLatestReadyVersion(this.database(AppsTableName))
+            .where({
+                [`${AppsTableName}.project_uuid`]: projectUuid,
+                [`${AppsTableName}.template`]: DATA_APP_VIZ_TEMPLATE,
+            })
+            .whereNull(`${AppsTableName}.deleted_at`)
+            .whereNotNull(`${AppVersionsTableName}.viz_schema`)
+            .select<(DbApp & { viz_schema: DataAppVizSchema })[]>(
+                `${AppsTableName}.*`,
+                `${AppVersionsTableName}.viz_schema`,
+            )
+            .orderBy(`${AppsTableName}.created_at`, 'desc');
+        if (search) {
+            void query.whereILike(`${AppsTableName}.name`, `%${search}%`);
+        }
+        return KnexPaginate.paginate(query, paginateArgs);
+    }
+
+    /**
+     * Fetch a single data app viz by id, with its organization uuid (for the
+     * view permission check) and latest schema. Undefined when the id is not a
+     * data app viz in this project.
+     */
+    async findVisualizationApp(
+        dataAppVizUuid: string,
+        projectUuid: string,
+    ): Promise<
+        | (DbApp & {
+              organization_uuid: string;
+              viz_schema: DataAppVizSchema | null;
+          })
+        | undefined
+    > {
+        return this.joinLatestReadyVersion(this.database(AppsTableName))
+            .innerJoin(
+                ProjectTableName,
+                `${ProjectTableName}.project_uuid`,
+                `${AppsTableName}.project_uuid`,
+            )
+            .innerJoin(
+                OrganizationTableName,
+                `${OrganizationTableName}.organization_id`,
+                `${ProjectTableName}.organization_id`,
+            )
+            .where(`${AppsTableName}.app_id`, dataAppVizUuid)
+            .andWhere(`${AppsTableName}.project_uuid`, projectUuid)
+            .andWhere(`${AppsTableName}.template`, DATA_APP_VIZ_TEMPLATE)
+            .whereNull(`${AppsTableName}.deleted_at`)
+            .select<
+                (DbApp & {
+                    organization_uuid: string;
+                    viz_schema: DataAppVizSchema | null;
+                })[]
+            >(
+                `${AppsTableName}.*`,
+                `${OrganizationTableName}.organization_uuid`,
+                `${AppVersionsTableName}.viz_schema`,
+            )
+            .first();
+    }
+
+    // Persist the schema generated for a data app viz on its version row.
+    async setSchema(
+        appId: string,
+        version: number,
+        schema: DataAppVizSchema,
+    ): Promise<void> {
+        await this.database(AppVersionsTableName)
+            .where({ app_id: appId, version })
+            .update({
+                viz_schema: JSON.stringify(
+                    schema,
+                ) as unknown as DataAppVizSchema,
+            });
     }
 
     /**
@@ -656,6 +787,7 @@ export class AppModel {
     async listMyApps(
         userUuid: string,
         paginateArgs?: KnexPaginateArgs,
+        options: { excludePreviewProjects?: boolean } = {},
     ): Promise<
         KnexPaginatedData<
             {
@@ -693,6 +825,14 @@ export class AppModel {
             })
             .where(`${AppsTableName}.created_by_user_uuid`, userUuid)
             .whereNull(`${AppsTableName}.deleted_at`)
+            .modify((queryBuilder) => {
+                if (options.excludePreviewProjects ?? true) {
+                    void queryBuilder.whereNot(
+                        `${ProjectTableName}.project_type`,
+                        ProjectType.PREVIEW,
+                    );
+                }
+            })
             .select(
                 `${AppsTableName}.*`,
                 `${ProjectTableName}.name as project_name`,
@@ -810,13 +950,13 @@ export class AppModel {
         }
     }
 
-    async updateSandboxId(
+    async updateSandboxUuid(
         appId: string,
-        sandboxId: string | null,
+        sandboxUuid: string | null,
     ): Promise<void> {
         await this.database(AppsTableName)
             .where({ app_id: appId })
-            .update({ sandbox_id: sandboxId });
+            .update({ sandbox_id: sandboxUuid });
     }
 
     /**
@@ -912,5 +1052,21 @@ export class AppModel {
             [[...terminalStatuses], threshold],
         );
         return result.rowCount ?? 0;
+    }
+
+    async countInProgressVersionsForProject(
+        projectUuid: string,
+    ): Promise<number> {
+        const [row] = await this.database(AppVersionsTableName)
+            .join(
+                AppsTableName,
+                `${AppsTableName}.app_id`,
+                `${AppVersionsTableName}.app_id`,
+            )
+            .where(`${AppsTableName}.project_uuid`, projectUuid)
+            .whereNull(`${AppsTableName}.deleted_at`)
+            .whereNotIn('status', [...APP_VERSION_TERMINAL_STATUSES])
+            .count<{ count: string }[]>({ count: '*' });
+        return parseInt(row.count, 10);
     }
 }

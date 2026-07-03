@@ -26,6 +26,8 @@ const adminUser: SessionUser = {
     organizationCreatedAt: new Date(),
     isTrackingAnonymized: false,
     isMarketingOptedIn: false,
+    avatarUrl: null,
+    avatarGradient: null,
     timezone: null,
     isSetupComplete: true,
     userId: 1,
@@ -66,11 +68,11 @@ const mockVerifiedItems: VerifiedContentListItem[] = [
 ];
 
 const projectModel = {
-    getSummary: jest.fn(async () => projectSummary),
+    getSummary: vi.fn(async () => projectSummary),
 };
 
 const contentVerificationModel = {
-    getAllForProject: jest.fn(async () => mockVerifiedItems),
+    getAllForProject: vi.fn(async () => mockVerifiedItems),
 };
 
 describe('ContentVerificationService', () => {
@@ -81,7 +83,7 @@ describe('ContentVerificationService', () => {
     });
 
     afterEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
     });
 
     describe('listVerifiedContent', () => {

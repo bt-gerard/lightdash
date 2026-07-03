@@ -10,8 +10,10 @@ import {
     CreateUserWithRole,
     ForbiddenError,
     getUserAbilityBuilder,
+    getUserAvatarUrl,
     InvalidUser,
     isOpenIdUser,
+    isUserAvatarColorValue,
     LightdashMode,
     LightdashUser,
     LightdashUserWithAbilityRules,
@@ -92,6 +94,8 @@ export type DbUserDetails = {
     is_active: boolean;
     is_internal: boolean;
     timezone: string | null;
+    avatar_gradient: string | null;
+    avatar_content_hash: string | null;
     updated_at: Date;
 };
 
@@ -114,6 +118,13 @@ export const mapDbUserDetailsToLightdashUser = (
     roleUuid: user.role_uuid,
     isActive: user.is_active,
     timezone: user.timezone,
+    avatarUrl: user.avatar_content_hash
+        ? getUserAvatarUrl(user.user_uuid, user.avatar_content_hash)
+        : null,
+    avatarGradient:
+        user.avatar_gradient && isUserAvatarColorValue(user.avatar_gradient)
+            ? user.avatar_gradient
+            : null,
     isPending: !hasAuthentication,
     createdAt: user.created_at,
     updatedAt: user.updated_at,
@@ -125,6 +136,17 @@ const userDetailsQueryBuilder = (
     db('users')
         .joinRaw(
             'LEFT JOIN emails ON users.user_id = emails.user_id AND emails.is_primary',
+        )
+        // Derived join projects only the hash — never the image bytea.
+        .leftJoin(
+            db('user_avatars')
+                .select(
+                    'user_uuid as avatar_user_uuid',
+                    'content_hash as avatar_content_hash',
+                )
+                .as('user_avatar_hashes'),
+            'users.user_uuid',
+            'user_avatar_hashes.avatar_user_uuid',
         )
         // TODO remove this org join, we should do this in the service
         .leftJoin(
@@ -171,6 +193,18 @@ export class UserModel {
 
     private canTrackingBeAnonymized() {
         return this.lightdashConfig.mode !== LightdashMode.CLOUD_BETA;
+    }
+
+    // Per-pod eviction: other pods keep their entry until the 30s TTL expires
+    // eslint-disable-next-line class-methods-use-this
+    invalidateSessionUserCache(userUuid: string): void {
+        const cache = sessionUserCache;
+        if (!cache) return;
+        const prefix = `${userUuid}::`;
+        cache
+            .keys()
+            .filter((key) => key.startsWith(prefix))
+            .forEach((key) => cache.del(key));
     }
 
     async getSessionUserFromCacheOrDB(
@@ -467,6 +501,7 @@ export class UserModel {
             isSetupComplete,
             isActive,
             timezone,
+            avatarGradient,
         }: Partial<UpdateUserArgs>,
         isEmailVerified: boolean = false,
     ): Promise<LightdashUser> {
@@ -483,6 +518,7 @@ export class UserModel {
                         ? isTrackingAnonymized
                         : false,
                     timezone,
+                    avatar_gradient: avatarGradient,
                     updated_at: new Date(),
                 })
                 .returning('*');
@@ -517,6 +553,7 @@ export class UserModel {
         if (isActive === false) {
             PatSessionCache.invalidate();
         }
+        this.invalidateSessionUserCache(userUuid);
         return this.getUserDetailsByUuid(userUuid);
     }
 
@@ -525,6 +562,7 @@ export class UserModel {
             .where('user_uuid', userUuid)
             .delete();
         PatSessionCache.invalidate();
+        this.invalidateSessionUserCache(userUuid);
     }
 
     async getUserProjectRoles(

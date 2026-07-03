@@ -1,11 +1,15 @@
 import {
     getAvailableParametersFromTables,
+    getChartZoomableFields,
     getDateZoomCapabilities,
+    getDateZoomXAxisFieldId,
     hasReservedParameterReference,
     QueryExecutionContext,
+    resolveTileDateZoom,
     type ApiError,
     type ApiExecuteAsyncDashboardChartQueryResults,
     type ApiExploreResults,
+    type DateZoom,
     type ExecuteAsyncDashboardChartRequestParams,
     type SavedChart,
 } from '@lightdash/common';
@@ -59,6 +63,10 @@ export type DashboardChartReadyQuery = {
     executeQueryResponse: ApiExecuteAsyncDashboardChartQueryResults;
     chart: SavedChart;
     explore: ApiExploreResults;
+    // The resolved date zoom for this tile (control grain + field, or the
+    // Default). Downstream consumers reuse it so visualization, downloads, and
+    // underlying data agree with the query that was executed.
+    dateZoom: DateZoom | undefined;
 };
 
 export const useDashboardChartReadyQuery = (
@@ -91,11 +99,22 @@ export const useDashboardChartReadyQuery = (
     const autoRefresh = useDashboardTileStatusContext((c) => c.isAutoRefresh);
     const context =
         useSearchParams<QueryExecutionContext>('context') || undefined;
-    const setChartsWithDateZoomApplied = useDashboardContext(
-        (c) => c.setChartsWithDateZoomApplied,
+    const setTilesWithDateZoomApplied = useDashboardContext(
+        (c) => c.setTilesWithDateZoomApplied,
+    );
+
+    // Configurable date zoom: tiles with a control resolve their control's
+    // grain; unassigned tiles (and dashboards with no config) fall through to
+    // the Default branch — the existing global picker.
+    const dateZoomConfig = useDashboardContext((c) => c.dateZoomConfig);
+    const controlGranularities = useDashboardContext(
+        (c) => c.controlGranularities,
     );
     const addParameterDefinitions = useDashboardContext(
         (c) => c.addParameterDefinitions,
+    );
+    const setChartZoomableFields = useDashboardContext(
+        (c) => c.setChartZoomableFields,
     );
 
     const sortKey =
@@ -130,6 +149,51 @@ export const useDashboardChartReadyQuery = (
         if (!chartQuery.data || !explore) return undefined;
         return getDateZoomCapabilities(explore, chartQuery.data.metricQuery);
     }, [chartQuery.data, explore]);
+
+    // Report this tile's zoomable date fields up so the date-zoom control modal
+    // can offer exactly the fields the chart plots, not every explore dimension.
+    const chartZoomableFields = useMemo(() => {
+        if (!chartQuery.data || !explore) return undefined;
+        return getChartZoomableFields(explore, chartQuery.data.metricQuery);
+    }, [chartQuery.data, explore]);
+
+    useEffect(() => {
+        if (chartZoomableFields) {
+            setChartZoomableFields(tileUuid, chartZoomableFields);
+        }
+    }, [chartZoomableFields, setChartZoomableFields, tileUuid]);
+
+    // Target the chart's own x-axis date field so the backend re-grains the
+    // field the chart actually plots, rather than auto-picking the first date
+    // dimension in the query (which can differ when there are several).
+    const dateZoomXAxisFieldId = useMemo(
+        () =>
+            chartQuery.data
+                ? getDateZoomXAxisFieldId(chartQuery.data.chartConfig, explore)
+                : undefined,
+        [chartQuery.data, explore],
+    );
+
+    // Single source of truth for this tile's wire date zoom. Attached tiles zoom
+    // their control's grain on the target field; unassigned tiles fall through to
+    // the Default (the existing global picker + x-axis baseline).
+    const tileDateZoom = useMemo(
+        () =>
+            resolveTileDateZoom({
+                config: dateZoomConfig,
+                tileUuid,
+                runtimeGranularities: controlGranularities,
+                globalGranularity: granularity,
+                defaultXAxisFieldId: dateZoomXAxisFieldId,
+            }),
+        [
+            dateZoomConfig,
+            tileUuid,
+            controlGranularities,
+            granularity,
+            dateZoomXAxisFieldId,
+        ],
+    );
 
     useEffect(() => {
         if (!dateZoomCapabilities) return;
@@ -179,7 +243,8 @@ export const useDashboardChartReadyQuery = (
     // single source of truth for whether zoom was actually applied.
     // We still need a pre-query estimate for the query key so we avoid
     // unnecessary refetches when zoom won't have an effect.
-    const isZoomLikelyApplied = isAffectedByDateZoom && !!granularity;
+    const isZoomLikelyApplied =
+        isAffectedByDateZoom && tileDateZoom !== undefined;
 
     const queryKey = useMemo(
         () => [
@@ -192,7 +257,8 @@ export const useDashboardChartReadyQuery = (
             sortKey,
             contextOverride || context,
             autoRefresh,
-            isZoomLikelyApplied ? granularity : null,
+            isZoomLikelyApplied ? (tileDateZoom?.granularity ?? null) : null,
+            isZoomLikelyApplied ? (tileDateZoom?.xAxisFieldId ?? null) : null,
             invalidateCache,
             chartParameterValues,
             sessionTimezone,
@@ -208,7 +274,7 @@ export const useDashboardChartReadyQuery = (
             context,
             autoRefresh,
             isZoomLikelyApplied,
-            granularity,
+            tileDateZoom,
             invalidateCache,
             chartParameterValues,
             sessionTimezone,
@@ -231,6 +297,8 @@ export const useDashboardChartReadyQuery = (
             const isEmbedContext =
                 requestedContext === QueryExecutionContext.EMBED;
 
+            const dateZoom = tileDateZoom;
+
             const executeQueryResponse = isEmbedContext
                 ? await postEmbedDashboardTileQuery(
                       chartQuery.data.projectUuid,
@@ -238,9 +306,7 @@ export const useDashboardChartReadyQuery = (
                           tileUuid,
                           dashboardFilters: timezoneFixFilters,
                           dashboardSorts,
-                          dateZoom: {
-                              granularity,
-                          },
+                          dateZoom,
                           invalidateCache,
                           parameters: parameterValues,
                           pivotResults: true,
@@ -256,9 +322,7 @@ export const useDashboardChartReadyQuery = (
                           dashboardUuid: dashboardUuid!,
                           dashboardFilters: timezoneFixFilters,
                           dashboardSorts,
-                          dateZoom: {
-                              granularity,
-                          },
+                          dateZoom,
                           invalidateCache,
                           parameters: parameterValues,
                           pivotResults: true,
@@ -269,6 +333,7 @@ export const useDashboardChartReadyQuery = (
                 chart: chartQuery.data,
                 explore,
                 executeQueryResponse,
+                dateZoom: tileDateZoom,
             };
         },
         enabled: Boolean(
@@ -278,29 +343,32 @@ export const useDashboardChartReadyQuery = (
         refetchOnMount: false,
     });
 
-    // Backend reports it for overridden date dimensions; param-only charts are in effect
-    // whenever a grain is selected.
+    // Backend reports it for overridden date dimensions; charts that only
+    // reference the reserved date-zoom param are in effect whenever the resolved
+    // tile grain is set (the same value substituted into their SQL on the wire).
     const dateZoomApplied =
         (queryResult.data?.executeQueryResponse?.dateZoomApplied ?? false) ||
-        (referencesDateZoomReservedParam && !!granularity);
+        (referencesDateZoomReservedParam && !!tileDateZoom?.granularity);
 
     useEffect(() => {
-        if (!chartUuid || !isAffectedByDateZoom) return;
+        if (!isAffectedByDateZoom) return;
 
-        setChartsWithDateZoomApplied((prev) => {
+        // Keyed by tileUuid: a duplicated saved chart shares its chartUuid across
+        // tiles, but each tile needs its own applied state.
+        setTilesWithDateZoomApplied((prev) => {
             const nextSet = new Set(prev ?? []);
             if (dateZoomApplied) {
-                nextSet.add(chartUuid);
+                nextSet.add(tileUuid);
             } else {
-                nextSet.delete(chartUuid);
+                nextSet.delete(tileUuid);
             }
             return nextSet;
         });
     }, [
         dateZoomApplied,
         isAffectedByDateZoom,
-        chartUuid,
-        setChartsWithDateZoomApplied,
+        tileUuid,
+        setTilesWithDateZoomApplied,
     ]);
 
     useEffect(() => {

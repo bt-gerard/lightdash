@@ -7,6 +7,7 @@ import {
     DbtModelNode,
     DbtPackages,
     DbtRawModelNode,
+    DbtRpcGetManifestResults,
     DEFAULT_SPOTLIGHT_CONFIG,
     Explore,
     ExploreError,
@@ -37,6 +38,7 @@ import path from 'path';
 import { LightdashAnalytics } from '../analytics/LightdashAnalytics';
 import { preAggregatePostProcessor } from '../ee/preAggregates/postProcessor';
 import Logger from '../logging/logger';
+import { traceSpan } from '../tracing/tracing';
 import {
     CachedWarehouse,
     DbtClient,
@@ -93,6 +95,17 @@ export class DbtBaseProjectAdapter implements ProjectAdapter {
             return this.dbtClient.getDbtPackages();
         }
         return undefined;
+    }
+
+    public async getDbtManifest(): Promise<DbtRpcGetManifestResults> {
+        // Install dependencies first (same as compileAllExplores) — a git source's
+        // `dbt ls` fails without its packages installed.
+        if (this.dbtClient.installDeps !== undefined) {
+            Logger.debug('Install dependencies');
+            await this.dbtClient.installDeps();
+        }
+        Logger.debug(`Get dbt manifest`);
+        return this.dbtClient.getDbtManifest();
     }
 
     public async getLightdashProjectConfig(
@@ -202,7 +215,7 @@ export class DbtBaseProjectAdapter implements ProjectAdapter {
             );
         }
 
-        const models = Sentry.startSpan(
+        const models = traceSpan(
             { op: 'dbt', name: 'filterManifestModels' },
             () => {
                 const startTime = Date.now();

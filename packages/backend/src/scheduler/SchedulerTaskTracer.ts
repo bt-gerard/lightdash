@@ -15,6 +15,7 @@ import {
     noopOrganizationNameResolver,
     type OrganizationNameResolver,
 } from '../sentry/organizationNameResolver';
+import { continueTrace, traceSpan } from '../tracing/tracing';
 import { TypedTask, type TypedTaskList } from './types';
 
 const getTagsForTask: {
@@ -203,6 +204,12 @@ const getTagsForTask: {
         'ai_agent_review.remediation_uuid': payload.remediationUuid,
     }),
 
+    [SCHEDULER_TASKS.SEND_REVIEW_NOTIFICATION]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'project.uuid': payload.projectUuid,
+        'user.uuid': payload.userUuid ?? '',
+    }),
+
     [SCHEDULER_TASKS.EMBED_ARTIFACT_VERSION]: (payload) => ({
         'organization.uuid': payload.organizationUuid,
         'user.uuid': payload.userUuid,
@@ -238,6 +245,11 @@ const getTagsForTask: {
         'managed_agent.triggered_by': payload.triggeredBy ?? 'cron',
     }),
     [SCHEDULER_TASKS.APP_GENERATE_PIPELINE]: (payload) => ({
+        'organization.uuid': payload.organizationUuid,
+        'user.uuid': payload.userUuid,
+        'project.uuid': payload.projectUuid,
+    }),
+    [SCHEDULER_TASKS.APP_BUILD_FROM_SOURCE]: (payload) => ({
         'organization.uuid': payload.organizationUuid,
         'user.uuid': payload.userUuid,
         'project.uuid': payload.projectUuid,
@@ -282,12 +294,17 @@ export const traceTask = <T extends SchedulerTaskName>(
         payload: TaskPayloadMap[T] & QueueTraceProperties,
         helpers: JobHelpers,
     ) => void = async (payload, helpers) => {
-        const { traceHeader, baggageHeader } = payload;
+        const { traceHeader, baggageHeader, otelTraceparent, otelBaggage } =
+            payload;
 
-        await Sentry.continueTrace(
-            { sentryTrace: traceHeader, baggage: baggageHeader },
-            async () => {
-                await Sentry.startSpan(
+        await continueTrace(
+            {
+                sentryTrace: traceHeader,
+                traceparent: otelTraceparent,
+                baggage: otelBaggage ?? baggageHeader,
+            },
+            async () =>
+                traceSpan(
                     {
                         name: `worker.task.${taskName}`,
                         attributes: {
@@ -425,8 +442,7 @@ export const traceTask = <T extends SchedulerTaskName>(
                             throw e;
                         }
                     },
-                );
-            },
+                ),
         );
     };
     return tracedTask;

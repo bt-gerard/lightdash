@@ -1,26 +1,34 @@
 /* eslint-disable @typescript-eslint/no-use-before-define */
 import {
     aiAgentReviewClassifierJudgeOutputSchema,
+    assertUnreachable,
     CatalogType,
     FeatureFlags,
+    filterExploreByTags,
     ForbiddenError,
     getAiAgentConfigSnapshotHash,
     getAiAgentReviewItemFingerprint,
+    isExploreError,
     ProjectType,
     type AiAgentAvailableCapability,
     type AiAgentConfigSnapshot,
     type AiAgentConfigurationSetting,
     type AiAgentEvidenceExcerpt,
+    type AiAgentKnowledgeDocumentSnapshot,
+    type AiAgentMcpServerSnapshot,
     type AiAgentReviewClassifierEventType,
     type AiAgentReviewClassifierJudgeOutput,
     type AiAgentReviewClassifierRunScope,
     type AiAgentReviewClassifierSignalFinding,
+    type AiAgentReviewClassifierToolOutcome,
     type AiAgentReviewClassifierTurnCandidate,
     type AiAgentReviewClassifierTurnSignal,
+    type AiAgentReviewItemDedupCandidate,
     type AiAgentRootCause,
     type AiAgentTargetRef,
     type AiAgentTurnSignal,
     type CatalogItemSummary,
+    type Explore,
     type QueryHistoryStatus,
 } from '@lightdash/common';
 import { generateObject } from 'ai';
@@ -31,14 +39,17 @@ import { type CatalogModel } from '../../models/CatalogModel/CatalogModel';
 import { type ProjectModel } from '../../models/ProjectModel/ProjectModel';
 import { BaseService } from '../../services/BaseService';
 import { type FeatureFlagService } from '../../services/FeatureFlag/FeatureFlagService';
+import { type AiAgentDocumentModel } from '../models/AiAgentDocumentModel';
 import { type AiAgentModel } from '../models/AiAgentModel';
 import { type AiAgentReviewClassifierModel } from '../models/AiAgentReviewClassifierModel';
 import { type AiOrganizationSettingsModel } from '../models/AiOrganizationSettingsModel';
 import { defaultAgentOptions } from './ai/agents/agentV2';
 import { getModel } from './ai/models';
+import { getAiCallTelemetry } from './ai/utils/aiCallTelemetry';
+import { type AiAgentReviewNotificationService } from './AiAgentReviewNotificationService';
 
 const REVIEW_AGENT_VERSION = 'llm-judge-v1';
-const JUDGE_PROMPT_HASH = 'ai-agent-review-judge-v3';
+const JUDGE_PROMPT_HASH = 'ai-agent-review-judge-v15';
 const WRITEBACK_TOOL_NAMES = new Set([
     'editDbtProject',
     'propose_writeback',
@@ -62,9 +73,16 @@ export const resolveReviewJudgeProvider = (
 ): LightdashConfig['ai']['copilot']['defaultProvider'] | undefined =>
     copilot.providers.anthropic ? 'anthropic' : undefined;
 
+export type AiAgentReviewJudgeOptions = {
+    // Escalate promoted turns to the strong (non-fast) model. Defaults to
+    // true; the replay scoreboard passes false to A/B the gate tier alone.
+    escalationEnabled?: boolean;
+};
+
 type AiAgentReviewClassifierJudge = (
     candidate: AiAgentReviewClassifierTurnCandidate,
     evidencePacket: AiAgentReviewJudgeEvidencePacket,
+    opts?: AiAgentReviewJudgeOptions,
 ) => Promise<AiAgentReviewClassifierJudgeOutput>;
 
 type AiAgentReviewClassifierJudgeTargetRef =
@@ -73,11 +91,13 @@ type AiAgentReviewClassifierJudgeTargetRef =
 type AiAgentReviewClassifierServiceDependencies = {
     aiAgentReviewClassifierModel: AiAgentReviewClassifierModel;
     aiAgentModel: AiAgentModel;
+    aiAgentDocumentModel: Pick<AiAgentDocumentModel, 'findAllForAgent'>;
     aiOrganizationSettingsModel: AiOrganizationSettingsModel;
     catalogModel: Pick<CatalogModel, 'getCatalogItemsSummary'>;
-    projectModel: Pick<ProjectModel, 'getSummary'>;
+    projectModel: Pick<ProjectModel, 'getSummary' | 'findExploresFromCache'>;
     featureFlagService: FeatureFlagService;
     lightdashConfig: LightdashConfig;
+    aiAgentReviewNotificationService: AiAgentReviewNotificationService;
     judgeTurn?: AiAgentReviewClassifierJudge;
 };
 
@@ -90,7 +110,7 @@ type AiAgentReviewCatalogEvidenceItem = {
     description: string | null;
 };
 
-type AiAgentReviewJudgeEvidencePacket = {
+export type AiAgentReviewJudgeEvidencePacket = {
     subject: AiAgentReviewClassifierTurnCandidate['subject'];
     interactionSource: AiAgentReviewClassifierTurnCandidate['interactionSource'];
     targetTurn: AiAgentReviewClassifierTurnCandidate['targetTurn'];
@@ -104,8 +124,11 @@ type AiAgentReviewJudgeEvidencePacket = {
         availableCapabilities: AiAgentAvailableCapability[];
         dataAccessEnabled: boolean | null;
         selfImprovementEnabled: boolean | null;
+        contentToolsEnabled: boolean | null;
         instructionSummary: string | null;
         knowledgeDocumentCount: number;
+        knowledgeDocuments: AiAgentKnowledgeDocumentSnapshot[];
+        mcpServers: AiAgentMcpServerSnapshot[];
     };
     semanticContext: {
         queriedExploreNames: string[];
@@ -132,12 +155,29 @@ type AiAgentReviewJudgeEvidencePacket = {
     // PRs the agent already opened in this thread via writeback tools. Non-empty
     // means a real PR exists — the judge should only promote if it failed/was wrong.
     threadWritebackPullRequests: { prUrl: string | null; createdAt: Date }[];
+    // Complete success/error outcome per content-mutating/writeback/preview/MCP
+    // tool call in the turn — never truncated by the top-5 evidence ranking.
+    toolOutcomes: AiAgentReviewClassifierToolOutcome[];
+    // A human SQL-approval gate expired during the turn (user stepped away).
+    pendingApprovalTimeout: boolean;
+    // Existing review items in this project the judge can dedup against. Each
+    // key ("item_1") maps server-side to a fingerprint never shown to the LLM.
+    existingReviewItems: AiAgentReviewItemDedupCandidate[];
+};
+
+// What a tag-restricted agent can see, mirroring filterExploreByTags.
+// Computed once per agent per run; null = unrestricted (no tags).
+type AiAgentReviewCatalogVisibility = {
+    visibleExploreNames: Set<string>;
+    visibleTables: Set<string>;
+    visibleFields: Set<string>;
 };
 
 type AiAgentReviewAgentConfigEvidence =
     AiAgentReviewJudgeEvidencePacket['agentConfig'] & {
         snapshot: AiAgentConfigSnapshot | null;
         agentUpdatedAt: Date | null;
+        catalogVisibility: AiAgentReviewCatalogVisibility | null;
     };
 
 type RunArgs = {
@@ -218,18 +258,37 @@ export type AiAgentReviewClassifierReviewedTurn = {
     classifiedTurn: AiAgentReviewClassifierClassifiedTurn;
 };
 
+export type AiAgentReviewJudgeReplayInput = {
+    candidate: AiAgentReviewClassifierTurnCandidate;
+    evidencePacket: AiAgentReviewJudgeEvidencePacket;
+};
+
+export type AiAgentReviewJudgeReplayResult =
+    | { suppressed: 'writeback_in_progress'; judgeOutput: null }
+    | { suppressed: null; judgeOutput: AiAgentReviewClassifierJudgeOutput };
+
 export class AiAgentReviewClassifierService extends BaseService {
     private readonly aiAgentReviewClassifierModel: AiAgentReviewClassifierModel;
 
     private readonly aiAgentModel: AiAgentModel;
 
+    private readonly aiAgentDocumentModel: Pick<
+        AiAgentDocumentModel,
+        'findAllForAgent'
+    >;
+
     private readonly catalogModel: Pick<CatalogModel, 'getCatalogItemsSummary'>;
 
-    private readonly projectModel: Pick<ProjectModel, 'getSummary'>;
+    private readonly projectModel: Pick<
+        ProjectModel,
+        'getSummary' | 'findExploresFromCache'
+    >;
 
     private readonly aiOrganizationSettingsModel: AiOrganizationSettingsModel;
 
     private readonly featureFlagService: FeatureFlagService;
+
+    private readonly aiAgentReviewNotificationService: AiAgentReviewNotificationService;
 
     private readonly lightdashConfig: LightdashConfig;
 
@@ -240,16 +299,19 @@ export class AiAgentReviewClassifierService extends BaseService {
         this.aiAgentReviewClassifierModel =
             dependencies.aiAgentReviewClassifierModel;
         this.aiAgentModel = dependencies.aiAgentModel;
+        this.aiAgentDocumentModel = dependencies.aiAgentDocumentModel;
         this.catalogModel = dependencies.catalogModel;
         this.projectModel = dependencies.projectModel;
         this.aiOrganizationSettingsModel =
             dependencies.aiOrganizationSettingsModel;
         this.featureFlagService = dependencies.featureFlagService;
+        this.aiAgentReviewNotificationService =
+            dependencies.aiAgentReviewNotificationService;
         this.lightdashConfig = dependencies.lightdashConfig;
         this.judgeTurn =
             dependencies.judgeTurn ??
-            ((candidate, evidencePacket) =>
-                this.judgeTurnWithLlm(candidate, evidencePacket));
+            ((candidate, evidencePacket, opts) =>
+                this.judgeTurnWithLlm(candidate, evidencePacket, opts));
     }
 
     private debugLog(context: string, payload: Record<string, unknown>): void {
@@ -304,6 +366,68 @@ export class AiAgentReviewClassifierService extends BaseService {
             throw new ForbiddenError('AI agent review agent is not enabled');
         }
         return result;
+    }
+
+    /**
+     * Read-only eval surface for the replay scoreboard
+     * (repl/scripts/reviewClassifierScoreboard.ts): builds the exact judge
+     * inputs for one historical turn without persisting anything.
+     */
+    async captureJudgeReplayInput(args: {
+        organizationUuid: string;
+        promptUuid: string;
+    }): Promise<AiAgentReviewJudgeReplayInput | null> {
+        const [candidate] =
+            await this.aiAgentReviewClassifierModel.listTurnReviewCandidates({
+                organizationUuid: args.organizationUuid,
+                promptUuid: args.promptUuid,
+                limit: 1,
+            });
+        if (!candidate) {
+            return null;
+        }
+        const agentConfig = await this.captureAgentConfigSnapshot(candidate);
+        const { evidencePacket } = await this.buildReviewEvidence(
+            candidate,
+            agentConfig,
+        );
+        return { candidate, evidencePacket };
+    }
+
+    /**
+     * Runs the judge over a captured input, applying the same pre-judge
+     * writeback suppression as the live path. Never persists anything.
+     */
+    async replayJudge(
+        input: AiAgentReviewJudgeReplayInput,
+        opts?: AiAgentReviewJudgeOptions,
+    ): Promise<AiAgentReviewJudgeReplayResult> {
+        const successfulWritebackEvidence =
+            AiAgentReviewClassifierService.getSuccessfulWritebackEvidence(
+                input.candidate,
+            );
+        if (successfulWritebackEvidence) {
+            return { suppressed: 'writeback_in_progress', judgeOutput: null };
+        }
+        const judgeOutput = await this.judgeTurn(
+            input.candidate,
+            input.evidencePacket,
+            opts,
+        );
+        return {
+            suppressed: null,
+            judgeOutput:
+                AiAgentReviewClassifierService.enforceNextUserSignalGrounding(
+                    judgeOutput,
+                    {
+                        hasNextUserPrompt:
+                            input.evidencePacket.nextUserPrompt !== null,
+                        hasHumanFeedback:
+                            input.evidencePacket.humanFeedback.score !== null ||
+                            !!input.evidencePacket.humanFeedback.comment,
+                    },
+                ),
+        };
     }
 
     async runLiveEvent(
@@ -397,8 +521,34 @@ export class AiAgentReviewClassifierService extends BaseService {
             return null;
         }
 
+        // One config per agent in the run — a multi-agent backfill must not
+        // apply the first agent's tags/knowledge/MCP to other agents' turns.
+        const agentConfigsByAgentUuid = new Map<
+            string,
+            AiAgentReviewAgentConfigEvidence
+        >();
+        await Promise.all(
+            [
+                ...new Map(
+                    args.candidates.map((candidate) => [
+                        candidate.subject.agentUuid,
+                        candidate,
+                    ]),
+                ).values(),
+            ].map(async (candidate) => {
+                agentConfigsByAgentUuid.set(
+                    candidate.subject.agentUuid,
+                    await this.captureAgentConfigSnapshot(candidate),
+                );
+            }),
+        );
+        const getAgentConfig = (
+            agentUuid: string,
+        ): AiAgentReviewAgentConfigEvidence =>
+            agentConfigsByAgentUuid.get(agentUuid) ??
+            AiAgentReviewClassifierService.emptyAgentConfigEvidence();
         const runAgentConfig = args.candidates[0]
-            ? await this.captureAgentConfigSnapshot(args.candidates[0])
+            ? getAgentConfig(args.candidates[0].subject.agentUuid)
             : AiAgentReviewClassifierService.emptyAgentConfigEvidence();
         const aiWritebackFlag = await this.featureFlagService.get({
             featureFlagId: FeatureFlags.AiWriteback,
@@ -439,21 +589,56 @@ export class AiAgentReviewClassifierService extends BaseService {
         let findingCount = 0;
         let reviewItemCount = 0;
         const reviewItemFingerprints = new Set<string>();
+        const reviewItemFingerprintsByProject = new Map<string, Set<string>>();
         const shouldPersistSignals = args.persistSignals ?? !args.dryRun;
         const shouldPersistFindings = !args.dryRun && !!args.persistFindings;
         const shouldPromoteFindingsToReviewItems =
             shouldPersistFindings && !!args.promoteFindingsToReviewItems;
 
         try {
-            const reviewedTurns = await Promise.all(
-                args.candidates.map(async (candidate) => ({
-                    candidate,
-                    classifiedTurn: await this.classifyTurnWithJudge(
-                        candidate,
-                        runAgentConfig,
-                        { projectContextEnabled: aiWritebackFlag.enabled },
-                    ),
-                })),
+            // Per-candidate isolation: one turn erroring (schema violation,
+            // provider failure) must not fail the run and drop every other
+            // turn's signal.
+            const reviewedTurns = (
+                await Promise.all(
+                    args.candidates.map(async (candidate) => {
+                        try {
+                            return {
+                                candidate,
+                                classifiedTurn:
+                                    await this.classifyTurnWithJudge(
+                                        candidate,
+                                        getAgentConfig(
+                                            candidate.subject.agentUuid,
+                                        ),
+                                        {
+                                            projectContextEnabled:
+                                                aiWritebackFlag.enabled,
+                                        },
+                                    ),
+                            };
+                        } catch (error) {
+                            Logger.error(
+                                'AI review judge failed for turn; skipping',
+                                {
+                                    promptUuid:
+                                        candidate.subject.assistantPromptUuid,
+                                    threadUuid: candidate.subject.threadUuid,
+                                    errorMessage:
+                                        error instanceof Error
+                                            ? error.message
+                                            : String(error),
+                                },
+                            );
+                            return null;
+                        }
+                    }),
+                )
+            ).filter(
+                (
+                    reviewedTurn,
+                ): reviewedTurn is AiAgentReviewClassifierReviewedTurn =>
+                    reviewedTurn !== null,
             );
 
             const report = AiAgentReviewClassifierService.buildReport({
@@ -467,24 +652,42 @@ export class AiAgentReviewClassifierService extends BaseService {
             /* eslint-disable no-await-in-loop */
             // eslint-disable-next-line no-restricted-syntax
             for (const { classifiedTurn } of reviewedTurns) {
+                let reviewItemOutcome: 'created' | 'recurred' | null = null;
                 if (shouldPersistSignals) {
-                    await this.aiAgentReviewClassifierModel.createTurnSignal({
-                        runUuid: run.uuid,
-                        turnSignal: classifiedTurn.signal,
-                        finding: shouldPersistFindings
-                            ? classifiedTurn.finding
-                            : null,
-                    });
+                    const persisted =
+                        await this.aiAgentReviewClassifierModel.createTurnSignal(
+                            {
+                                runUuid: run.uuid,
+                                turnSignal: classifiedTurn.signal,
+                                finding: shouldPersistFindings
+                                    ? classifiedTurn.finding
+                                    : null,
+                            },
+                        );
+                    reviewItemOutcome = persisted.reviewItemOutcome;
                 }
                 signalCount += 1;
 
                 if (shouldPersistFindings && classifiedTurn.finding) {
                     findingCount += 1;
                     if (shouldPromoteFindingsToReviewItems) {
-                        reviewItemFingerprints.add(
-                            classifiedTurn.finding.reviewItem.fingerprint,
-                        );
+                        const { fingerprint } =
+                            classifiedTurn.finding.reviewItem;
+                        reviewItemFingerprints.add(fingerprint);
                         reviewItemCount = reviewItemFingerprints.size;
+                        // Only newly created items ping Slack; a recurrence
+                        // accrues onto its existing card without re-notifying.
+                        if (reviewItemOutcome === 'created') {
+                            const projectFingerprints =
+                                reviewItemFingerprintsByProject.get(
+                                    classifiedTurn.signal.subject.projectUuid,
+                                ) ?? new Set<string>();
+                            projectFingerprints.add(fingerprint);
+                            reviewItemFingerprintsByProject.set(
+                                classifiedTurn.signal.subject.projectUuid,
+                                projectFingerprints,
+                            );
+                        }
                     }
                 }
 
@@ -509,6 +712,25 @@ export class AiAgentReviewClassifierService extends BaseService {
                 findingCount: reviewedFindingCount,
                 reviewItemCount,
             });
+
+            if (
+                shouldPromoteFindingsToReviewItems &&
+                reviewItemFingerprintsByProject.size > 0
+            ) {
+                await Promise.all(
+                    Array.from(reviewItemFingerprintsByProject.entries()).map(
+                        ([projectUuid, fingerprints]) =>
+                            this.aiAgentReviewNotificationService.notifyNeedsReview(
+                                {
+                                    organizationUuid: args.organizationUuid,
+                                    projectUuid,
+                                    reviewRunUuid: run.uuid,
+                                    fingerprints: Array.from(fingerprints),
+                                },
+                            ),
+                    ),
+                );
+            }
 
             return {
                 runUuid: run.uuid,
@@ -541,6 +763,53 @@ export class AiAgentReviewClassifierService extends BaseService {
             });
             throw error;
         }
+    }
+
+    /**
+     * Next-turn-derived signals require a real next user turn. When there is
+     * none, strip them, and demote the finding when nothing else supports the
+     * promotion — the promotion was built on fabricated evidence. Explicit
+     * human feedback (score/comment) is independent grounds for promotion, so
+     * it always blocks the demotion.
+     */
+    static enforceNextUserSignalGrounding(
+        judgeOutput: AiAgentReviewClassifierJudgeOutput,
+        grounding: {
+            hasNextUserPrompt: boolean;
+            hasHumanFeedback: boolean;
+        },
+    ): AiAgentReviewClassifierJudgeOutput {
+        if (grounding.hasNextUserPrompt) {
+            return judgeOutput;
+        }
+        const nextUserSources = new Set([
+            'next_user_correction',
+            'next_user_dispute',
+            'next_user_retry',
+            'output_shape_correction',
+        ]);
+        const fabricatedSources = judgeOutput.implicitSignalSources.filter(
+            (source) => nextUserSources.has(source),
+        );
+        if (fabricatedSources.length === 0) {
+            return judgeOutput;
+        }
+        const implicitSignalSources = judgeOutput.implicitSignalSources.filter(
+            (source) => !nextUserSources.has(source),
+        );
+        const shouldDemote =
+            judgeOutput.promotedToFinding &&
+            implicitSignalSources.length === 0 &&
+            !grounding.hasHumanFeedback;
+        if (!shouldDemote) {
+            return { ...judgeOutput, implicitSignalSources };
+        }
+        return {
+            ...judgeOutput,
+            implicitSignalSources,
+            promotedToFinding: false,
+            promotionReason: 'next_user_signal_without_next_user_prompt',
+        };
     }
 
     private async classifyTurnWithJudge(
@@ -579,10 +848,54 @@ export class AiAgentReviewClassifierService extends BaseService {
             candidate,
             agentConfig,
         );
-        const judgeOutput = await this.judgeTurn(
+        const rawJudgeOutput = await this.judgeTurn(
             candidate,
             reviewEvidence.evidencePacket,
         );
+        const judgeOutput =
+            AiAgentReviewClassifierService.enforceNextUserSignalGrounding(
+                rawJudgeOutput,
+                {
+                    hasNextUserPrompt:
+                        reviewEvidence.evidencePacket.nextUserPrompt !== null,
+                    hasHumanFeedback:
+                        reviewEvidence.evidencePacket.humanFeedback.score !==
+                            null ||
+                        !!reviewEvidence.evidencePacket.humanFeedback.comment,
+                },
+            );
+        if (judgeOutput !== rawJudgeOutput) {
+            this.debugLog('NextUserSignalGroundingApplied', {
+                promptUuid: candidate.subject.assistantPromptUuid,
+                threadUuid: candidate.subject.threadUuid,
+                strippedSources: rawJudgeOutput.implicitSignalSources.filter(
+                    (source) =>
+                        !judgeOutput.implicitSignalSources.includes(source),
+                ),
+                demoted:
+                    rawJudgeOutput.promotedToFinding &&
+                    !judgeOutput.promotedToFinding,
+            });
+        }
+        // Resolve the judge's dedup match: a valid key reuses that item's
+        // fingerprint; a null/hallucinated key falls back to computing one.
+        const { matchedExistingItemKey } = judgeOutput;
+        const matchedFingerprint =
+            matchedExistingItemKey !== null
+                ? (reviewEvidence.dedupKeyToFingerprint.get(
+                      matchedExistingItemKey,
+                  ) ?? null)
+                : null;
+        if (matchedExistingItemKey !== null && matchedFingerprint === null) {
+            this.debugLog('InvalidMatchedItemKey', {
+                promptUuid: candidate.subject.assistantPromptUuid,
+                threadUuid: candidate.subject.threadUuid,
+                matchedExistingItemKey,
+            });
+        }
+        const fingerprintSource: 'matched' | 'computed' =
+            matchedFingerprint !== null ? 'matched' : 'computed';
+
         const signal: AiAgentReviewClassifierTurnSignal = {
             subject: candidate.subject,
             interactionSource: candidate.interactionSource,
@@ -617,6 +930,7 @@ export class AiAgentReviewClassifierService extends BaseService {
             promotedToFinding: judgeOutput.promotedToFinding,
             confidence: judgeOutput.confidence,
             judgePromptHash: JUDGE_PROMPT_HASH,
+            matchedExistingItemKey: judgeOutput.matchedExistingItemKey,
             implicitSignalSources: judgeOutput.implicitSignalSources,
             hasImplicitSignal: judgeOutput.implicitSignalSources.length > 0,
             hasPromotableImplicitSignal:
@@ -644,6 +958,9 @@ export class AiAgentReviewClassifierService extends BaseService {
             targetRefs: judgeOutput.targetRefs,
             recommendationAction: judgeOutput.recommendation?.actionType,
             reviewItemTitle: judgeOutput.reviewItem.title,
+            matchedExistingItemKey,
+            matchedKeyValidated: matchedFingerprint !== null,
+            fingerprintSource,
         });
 
         if (!judgeOutput.promotedToFinding) {
@@ -669,25 +986,29 @@ export class AiAgentReviewClassifierService extends BaseService {
               }
             : null;
 
-        const fingerprint = getAiAgentReviewItemFingerprint({
-            organizationUuid: candidate.subject.organizationUuid,
-            projectUuid: candidate.subject.projectUuid,
-            agentUuid: candidate.subject.agentUuid,
-            primaryRootCause: judgeOutput.primaryRootCause,
-            subcategories: judgeOutput.subcategories,
-            fixTargets: judgeOutput.fixTargets,
-            targetRefs,
-            agentConfigurationSettings: judgeOutput.agentConfigurationSettings,
-            capabilityKey:
-                targetRefs.find(
-                    (
-                        targetRef,
-                    ): targetRef is Extract<
-                        AiAgentTargetRef,
-                        { type: 'product_capability' }
-                    > => targetRef.type === 'product_capability',
-                )?.capabilityKey ?? null,
-        });
+        const fingerprint =
+            matchedFingerprint ??
+            getAiAgentReviewItemFingerprint({
+                organizationUuid: candidate.subject.organizationUuid,
+                projectUuid: candidate.subject.projectUuid,
+                agentUuid: candidate.subject.agentUuid,
+                threadUuid: candidate.subject.threadUuid,
+                primaryRootCause: judgeOutput.primaryRootCause,
+                subcategories: judgeOutput.subcategories,
+                fixTargets: judgeOutput.fixTargets,
+                targetRefs,
+                agentConfigurationSettings:
+                    judgeOutput.agentConfigurationSettings,
+                capabilityKey:
+                    targetRefs.find(
+                        (
+                            targetRef,
+                        ): targetRef is Extract<
+                            AiAgentTargetRef,
+                            { type: 'product_capability' }
+                        > => targetRef.type === 'product_capability',
+                    )?.capabilityKey ?? null,
+            });
 
         const projectContextEntry =
             args.projectContextEnabled &&
@@ -791,8 +1112,14 @@ export class AiAgentReviewClassifierService extends BaseService {
     ): Promise<{
         evidencePacket: AiAgentReviewJudgeEvidencePacket;
         agentConfig: AiAgentReviewAgentConfigEvidence;
+        // key ("item_1") → existing item fingerprint, kept server-side so a
+        // matchedExistingItemKey resolves to a real fingerprint (never the LLM).
+        dedupKeyToFingerprint: Map<string, string>;
     }> {
-        const semanticContext = await this.buildSemanticContext(candidate);
+        const semanticContext = await this.buildSemanticContext(
+            candidate,
+            agentConfig.catalogVisibility,
+        );
         const threadWritebackPullRequests =
             (
                 await this.aiAgentReviewClassifierModel.getThreadWritebackPullRequests(
@@ -800,16 +1127,131 @@ export class AiAgentReviewClassifierService extends BaseService {
                 )
             ).get(candidate.subject.threadUuid) ?? [];
 
+        const { existingReviewItems, dedupKeyToFingerprint } =
+            await this.loadDedupCandidates(candidate);
+
         return {
             agentConfig,
+            dedupKeyToFingerprint,
             evidencePacket:
                 AiAgentReviewClassifierService.buildJudgeEvidencePacket({
                     candidate,
                     agentConfig,
                     semanticContext,
                     threadWritebackPullRequests,
+                    existingReviewItems,
                 }),
         };
+    }
+
+    /**
+     * Loads this project's existing review items as dedup candidates. Assigns
+     * opaque keys ("item_1", …) the judge can reference, and keeps a server-side
+     * key → fingerprint map so a match resolves to a real fingerprint. A failed
+     * load degrades to no candidates — it must never fail the review.
+     */
+    private async loadDedupCandidates(
+        candidate: AiAgentReviewClassifierTurnCandidate,
+    ): Promise<{
+        existingReviewItems: AiAgentReviewItemDedupCandidate[];
+        dedupKeyToFingerprint: Map<string, string>;
+    }> {
+        try {
+            const rows =
+                await this.aiAgentReviewClassifierModel.findReviewItemDedupCandidates(
+                    {
+                        organizationUuid: candidate.subject.organizationUuid,
+                        projectUuid: candidate.subject.projectUuid,
+                        limit: 30,
+                    },
+                );
+            const existingReviewItems: AiAgentReviewItemDedupCandidate[] = [];
+            const dedupKeyToFingerprint = new Map<string, string>();
+            rows.forEach((row, index) => {
+                const key = `item_${index + 1}`;
+                dedupKeyToFingerprint.set(key, row.fingerprint);
+                existingReviewItems.push({
+                    key,
+                    title: row.title ?? 'Untitled review item',
+                    status: row.status,
+                    dismissedReason: row.dismissedReason,
+                    primaryRootCause:
+                        (row.primaryRootCause as AiAgentRootCause | null) ??
+                        'ambiguous',
+                    objectSummary:
+                        AiAgentReviewClassifierService.buildDedupObjectSummary(
+                            row.targetRefs,
+                        ),
+                });
+            });
+            return { existingReviewItems, dedupKeyToFingerprint };
+        } catch (error) {
+            this.debugLog('DedupCandidatesFailed', {
+                promptUuid: candidate.subject.assistantPromptUuid,
+                projectUuid: candidate.subject.projectUuid,
+                errorMessage:
+                    error instanceof Error ? error.message : String(error),
+            });
+            return {
+                existingReviewItems: [],
+                dedupKeyToFingerprint: new Map<string, string>(),
+            };
+        }
+    }
+
+    /**
+     * Comma-joined human-readable leaf names of an item's target refs, so the
+     * judge can tell what each candidate is about without seeing fingerprints.
+     */
+    private static buildDedupObjectSummary(
+        targetRefs: AiAgentTargetRef[] | null,
+    ): string | null {
+        if (!targetRefs || targetRefs.length === 0) {
+            return null;
+        }
+        const names = targetRefs
+            .map((targetRef) =>
+                AiAgentReviewClassifierService.targetRefLeafName(targetRef),
+            )
+            .filter((name): name is string => !!name);
+        return names.length > 0 ? names.join(', ') : null;
+    }
+
+    private static targetRefLeafName(
+        targetRef: AiAgentTargetRef,
+    ): string | null {
+        switch (targetRef.type) {
+            case 'model':
+                return targetRef.modelName;
+            case 'explore':
+                return targetRef.exploreName;
+            case 'join':
+                return targetRef.joinName;
+            case 'dimension':
+                return targetRef.dimensionName;
+            case 'metric':
+                return targetRef.metricName;
+            case 'additional_dimension':
+                return targetRef.dimensionName;
+            case 'required_filter':
+                return targetRef.fieldName;
+            case 'ai_hint':
+                return targetRef.targetName;
+            case 'agent_config':
+                return targetRef.setting;
+            case 'product_capability':
+                return targetRef.capabilityKey;
+            case 'runtime':
+                return targetRef.key;
+            case 'agent':
+            case 'content':
+                return null;
+            default:
+                return assertUnreachable(
+                    targetRef,
+                    'Unknown target ref type in dedup object summary',
+                );
+        }
     }
 
     private async captureAgentConfigSnapshot(
@@ -821,12 +1263,25 @@ export class AiAgentReviewClassifierService extends BaseService {
                 projectUuid: candidate.subject.projectUuid,
                 agentUuid: candidate.subject.agentUuid,
             });
+            const [knowledgeDocuments, mcpServers] = await Promise.all([
+                this.aiAgentDocumentModel.findAllForAgent({
+                    organizationUuid: candidate.subject.organizationUuid,
+                    agentUuid: candidate.subject.agentUuid,
+                    projectUuid: candidate.subject.projectUuid,
+                }),
+                this.aiAgentReviewClassifierModel.getAgentMcpCapabilities(
+                    candidate.subject.agentUuid,
+                ),
+            ]);
 
             const instruction = agent.instruction ?? null;
             const settings = [
                 instruction ? 'instructions' : null,
-                'data_access',
+                knowledgeDocuments.length > 0 ? 'knowledge_documents' : null,
+                agent.enableDataAccess ? 'data_access' : null,
                 agent.enableSelfImprovement ? 'self_improvement' : null,
+                mcpServers.length > 0 ? 'mcp_servers' : null,
+                agent.tags && agent.tags.length > 0 ? 'explore_tags' : null,
                 agent.spaceAccess.length > 0 ? 'space_access' : null,
                 agent.groupAccess.length > 0 || agent.userAccess.length > 0
                     ? 'user_or_group_access'
@@ -837,6 +1292,7 @@ export class AiAgentReviewClassifierService extends BaseService {
             const availableCapabilities: AiAgentAvailableCapability[] = [
                 'semantic_query',
                 'chart_generation',
+                'dashboard_generation',
                 'data_value_search',
                 ...(agent.enableDataAccess
                     ? (['chart_data_access'] as const)
@@ -844,6 +1300,10 @@ export class AiAgentReviewClassifierService extends BaseService {
                 ...(agent.enableSelfImprovement
                     ? (['context_improvement'] as const)
                     : []),
+                ...(agent.enableContentTools
+                    ? (['content_editing'] as const)
+                    : []),
+                ...(mcpServers.length > 0 ? (['mcp_tools'] as const) : []),
             ];
 
             const snapshot: AiAgentConfigSnapshot = {
@@ -855,9 +1315,15 @@ export class AiAgentReviewClassifierService extends BaseService {
                 availableCapabilities,
                 instructionHash: instruction ? hashText(instruction) : null,
                 instructionSummary: instruction
-                    ? truncate(instruction, 500)
+                    ? truncate(instruction, 2000)
                     : null,
-                knowledgeDocuments: [],
+                knowledgeDocuments: knowledgeDocuments.map((document) => ({
+                    uuid: document.uuid,
+                    name: document.name,
+                    updatedAt: document.updatedAt.toISOString(),
+                    summary: document.summary,
+                })),
+                mcpServers,
             };
             const snapshotHash = getAiAgentConfigSnapshotHash(snapshot);
 
@@ -871,8 +1337,15 @@ export class AiAgentReviewClassifierService extends BaseService {
                 availableCapabilities: snapshot.availableCapabilities,
                 dataAccessEnabled: agent.enableDataAccess,
                 selfImprovementEnabled: agent.enableSelfImprovement,
+                contentToolsEnabled: agent.enableContentTools,
                 instructionSummary: snapshot.instructionSummary,
                 knowledgeDocumentCount: snapshot.knowledgeDocuments.length,
+                knowledgeDocuments: snapshot.knowledgeDocuments,
+                mcpServers: snapshot.mcpServers,
+                catalogVisibility: await this.computeCatalogVisibility(
+                    candidate.subject.projectUuid,
+                    agent.tags,
+                ),
             };
         } catch (error) {
             this.debugLog('AgentConfigSnapshotFailed', {
@@ -895,13 +1368,106 @@ export class AiAgentReviewClassifierService extends BaseService {
             availableCapabilities: [],
             dataAccessEnabled: null,
             selfImprovementEnabled: null,
+            contentToolsEnabled: null,
             instructionSummary: null,
             knowledgeDocumentCount: 0,
+            knowledgeDocuments: [],
+            mcpServers: [],
+            catalogVisibility: null,
         };
+    }
+
+    /**
+     * Computes what a tag-restricted agent can see, mirroring the runtime
+     * filterExploreByTags scoping. Loads the explore cache once per agent per
+     * run (called from captureAgentConfigSnapshot, not per candidate). A
+     * failure here degrades to unscoped rather than dropping the whole
+     * agent config.
+     */
+    private async computeCatalogVisibility(
+        projectUuid: string,
+        exploreTags: string[] | null,
+    ): Promise<AiAgentReviewCatalogVisibility | null> {
+        if (!exploreTags || exploreTags.length === 0) {
+            return null;
+        }
+        try {
+            const explores = Object.values(
+                await this.projectModel.findExploresFromCache(
+                    projectUuid,
+                    'name',
+                ),
+            );
+            const visibleExploreNames = new Set<string>();
+            const visibleTables = new Set<string>();
+            const visibleFields = new Set<string>();
+            explores
+                .filter(
+                    (explore): explore is Explore => !isExploreError(explore),
+                )
+                .forEach((explore) => {
+                    const filtered = filterExploreByTags({
+                        explore,
+                        availableTags: exploreTags,
+                    });
+                    if (!filtered) {
+                        return;
+                    }
+                    Object.entries(filtered.tables).forEach(
+                        ([tableName, table]) => {
+                            const fieldNames = [
+                                ...Object.keys(table.dimensions),
+                                ...Object.keys(table.metrics),
+                            ];
+                            if (fieldNames.length === 0) {
+                                return;
+                            }
+                            visibleExploreNames.add(explore.name);
+                            visibleTables.add(tableName);
+                            fieldNames.forEach((fieldName) =>
+                                visibleFields.add(`${tableName}.${fieldName}`),
+                            );
+                        },
+                    );
+                });
+            return { visibleExploreNames, visibleTables, visibleFields };
+        } catch (error) {
+            this.debugLog('CatalogVisibilityFailed', {
+                projectUuid,
+                errorMessage:
+                    error instanceof Error ? error.message : String(error),
+            });
+            return null;
+        }
+    }
+
+    /**
+     * Restricts the catalog to what the reviewed agent can actually see.
+     * Without this the judge cannot distinguish "field is missing"
+     * (semantic_layer) from "field exists but this agent cannot access it"
+     * (agent_configuration). Table-type catalog items are named after the
+     * explore, so they match on explore name as well as table name.
+     */
+    private static scopeCatalogToAgent(
+        catalogItems: CatalogItemSummary[],
+        visibility: AiAgentReviewCatalogVisibility | null,
+    ): CatalogItemSummary[] {
+        if (!visibility) {
+            return catalogItems;
+        }
+        return catalogItems.filter((item) =>
+            item.type === CatalogType.Table
+                ? visibility.visibleExploreNames.has(item.name) ||
+                  visibility.visibleTables.has(item.name)
+                : visibility.visibleFields.has(
+                      `${item.tableName}.${item.name}`,
+                  ),
+        );
     }
 
     private async buildSemanticContext(
         candidate: AiAgentReviewClassifierTurnCandidate,
+        catalogVisibility: AiAgentReviewCatalogVisibility | null,
     ): Promise<AiAgentReviewJudgeEvidencePacket['semanticContext']> {
         const queriedExploreNames = [
             ...new Set(
@@ -922,9 +1488,13 @@ export class AiAgentReviewClassifierService extends BaseService {
         ];
 
         try {
-            const catalogItems = await this.catalogModel.getCatalogItemsSummary(
-                candidate.subject.projectUuid,
-            );
+            const catalogItems =
+                AiAgentReviewClassifierService.scopeCatalogToAgent(
+                    await this.catalogModel.getCatalogItemsSummary(
+                        candidate.subject.projectUuid,
+                    ),
+                    catalogVisibility,
+                );
 
             return {
                 queriedExploreNames,
@@ -956,17 +1526,23 @@ export class AiAgentReviewClassifierService extends BaseService {
     private async judgeTurnWithLlm(
         candidate: AiAgentReviewClassifierTurnCandidate,
         evidencePacket: AiAgentReviewJudgeEvidencePacket,
+        opts?: AiAgentReviewJudgeOptions & {
+            tier?: 'gate' | 'escalation';
+        },
     ): Promise<AiAgentReviewClassifierJudgeOutput> {
+        const tier = opts?.tier ?? 'gate';
         const model = getModel(this.lightdashConfig.ai.copilot, {
             provider: resolveReviewJudgeProvider(
                 this.lightdashConfig.ai.copilot,
             ),
-            useFastModel: true,
+            useFastModel: tier === 'gate',
         });
 
         this.debugLog('JudgeRequest', {
             promptUuid: candidate.subject.assistantPromptUuid,
             threadUuid: candidate.subject.threadUuid,
+            tier,
+            judgeModelId: model.model.modelId,
             modelProvider: candidate.modelMetadata.provider,
             modelName: candidate.modelMetadata.model,
             previousTurnCount: evidencePacket.previousTurns.length,
@@ -988,6 +1564,18 @@ export class AiAgentReviewClassifierService extends BaseService {
             ...defaultAgentOptions,
             ...model.callOptions,
             providerOptions: model.providerOptions,
+            experimental_telemetry: getAiCallTelemetry({
+                functionId:
+                    tier === 'gate'
+                        ? 'aiAgentReviewClassifierJudge'
+                        : 'aiAgentReviewClassifierJudgeEscalation',
+                feature: 'review-classifier',
+                organizationUuid: candidate.subject.organizationUuid,
+                projectUuid: candidate.subject.projectUuid,
+                agentUuid: candidate.subject.agentUuid,
+                threadUuid: candidate.subject.threadUuid,
+                promptUuid: candidate.subject.assistantPromptUuid,
+            }),
             schema: aiAgentReviewClassifierJudgeOutputSchema,
             messages: [
                 {
@@ -1012,15 +1600,20 @@ Implicit signal definitions — set these whenever the evidence supports them:
 - next_user_dispute: the next user prompt explicitly says the previous answer was wrong.
 - next_user_retry: the next user prompt asks the same unresolved question again or asks to try a different approach after a failed, empty, non-substantive, or off-target answer. Do not use this for normal iterative exploration after a useful answer.
 - output_shape_correction: the next user prompt asks for a different chart / format / grouping with no semantic change.
-- tool_error: a tool call errored, timed out, or returned an empty / error result the assistant did not recover from.
+- tool_error: a tool call errored, timed out, or returned an empty / error result the assistant did not recover from. A human SQL-approval gate expiring (evidence packet pendingApprovalTimeout=true, or a result saying the SQL approval timed out / the user may have stepped away) is NOT a tool_error — it is expected behavior when the user steps away, not a runtime or warehouse defect. Do not promote it as runtime_reliability; when it is the only issue in the turn use promotedToFinding=false (or feedback_quality at most), especially when humanFeedback.score is not negative.
 - product_capability_request: the user asked for something Lightdash cannot currently express.
 - human_intervention: an admin or engineer had to step in.
+
+Grounding rules for next_user_* signals — these override everything below:
+- The evidence packet's nextUserPrompt field is the ONLY evidence for next_user_correction, next_user_dispute, and next_user_retry. When nextUserPrompt is null there is no next user turn: never emit these signals, and never imagine or predict what the user would say next.
+- Never derive next_user_* signals from the reviewed turn's own userPrompt, from the assistant's answer, or from caveats, hedging, or self-critique inside the assistant's answer.
+- A clarifying or interrogative question asked BY THE ASSISTANT is not a user retry, correction, or dispute.
 
 Decision rules — apply in order:
 
 1. First, populate implicitSignalSources by inspecting the evidence packet. Do not skip this step.
 
-2. If the evidence shows the assistant successfully called a writeback tool (for example editDbtProject or runAiWriteback) and opened or updated a pull request, do not promote this as a semantic_layer or project_context finding. The remediation is already in progress; use promotedToFinding=false, signal=acceptance_or_continuation, primaryRootCause=not_a_failure, and promotionReason=writeback_tool_already_started. The evidence packet field threadWritebackPullRequests lists PRs the agent has already opened in this thread — when it is non-empty a real pull request exists, so do not infer from prose that the assistant fabricated it. Only consider writeback turns promotable when the tool failed, opened no pull request despite a clear requested change, or the user later says the PR is wrong.
+2. The evidence packet field toolOutcomes lists the outcome (success | error | unknown) of EVERY content-mutating, writeback, preview-deploy, and MCP tool call in the turn — it is complete even when the corresponding trace is not in supportingEvidence. A success there means the action really happened: never claim the assistant lacks a capability, fabricated an action, or failed to execute when toolOutcomes shows that tool succeeding. status=unknown means the result was never recorded — treat it as inconclusive, not as success or failure; status=error is a text heuristic, so cross-check it against supportingEvidence before promoting on it. If the evidence shows the assistant successfully called a writeback tool (for example editDbtProject or runAiWriteback) and opened or updated a pull request, do not promote this as a semantic_layer or project_context finding. The remediation is already in progress; use promotedToFinding=false, signal=acceptance_or_continuation, primaryRootCause=not_a_failure, and promotionReason=writeback_tool_already_started. The evidence packet field threadWritebackPullRequests lists PRs the agent has already opened in this thread — when it is non-empty a real pull request exists, so do not infer from prose that the assistant fabricated it. Only consider writeback turns promotable when the tool failed, opened no pull request despite a clear requested change, or the user later says the PR is wrong.
 
 3. Treat implicitSignalSources as strong evidence of unresolved user intent, not as decoration. Promote when the implicit signal points to likely assistant failure:
    - Always promote assistant_no_answer, next_user_dispute, tool_error, product_capability_request, and human_intervention.
@@ -1037,6 +1630,7 @@ When promoting, pick primaryRootCause by mapping the dominant signal:
    - next_user_correction or next_user_dispute about a field, metric, dimension, join, or filter definition within the right explore → semantic_layer.
    - next_user_retry after a failed or empty answer → runtime_reliability or agent_configuration depending on cause.
    - tool_error → runtime_reliability.
+   - Query-construction failures are NOT missing data: when queryHistory shows a filter-validation error, or degenerate filters that guarantee empty or partial results (an isNull filter on the requested date dimension, equality on a single date, stacked over-restrictive filters), attribute the empty/sparse result to the agent's own query construction → runtime_reliability (or agent_configuration when instructions caused it), NOT semantic_layer. Do not emit semantic_yaml_patch or dbt_modeling_ticket fixTargets for it. Do not accept the assistant's own "we don't have this data" prose as ground truth when its queries were malformed — inspect metricQuery.filters yourself.
    - product_capability_request → product_capability.
    - human_intervention → agent_configuration unless evidence clearly points elsewhere.
    - Tiebreaker for semantic_layer vs project_context: if the durable fix is a fact the agent should KNOW — what a term/acronym/entity refers to, or which explore answers a kind of question → project_context. If the durable fix is a CHANGE to the semantic YAML — a model, dimension, metric, join, or filter definition → semantic_layer. Do not default to semantic_layer when the real gap is missing routing or knowledge about which explore to use.
@@ -1046,6 +1640,16 @@ When promoting, pick primaryRootCause by mapping the dominant signal:
 5. Successful queries can still be findings even without implicit signals when the user asked broad business language and the semantic / catalog context does not clearly support the selected field, explore, or metric. Promote those as semantic_layer or project_context when a model definition, AI hint, or project context rule would prevent future ambiguity, choosing between them with the explore-vs-definition tiebreaker above.
 
 6. Use agentConfig to catch Lightdash-layer fixes: missing instructions, disabled data access, missing knowledge docs, access restrictions, or capability settings. Promote those as agent_configuration when the answer quality depends on agent setup.
+   agentConfig.availableCapabilities glossary — what this specific agent can do:
+   - semantic_query: run governed metric/dimension queries over the semantic layer.
+   - chart_generation / dashboard_generation: create charts and dashboards from query results.
+   - data_value_search: search actual values of dimensions.
+   - chart_data_access: read the underlying data of existing charts.
+   - context_improvement: propose project-context improvements.
+   - content_editing: edit or create saved charts/dashboards via content-as-code (editContent/createContent). Some product features exist ONLY through this path — for example big-number tiles and dashboard tab management — so whether a "not supported" claim is true depends on whether this agent has it.
+   - mcp_tools: external MCP servers listed in agentConfig.mcpServers together with their enabled tools (for example Linear or GitHub). Successful mcp_* calls in toolOutcomes are real integrations, not hallucinations.
+   Capability routing: when the assistant claims something is "not supported" but availableCapabilities/mcpServers show the capability DOES exist for this agent → agent_configuration (stale agent knowledge or missing instructions), not product_capability. Use product_capability only when the capability genuinely does not exist for this agent. The semanticContext catalog is already scoped to what this agent can access — a field absent there may still exist in the project but be outside the agent's explore tags; prefer agent_configuration (access/tags) over semantic_layer when the user names data the agent cannot see.
+   agentConfig.knowledgeDocuments lists the agent's actual knowledge documents (with summaries) — never recommend adding a knowledge document that already exists; recommend updating the existing one instead.
 
 7. If you would promote but cannot pick one primaryRootCause confidently, set primaryRootCause=ambiguous with confidence=low or medium and still promote.
 
@@ -1062,13 +1666,20 @@ For targetRefs, return compact refs:
 reviewItem.title should be concise and admin-facing.
 reviewItem.description should summarize why this grouping exists.
 
+Always populate targetRefs with every object the fix would touch (model, dimension, metric, join, explore). For semantic_layer and project_context findings these drive how findings collapse into one review item, so name the same object consistently across turns rather than varying the wording.
+
 Set projectContextEntry ONLY when primaryRootCause=project_context and a single durable, project-specific fact (a business definition or acronym, routing/join guidance, or object-scoped context) would prevent this class of failure in future turns. Otherwise set it to null.
 - op: "update" if one of the project context entries already injected into the reviewed turn was present but insufficient (reference its id); otherwise "create".
 - id: the existing entry id when op="update", otherwise null.
 - kind: definition | context. Use "definition" for acronyms and business vocabulary ("X means Y"); use "context" for everything else (routing/join rules, guidance, durable object-scoped facts).
 - content: a single self-contained sentence stating the fact (e.g. '"HR" = the high-risk diabetes cohort, not human resources.').
 - terms: the prompt-facing trigger words/phrases that should surface this entry (e.g. ["HR","high risk"]). Required for definitions.
-- objects: the semantic objects this fact concerns, from targetRefs — explore names and/or field ids in the \`table_field\` form shown as fieldId in field results (e.g. "payments_total_amount"); [] when purely prompt-driven.`,
+- objects: the semantic objects this fact concerns, from targetRefs — explore names and/or field ids in the \`table_field\` form shown as fieldId in field results (e.g. "payments_total_amount"); [] when purely prompt-driven.
+
+Existing review items — dedup rules. The evidence packet field existingReviewItems lists this project's existing review items (key, title, status, dismissedReason, primaryRootCause, objectSummary). Apply these rules when promoting:
+- If the finding's underlying user need matches an existing item — even when you would assign a DIFFERENT root cause or blame a DIFFERENT object — set matchedExistingItemKey to that item's key. The test is "would a human say this is the same problem?", not "same technical label". A timeout, a missing field, and a routing gap that all block the same user question are ONE problem.
+- Items with dismissedReason=expected_behavior are known non-issues already reviewed by a human. If the turn's failure is that same behavior, set promotedToFinding=false and matchedExistingItemKey=null — do not re-file it.
+- Otherwise set matchedExistingItemKey=null.`,
                 },
                 {
                     role: 'user',
@@ -1077,7 +1688,66 @@ Set projectContextEntry ONLY when primaryRootCause=project_context and a single 
             ],
         });
 
-        return result.object as AiAgentReviewClassifierJudgeOutput;
+        const output = result.object as AiAgentReviewClassifierJudgeOutput;
+
+        // Two-tier judge: the fast model is a promotion gate; turns it wants
+        // to promote re-run through the strong model, whose verdict wins —
+        // root cause and targetRefs are what mint review items and route PRs.
+        const escalationEnabled = opts?.escalationEnabled ?? true;
+        if (
+            tier === 'gate' &&
+            escalationEnabled &&
+            output.promotedToFinding &&
+            this.hasDistinctEscalationJudgeModel(model.model.modelId)
+        ) {
+            try {
+                const escalatedOutput = await this.judgeTurnWithLlm(
+                    candidate,
+                    evidencePacket,
+                    { tier: 'escalation' },
+                );
+                this.debugLog('JudgeEscalationCompleted', {
+                    promptUuid: candidate.subject.assistantPromptUuid,
+                    threadUuid: candidate.subject.threadUuid,
+                    gatePromoted: output.promotedToFinding,
+                    gateRootCause: output.primaryRootCause,
+                    escalatedPromoted: escalatedOutput.promotedToFinding,
+                    escalatedRootCause: escalatedOutput.primaryRootCause,
+                });
+                return escalatedOutput;
+            } catch (error) {
+                // The gate verdict is still a valid classification — never
+                // lose the turn because the strong model was unavailable.
+                Logger.error(
+                    'AI review judge escalation failed; keeping gate verdict',
+                    {
+                        promptUuid: candidate.subject.assistantPromptUuid,
+                        threadUuid: candidate.subject.threadUuid,
+                        errorMessage:
+                            error instanceof Error
+                                ? error.message
+                                : String(error),
+                    },
+                );
+                return output;
+            }
+        }
+
+        return output;
+    }
+
+    private hasDistinctEscalationJudgeModel(gateModelId: string): boolean {
+        try {
+            const escalationModel = getModel(this.lightdashConfig.ai.copilot, {
+                provider: resolveReviewJudgeProvider(
+                    this.lightdashConfig.ai.copilot,
+                ),
+                useFastModel: false,
+            });
+            return escalationModel.model.modelId !== gateModelId;
+        } catch {
+            return false;
+        }
     }
 
     private async isEnabled(args: {
@@ -1205,11 +1875,13 @@ Set projectContextEntry ONLY when primaryRootCause=project_context and a single 
         agentConfig,
         semanticContext,
         threadWritebackPullRequests,
+        existingReviewItems,
     }: {
         candidate: AiAgentReviewClassifierTurnCandidate;
         agentConfig: AiAgentReviewJudgeEvidencePacket['agentConfig'];
         semanticContext: AiAgentReviewJudgeEvidencePacket['semanticContext'];
         threadWritebackPullRequests: AiAgentReviewJudgeEvidencePacket['threadWritebackPullRequests'];
+        existingReviewItems: AiAgentReviewItemDedupCandidate[];
     }): AiAgentReviewJudgeEvidencePacket {
         return {
             subject: candidate.subject,
@@ -1248,6 +1920,9 @@ Set projectContextEntry ONLY when primaryRootCause=project_context and a single 
             suggestedEvidenceExcerpts:
                 AiAgentReviewClassifierService.buildEvidenceExcerpts(candidate),
             threadWritebackPullRequests,
+            toolOutcomes: candidate.toolOutcomes,
+            pendingApprovalTimeout: candidate.pendingApprovalTimeout,
+            existingReviewItems,
         };
     }
 

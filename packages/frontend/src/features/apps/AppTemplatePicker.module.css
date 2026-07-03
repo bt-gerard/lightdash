@@ -1,7 +1,7 @@
 .fan {
     position: relative;
     width: 100%;
-    max-width: 720px;
+    max-width: 920px;
     height: 260px;
     margin: 0 auto;
 }
@@ -37,35 +37,35 @@
 }
 
 .card[data-pos='0'] {
-    --x: -258px;
-    --y: 44px;
-    --rot: -15deg;
+    --x: -249px;
+    --y: 32px;
+    --rot: -12deg;
     z-index: 1;
 }
 .card[data-pos='1'] {
-    --x: -88px;
-    --y: 2px;
-    --rot: -5deg;
+    --x: -83px;
+    --y: 4px;
+    --rot: -4deg;
     z-index: 2;
 }
 .card[data-pos='2'] {
-    --x: 88px;
-    --y: 2px;
-    --rot: 5deg;
+    --x: 83px;
+    --y: 4px;
+    --rot: 4deg;
     z-index: 3;
 }
 .card[data-pos='3'] {
-    --x: 258px;
-    --y: 44px;
-    --rot: 15deg;
+    --x: 249px;
+    --y: 32px;
+    --rot: 12deg;
     z-index: 4;
 }
 
 .card:hover,
 .card:focus-visible {
     outline: none;
-    transform: translate(calc(var(--x) - 92px), calc(var(--y) - 28px))
-        rotate(calc(var(--rot) * 0.35)) scale(1.04);
+    transform: translate(calc(var(--x) - 92px), calc(var(--y) - 8px))
+        rotate(calc(var(--rot) * 0.85)) scale(1.02);
     z-index: 10;
 
     @mixin light {
@@ -80,8 +80,8 @@
 
 .cardSelected,
 .cardSelected:hover {
-    transform: translate(calc(var(--x) - 92px), calc(var(--y) - 24px))
-        rotate(calc(var(--rot) * 0.35)) scale(1.04);
+    transform: translate(calc(var(--x) - 92px), var(--y)) rotate(var(--rot))
+        scale(1.06);
     z-index: 9;
 
     @mixin light {
@@ -92,10 +92,10 @@
             0 18px 40px -10px alpha(var(--mantine-color-black), 0.22);
     }
     @mixin dark {
-        border-color: var(--mantine-color-ldGray-0);
+        border-color: var(--mantine-color-ldGray-9);
         background-color: var(--mantine-color-dark-5);
         box-shadow:
-            0 0 0 1px var(--mantine-color-ldGray-0),
+            0 0 0 1px var(--mantine-color-ldGray-9),
             0 18px 40px -10px alpha(var(--mantine-color-black), 0.6);
     }
 }
@@ -106,7 +106,7 @@
         color: var(--mantine-color-white);
     }
     @mixin dark {
-        background-color: var(--mantine-color-ldGray-0);
+        background-color: var(--mantine-color-ldGray-9);
         color: var(--mantine-color-dark-9);
     }
 }
@@ -121,14 +121,8 @@
     line-height: 1.2;
 }
 
-.selectedIndicator {
-    position: absolute;
-    top: var(--mantine-spacing-sm);
-    right: var(--mantine-spacing-sm);
-}
-
 /* Narrow widths can't hold the arch — stack the cards vertically. */
-@media (max-width: 760px) {
+@media (max-width: 880px) {
     .fan {
         height: auto;
         display: flex;

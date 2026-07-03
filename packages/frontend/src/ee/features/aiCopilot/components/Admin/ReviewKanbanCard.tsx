@@ -37,6 +37,7 @@ import {
 } from './reviewItemDetails';
 import styles from './ReviewKanbanBoard.module.css';
 import { getStartWritebackKind, isWritebackRetry } from './reviewLane';
+import { ReviewPriorityMenu } from './ReviewPriorityMenu';
 
 type Props = {
     item: AiAgentReviewItemSummary;
@@ -78,7 +79,6 @@ export const ReviewKanbanCard: FC<Props> = ({ item, isSelected, onSelect }) => {
 
     const title = getIssueTitle(item);
     const targetAnchor = getTargetAnchor(item);
-    const isRecurring = item.findingCount > 1;
 
     const startKind = getStartWritebackKind(item);
     const isRetry = isWritebackRetry(item);
@@ -87,7 +87,7 @@ export const ReviewKanbanCard: FC<Props> = ({ item, isSelected, onSelect }) => {
 
     const remediation = item.remediation;
     const hasWorkspace = Boolean(remediation);
-    const workspaceHref = `/generalSettings/ai/reviews/${encodeURIComponent(
+    const workspaceHref = `/generalSettings/ai/issues/${encodeURIComponent(
         item.fingerprint,
     )}`;
     const activityLabel = getWorkspaceActivityLabel(item);
@@ -145,22 +145,6 @@ export const ReviewKanbanCard: FC<Props> = ({ item, isSelected, onSelect }) => {
                             )}
                         </Stack>
                         <Group gap={8} wrap="nowrap" align="center">
-                            {isRecurring && (
-                                <Tooltip
-                                    variant="xs"
-                                    label={`Seen ${item.findingCount} times`}
-                                    position="top"
-                                >
-                                    <Badge
-                                        size="sm"
-                                        radius="sm"
-                                        variant="default"
-                                        color="gray"
-                                    >
-                                        {item.findingCount}×
-                                    </Badge>
-                                </Tooltip>
-                            )}
                             <Tooltip
                                 variant="xs"
                                 position="top"
@@ -196,6 +180,12 @@ export const ReviewKanbanCard: FC<Props> = ({ item, isSelected, onSelect }) => {
                                     reviewRootCauseLabels[item.primaryRootCause]
                                 }
                             />
+                            {!isExample && (
+                                <ReviewPriorityMenu
+                                    fingerprint={item.fingerprint}
+                                    priority={item.priority}
+                                />
+                            )}
                         </Group>
 
                         {!isExample && (

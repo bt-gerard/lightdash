@@ -7,11 +7,13 @@ import {
     contentToResourceViewItem,
     ContentType,
     FeatureFlags,
+    isResourceViewDataAppItem,
     isResourceViewSpaceItem,
     type ApiContentBulkActionBody,
     type ResourceViewItem,
     type SpaceSummary,
 } from '@lightdash/common';
+import { useDebouncedCallback } from '@mantine-8/hooks';
 import {
     ActionIcon,
     Anchor,
@@ -38,8 +40,8 @@ import {
     IconX,
 } from '@tabler/icons-react';
 import {
+    memo,
     useCallback,
-    useDeferredValue,
     useEffect,
     useMemo,
     useRef,
@@ -83,7 +85,10 @@ import {
 } from './types';
 
 type ResourceView2Props = Partial<ContentTableOptions<ResourceViewItem>> & {
-    filters: Pick<ContentArgs, 'spaceUuids' | 'contentTypes'> & {
+    filters: Pick<
+        ContentArgs,
+        'spaceUuids' | 'contentTypes' | 'includePersonalDataApps'
+    > & {
         projectUuid: string;
     };
     contentTypeFilter?: {
@@ -96,6 +101,84 @@ type ResourceView2Props = Partial<ContentTableOptions<ResourceViewItem>> & {
 };
 
 const defaultSpaces: SpaceSummary[] = [];
+
+// Self-contained search input: holds the typed value locally and only lifts the
+// debounced value to the parent, so keystrokes don't re-render the whole table.
+const DebouncedSearchInput = memo(
+    ({ onSearch }: { onSearch: (value: string) => void }) => {
+        const [value, setValue] = useState('');
+        const debouncedOnSearch = useDebouncedCallback(onSearch, 300);
+
+        // Debounce typing. Clearing (empty value) flushes immediately; re-invoking
+        // the debounced fn cancels any pending call so a stale keystroke can't
+        // resurrect a just-cleared search.
+        const handleChange = useCallback(
+            (newValue: string) => {
+                setValue(newValue);
+                debouncedOnSearch(newValue);
+                if (newValue === '') {
+                    debouncedOnSearch.flush();
+                }
+            },
+            [debouncedOnSearch],
+        );
+
+        return (
+            <Tooltip withinPortal variant="xs" label="Search by name">
+                <TextInput
+                    size="xs"
+                    radius="md"
+                    styles={(inputTheme) => ({
+                        input: {
+                            height: 32,
+                            width: 309,
+                            padding: `${inputTheme.spacing.xs} ${inputTheme.spacing.sm}`,
+                            textOverflow: 'ellipsis',
+                            fontSize: inputTheme.fontSizes.sm,
+                            fontWeight: 400,
+                            color: value
+                                ? inputTheme.colors.ldGray[8]
+                                : inputTheme.colors.ldGray[5],
+                            boxShadow: inputTheme.shadows.subtle,
+                            border: `1px solid ${inputTheme.colors.ldGray[3]}`,
+                            '&:hover': {
+                                border: `1px solid ${inputTheme.colors.ldGray[4]}`,
+                            },
+                            '&:focus': {
+                                border: `1px solid ${inputTheme.colors.blue[5]}`,
+                            },
+                        },
+                    })}
+                    type="search"
+                    variant="default"
+                    placeholder="Search by name"
+                    value={value}
+                    icon={
+                        <MantineIcon
+                            size="md"
+                            color="ldGray.6"
+                            icon={IconSearch}
+                        />
+                    }
+                    onChange={(e) => handleChange(e.target.value)}
+                    rightSection={
+                        value && (
+                            <ActionIcon
+                                onClick={() => handleChange('')}
+                                variant="transparent"
+                                size="xs"
+                                color="ldGray.5"
+                            >
+                                <MantineIcon icon={IconX} />
+                            </ActionIcon>
+                        )
+                    }
+                />
+            </Tooltip>
+        );
+    },
+);
+DebouncedSearchInput.displayName = 'DebouncedSearchInput';
 
 const InfiniteResourceTable = ({
     filters,
@@ -176,20 +259,33 @@ const InfiniteResourceTable = ({
                     (s) => s.uuid === item.data.spaceUuid,
                 );
 
-                return space ? (
-                    <Anchor
-                        color="ldGray.7"
-                        component={Link}
-                        to={`/projects/${space.projectUuid}/spaces/${space.uuid}`}
-                        onClick={(e: React.MouseEvent<HTMLAnchorElement>) =>
-                            e.stopPropagation()
-                        }
-                        fz={12}
-                        fw={500}
-                    >
-                        {space.name}
-                    </Anchor>
-                ) : null;
+                if (space) {
+                    return (
+                        <Anchor
+                            color="ldGray.7"
+                            component={Link}
+                            to={`/projects/${space.projectUuid}/spaces/${space.uuid}`}
+                            onClick={(e: React.MouseEvent<HTMLAnchorElement>) =>
+                                e.stopPropagation()
+                            }
+                            fz={12}
+                            fw={500}
+                        >
+                            {space.name}
+                        </Anchor>
+                    );
+                }
+
+                // Personal (space-less) data apps have no space to link to.
+                if (isResourceViewDataAppItem(item) && !item.data.spaceUuid) {
+                    return (
+                        <Text fz={12} fw={500} color="dimmed">
+                            -
+                        </Text>
+                    );
+                }
+
+                return null;
             },
         },
         {
@@ -277,12 +373,11 @@ const InfiniteResourceTable = ({
     ];
     const [sorting, setSorting] =
         useState<ContentTableSortingState>(initialSorting);
-    const [search, setSearch] = useState<string | undefined>(undefined);
+    // Holds the debounced search value lifted from DebouncedSearchInput.
+    const [search, setSearch] = useState('');
     const [selectedContentType, setSelectedContentType] = useState<
         ContentType | undefined
     >(contentTypeFilter?.defaultValue);
-    const clearSearch = useCallback(() => setSearch(''), [setSearch]);
-    const deferredSearch = useDeferredValue(search);
     const tableContainerRef = useRef<HTMLDivElement>(null);
     const rowVirtualizerInstanceRef =
         useRef<ContentTableVirtualizer<HTMLDivElement, HTMLTableRowElement>>(
@@ -326,9 +421,10 @@ const InfiniteResourceTable = ({
                 projectUuids: [filters.projectUuid],
                 page: 1,
                 pageSize: 25,
-                search: deferredSearch,
+                search,
                 sortBy: sortBy?.sortBy,
                 sortDirection: sortBy?.sortDirection,
+                includePersonalDataApps: filters.includePersonalDataApps,
             },
             { keepPreviousData: true },
         );
@@ -577,63 +673,7 @@ const InfiniteResourceTable = ({
                 <Box>
                     <Group p={`${theme.spacing.lg} ${theme.spacing.xl}`}>
                         <Group spacing="xs">
-                            <Tooltip
-                                withinPortal
-                                variant="xs"
-                                label="Search by name"
-                            >
-                                {/* Search input */}
-                                <TextInput
-                                    size="xs"
-                                    radius="md"
-                                    styles={(inputTheme) => ({
-                                        input: {
-                                            height: 32,
-                                            width: 309,
-                                            padding: `${inputTheme.spacing.xs} ${inputTheme.spacing.sm}`,
-                                            textOverflow: 'ellipsis',
-                                            fontSize: inputTheme.fontSizes.sm,
-                                            fontWeight: 400,
-                                            color: search
-                                                ? inputTheme.colors.ldGray[8]
-                                                : inputTheme.colors.ldGray[5],
-                                            boxShadow:
-                                                inputTheme.shadows.subtle,
-                                            border: `1px solid ${inputTheme.colors.ldGray[3]}`,
-                                            '&:hover': {
-                                                border: `1px solid ${inputTheme.colors.ldGray[4]}`,
-                                            },
-                                            '&:focus': {
-                                                border: `1px solid ${inputTheme.colors.blue[5]}`,
-                                            },
-                                        },
-                                    })}
-                                    type="search"
-                                    variant="default"
-                                    placeholder="Search by name"
-                                    value={search ?? ''}
-                                    icon={
-                                        <MantineIcon
-                                            size="md"
-                                            color="ldGray.6"
-                                            icon={IconSearch}
-                                        />
-                                    }
-                                    onChange={(e) => setSearch(e.target.value)}
-                                    rightSection={
-                                        search && (
-                                            <ActionIcon
-                                                onClick={clearSearch}
-                                                variant="transparent"
-                                                size="xs"
-                                                color="ldGray.5"
-                                            >
-                                                <MantineIcon icon={IconX} />
-                                            </ActionIcon>
-                                        )
-                                    }
-                                />
-                            </Tooltip>
+                            <DebouncedSearchInput onSearch={setSearch} />
 
                             {contentTypeFilter &&
                             contentTypeFilter.options.length > 1 ? (
@@ -756,7 +796,7 @@ const InfiniteResourceTable = ({
             showProgressBars: false,
             showSkeletons: isInitialLoading, // loading for the first time with no data
             density: 'md',
-            globalFilter: search ?? '',
+            globalFilter: search,
         },
         mantineLoadingOverlayProps: {
             loaderProps: {

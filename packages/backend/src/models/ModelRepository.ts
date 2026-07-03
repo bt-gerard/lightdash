@@ -41,6 +41,7 @@ import { PasswordResetLinkModel } from './PasswordResetLinkModel';
 import { PersistentDownloadFileModel } from './PersistentDownloadFileModel';
 import { PinnedListModel } from './PinnedListModel';
 import { ProjectCompileLogModel } from './ProjectCompileLogModel';
+import { ProjectDbtSourcesModel } from './ProjectDbtSourcesModel';
 import { ProjectModel } from './ProjectModel/ProjectModel';
 import { ProjectParametersModel } from './ProjectParametersModel';
 import { PullRequestsModel } from './PullRequestsModel';
@@ -62,6 +63,7 @@ import { SpotlightTableConfigModel } from './SpotlightTableConfigModel';
 import { SshKeyPairModel } from './SshKeyPairModel';
 import { TagsModel } from './TagsModel';
 import { UserAttributesModel } from './UserAttributesModel';
+import { UserAvatarModel } from './UserAvatarModel';
 import { UserFavoritesModel } from './UserFavoritesModel';
 import { UserModel } from './UserModel';
 import { UserWarehouseCredentialsModel } from './UserWarehouseCredentials/UserWarehouseCredentialsModel';
@@ -97,6 +99,7 @@ export type ModelManifest = {
     organizationAllowedEmailDomainsModel: OrganizationAllowedEmailDomainsModel;
     organizationDesignModel: OrganizationDesignModel;
     organizationMemberProfileModel: OrganizationMemberProfileModel;
+    userAvatarModel: UserAvatarModel;
     organizationModel: OrganizationModel;
     organizationDomainVerificationModel: OrganizationDomainVerificationModel;
     organizationSettingsModel: OrganizationSettingsModel;
@@ -106,6 +109,7 @@ export type ModelManifest = {
     personalAccessTokenModel: PersonalAccessTokenModel;
     pinnedListModel: PinnedListModel;
     projectModel: ProjectModel;
+    projectDbtSourcesModel: ProjectDbtSourcesModel;
     projectCompileLogModel: ProjectCompileLogModel;
     pullRequestsModel: PullRequestsModel;
     resourceViewItemModel: ResourceViewItemModel;
@@ -143,8 +147,10 @@ export type ModelManifest = {
     aiAgentModel: unknown;
     aiAgentDocumentModel: unknown;
     aiWritebackThreadModel: unknown;
+    sandboxRegistryModel: unknown;
     projectCiStatusModel: unknown;
     aiAgentReviewClassifierModel: unknown;
+    aiAgentReviewNotificationModel: unknown;
     projectContextModel: unknown;
     aiRouterModel: unknown;
     managedAgentModel: unknown;
@@ -154,6 +160,7 @@ export type ModelManifest = {
     roadmapModel: unknown;
     serviceAccountModel: unknown;
     externalConnectionModel: unknown;
+    schedulerAiAugmentationModel: unknown;
 };
 
 /**
@@ -448,6 +455,13 @@ export class ModelRepository
         );
     }
 
+    public getUserAvatarModel(): UserAvatarModel {
+        return this.getModel(
+            'userAvatarModel',
+            () => new UserAvatarModel({ database: this.database }),
+        );
+    }
+
     public getOrganizationModel(): OrganizationModel {
         return this.getModel(
             'organizationModel',
@@ -533,6 +547,17 @@ export class ModelRepository
                 new ProjectModel({
                     database: this.database,
                     lightdashConfig: this.lightdashConfig,
+                    encryptionUtil: this.utils.getEncryptionUtil(),
+                }),
+        );
+    }
+
+    public getProjectDbtSourcesModel(): ProjectDbtSourcesModel {
+        return this.getModel(
+            'projectDbtSourcesModel',
+            () =>
+                new ProjectDbtSourcesModel({
+                    database: this.database,
                     encryptionUtil: this.utils.getEncryptionUtil(),
                 }),
         );
@@ -765,6 +790,10 @@ export class ModelRepository
         return this.getModel('aiWritebackThreadModel');
     }
 
+    public getSandboxRegistryModel<ModelImplT>(): ModelImplT {
+        return this.getModel('sandboxRegistryModel');
+    }
+
     public getProjectCiStatusModel<ModelImplT>(): ModelImplT {
         return this.getModel('projectCiStatusModel');
     }
@@ -773,8 +802,16 @@ export class ModelRepository
         return this.getModel('projectContextModel');
     }
 
+    public getSchedulerAiAugmentationModel<ModelImplT>(): ModelImplT {
+        return this.getModel('schedulerAiAugmentationModel');
+    }
+
     public getAiAgentReviewClassifierModel<ModelImplT>(): ModelImplT {
         return this.getModel('aiAgentReviewClassifierModel');
+    }
+
+    public getAiAgentReviewNotificationModel<ModelImplT>(): ModelImplT {
+        return this.getModel('aiAgentReviewNotificationModel');
     }
 
     public getAiRouterModel<ModelImplT>(): ModelImplT {

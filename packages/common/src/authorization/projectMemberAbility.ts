@@ -181,6 +181,11 @@ export const projectMemberAbilities: Record<
             projectUuid: member.projectUuid,
             createdByUserUuid: member.userUuid,
         });
+        // View external connections to select and link them when building a
+        // data app. Managing (create/edit/delete) stays admin-only.
+        can('view', 'ExternalConnection', {
+            projectUuid: member.projectUuid,
+        });
 
         can('manage', 'Space', {
             projectUuid: member.projectUuid,
@@ -322,6 +327,9 @@ export const projectMemberAbilities: Record<
         can('manage', 'AiAgentDocument', {
             projectUuid: member.projectUuid,
         });
+        can('manage', 'ContentVerification', {
+            projectUuid: member.projectUuid,
+        });
     },
     admin(member, { can }) {
         projectMemberAbilities.developer(member, { can });
@@ -331,10 +339,6 @@ export const projectMemberAbilities: Record<
         });
 
         can('manage', 'ExternalConnection', {
-            projectUuid: member.projectUuid,
-        });
-
-        can('manage', 'ContentVerification', {
             projectUuid: member.projectUuid,
         });
 

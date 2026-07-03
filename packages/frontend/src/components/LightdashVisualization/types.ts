@@ -19,6 +19,7 @@ import { type CartesianTypeOptions } from '../../hooks/cartesianChartConfig/useC
 import type useTableConfig from '../../hooks/tableVisualization/useTableConfig';
 import type useBigNumberConfig from '../../hooks/useBigNumberConfig';
 import type useCustomVisualizationConfig from '../../hooks/useCustomVisualizationConfig';
+import type useDataAppVizVisualizationConfig from '../../hooks/useDataAppVizVisualizationConfig';
 import type useFunnelChartConfig from '../../hooks/useFunnelChartConfig';
 import type useGaugeChartConfig from '../../hooks/useGaugeChartConfig';
 import type usePieChartConfig from '../../hooks/usePieChartConfig';
@@ -199,6 +200,24 @@ export type VisualizationCustomConfigProps =
         itemsMap?: ItemsMap | undefined;
     };
 
+// Data app viz
+
+export type VisualizationConfigDataAppViz = {
+    chartType: ChartType.DATA_APP_VIZ;
+    chartConfig: ReturnType<typeof useDataAppVizVisualizationConfig>;
+};
+
+export const isDataAppVizVisualizationConfig = (
+    visualizationConfig: VisualizationConfig | undefined,
+): visualizationConfig is VisualizationConfigDataAppViz => {
+    return visualizationConfig?.chartType === ChartType.DATA_APP_VIZ;
+};
+
+export type VisualizationDataAppVizConfigProps =
+    VisualizationConfigCommon<VisualizationConfigDataAppViz> & {
+        itemsMap?: ItemsMap | undefined;
+    };
+
 // Gauge
 
 export type VisualizationConfigGauge = {
@@ -279,4 +298,5 @@ export type VisualizationConfig =
     | VisualizationConfigGauge
     | VisualizationConfigMap
     | VisualizationCustomConfigType
-    | VisualizationConfigSankeyType;
+    | VisualizationConfigSankeyType
+    | VisualizationConfigDataAppViz;

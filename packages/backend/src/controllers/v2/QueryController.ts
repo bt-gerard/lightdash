@@ -295,6 +295,8 @@ export class QueryController extends BaseController {
                 limit: body.limit,
                 parameters: body.parameters,
                 pivotResults: body.pivotResults,
+                filterOverrides: body.filters,
+                dashboardFilters: body.dashboardFilters,
             });
 
         return {

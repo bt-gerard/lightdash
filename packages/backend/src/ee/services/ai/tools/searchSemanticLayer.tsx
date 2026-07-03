@@ -6,7 +6,7 @@ import type {
 } from '../types/aiAgentDependencies';
 import { toModelOutput } from '../utils/toModelOutput';
 import { toolErrorHandler } from '../utils/toolErrorHandler';
-import { FIELD_DESCRIPTION_MAX_CHARS, truncate } from '../utils/truncation';
+import { truncate } from '../utils/truncation';
 import { xmlBuilder } from '../xmlBuilder';
 
 type Dependencies = {
@@ -14,6 +14,7 @@ type Dependencies = {
     updateProgress: UpdateProgressFn;
     /** Upper bound for the agent-supplied pageSize; also the fallback default. */
     maxPageSize: number;
+    toolDescriptionMaxChars: number;
 };
 
 /** Used when the agent does not specify a pageSize. */
@@ -24,7 +25,10 @@ const toolDefinition = searchSemanticLayerToolDefinition.for('agent');
 const generateResponse = ({
     fields,
     pagination,
-}: Awaited<ReturnType<SearchSemanticLayerFn>>) => (
+    toolDescriptionMaxChars,
+}: Awaited<ReturnType<SearchSemanticLayerFn>> & {
+    toolDescriptionMaxChars: number;
+}) => (
     <semanticLayerFields
         page={pagination?.page}
         pageSize={pagination?.pageSize}
@@ -50,10 +54,7 @@ const generateResponse = ({
             >
                 {field.description && (
                     <description>
-                        {truncate(
-                            field.description,
-                            FIELD_DESCRIPTION_MAX_CHARS,
-                        )}
+                        {truncate(field.description, toolDescriptionMaxChars)}
                     </description>
                 )}
             </field>
@@ -65,6 +66,7 @@ export const getSearchSemanticLayer = ({
     searchSemanticLayer,
     updateProgress,
     maxPageSize,
+    toolDescriptionMaxChars,
 }: Dependencies) =>
     tool({
         ...toolDefinition,
@@ -91,7 +93,11 @@ export const getSearchSemanticLayer = ({
                 });
 
                 return {
-                    result: generateResponse({ fields, pagination }).toString(),
+                    result: generateResponse({
+                        fields,
+                        pagination,
+                        toolDescriptionMaxChars,
+                    }).toString(),
                     metadata: {
                         status: 'success',
                         ranking: {

@@ -220,6 +220,11 @@ export const applyOrganizationMemberStaticAbilities: Record<
             organizationUuid: member.organizationUuid,
             createdByUserUuid: member.userUuid,
         });
+        // View external connections to select and link them when building a
+        // data app. Managing (create/edit/delete) stays admin-only.
+        can('view', 'ExternalConnection', {
+            organizationUuid: member.organizationUuid,
+        });
 
         can('manage', 'Space', {
             organizationUuid: member.organizationUuid,
@@ -232,6 +237,9 @@ export const applyOrganizationMemberStaticAbilities: Record<
         });
 
         can('view', 'AiAgent', {
+            organizationUuid: member.organizationUuid,
+        });
+        can('view', 'OrganizationAiAgent', {
             organizationUuid: member.organizationUuid,
         });
         can('view', 'AiAgentDocument', {
@@ -315,12 +323,30 @@ export const applyOrganizationMemberStaticAbilities: Record<
                 },
             },
         });
+        can('promote', 'SavedChart', {
+            organizationUuid: member.organizationUuid,
+            access: {
+                $elemMatch: {
+                    userUuid: member.userUuid,
+                    role: SpaceMemberRole.ADMIN,
+                },
+            },
+        });
         can('promote', 'Dashboard', {
             organizationUuid: member.organizationUuid,
             access: {
                 $elemMatch: {
                     userUuid: member.userUuid,
                     role: SpaceMemberRole.EDITOR,
+                },
+            },
+        });
+        can('promote', 'Dashboard', {
+            organizationUuid: member.organizationUuid,
+            access: {
+                $elemMatch: {
+                    userUuid: member.userUuid,
+                    role: SpaceMemberRole.ADMIN,
                 },
             },
         });
@@ -363,12 +389,18 @@ export const applyOrganizationMemberStaticAbilities: Record<
         can('manage', 'AiAgent', {
             organizationUuid: member.organizationUuid,
         });
+        can('manage', 'OrganizationAiAgent', {
+            organizationUuid: member.organizationUuid,
+        });
         can('manage', 'AiAgentDocument', {
             organizationUuid: member.organizationUuid,
         });
         can('manage', 'AiAgentThread', {
             organizationUuid: member.organizationUuid,
             userUuid: member.userUuid,
+        });
+        can('manage', 'ContentVerification', {
+            organizationUuid: member.organizationUuid,
         });
     },
     admin(member, { can }) {
@@ -383,10 +415,6 @@ export const applyOrganizationMemberStaticAbilities: Record<
         });
 
         can('manage', 'OrganizationDesign', {
-            organizationUuid: member.organizationUuid,
-        });
-
-        can('manage', 'ContentVerification', {
             organizationUuid: member.organizationUuid,
         });
 

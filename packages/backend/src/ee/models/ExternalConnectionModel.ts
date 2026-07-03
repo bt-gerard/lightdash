@@ -61,6 +61,7 @@ export class ExternalConnectionModel {
             name: row.name,
             type: row.type,
             origin: row.origin,
+            instructions: row.instructions,
             allowedPathPrefixes: row.allowed_path_prefixes,
             allowedMethods: row.allowed_methods,
             allowedContentTypes: row.allowed_content_types,
@@ -70,6 +71,7 @@ export class ExternalConnectionModel {
             rateLimitPerMinute: row.rate_limit_per_minute,
             apiKeyName: row.api_key_name,
             apiKeyLocation: row.api_key_location,
+            oauthScopes: row.oauth_scopes,
             hasSecret,
             createdByUserUuid: row.created_by_user_uuid,
             updatedByUserUuid: row.updated_by_user_uuid,
@@ -107,6 +109,7 @@ export class ExternalConnectionModel {
                     name: data.name,
                     type: data.type,
                     origin: data.origin,
+                    instructions: data.instructions ?? null,
                     allowed_path_prefixes: JSON.stringify(
                         data.allowedPathPrefixes,
                     ),
@@ -126,6 +129,9 @@ export class ExternalConnectionModel {
                     rate_limit_per_minute: data.rateLimitPerMinute ?? null,
                     api_key_name: data.apiKeyName ?? null,
                     api_key_location: data.apiKeyLocation ?? null,
+                    oauth_scopes: data.oauthScopes?.length
+                        ? JSON.stringify(data.oauthScopes)
+                        : null,
                     created_by_user_uuid: userUuid,
                     updated_by_user_uuid: userUuid,
                 })
@@ -145,6 +151,102 @@ export class ExternalConnectionModel {
                 row,
                 Boolean(secret),
             );
+        });
+    }
+
+    /**
+     * Copy every (non-deleted) connection in `sourceProjectUuid` into
+     * `targetProjectUuid` — with its secret and saved samples — and return a
+     * source→target connection-uuid map. Used when a preview project is
+     * created: the copied data apps re-link to the preview's own connections
+     * instead of the upstream project's (which are separate, project-scoped
+     * entities the preview can't reference). The secret ciphertext is copied
+     * verbatim — `EncryptionUtil` is instance-wide, so the payload is portable
+     * across projects on the same instance (no decrypt/re-encrypt).
+     */
+    async copyConnectionsToProject(
+        sourceProjectUuid: string,
+        targetProjectUuid: string,
+    ): Promise<Map<string, string>> {
+        return this.database.transaction(async (trx) => {
+            const sources = await trx(ExternalConnectionsTableName)
+                .where('project_uuid', sourceProjectUuid)
+                .whereNull('deleted_at')
+                .select<DbExternalConnection[]>('*');
+
+            const map = new Map<string, string>();
+            /* eslint-disable no-await-in-loop */
+            for (const src of sources) {
+                const [row] = await trx(ExternalConnectionsTableName)
+                    .insert({
+                        project_uuid: targetProjectUuid,
+                        organization_uuid: src.organization_uuid,
+                        name: src.name,
+                        type: src.type,
+                        origin: src.origin,
+                        instructions: src.instructions,
+                        allowed_path_prefixes: JSON.stringify(
+                            src.allowed_path_prefixes,
+                        ),
+                        allowed_methods: JSON.stringify(src.allowed_methods),
+                        allowed_content_types: JSON.stringify(
+                            src.allowed_content_types,
+                        ),
+                        response_max_bytes: src.response_max_bytes,
+                        request_max_bytes: src.request_max_bytes,
+                        timeout_ms: src.timeout_ms,
+                        rate_limit_per_minute: src.rate_limit_per_minute,
+                        api_key_name: src.api_key_name,
+                        api_key_location: src.api_key_location,
+                        oauth_scopes: src.oauth_scopes
+                            ? JSON.stringify(src.oauth_scopes)
+                            : null,
+                        created_by_user_uuid: src.created_by_user_uuid,
+                        updated_by_user_uuid: src.updated_by_user_uuid,
+                    })
+                    .returning<{ external_connection_uuid: string }[]>(
+                        'external_connection_uuid',
+                    );
+                const targetUuid = row.external_connection_uuid;
+                map.set(src.external_connection_uuid, targetUuid);
+
+                const secret = await trx(ExternalConnectionSecretsTableName)
+                    .where(
+                        'external_connection_uuid',
+                        src.external_connection_uuid,
+                    )
+                    .first<{ encrypted_payload: Buffer } | undefined>(
+                        'encrypted_payload',
+                    );
+                if (secret) {
+                    await trx(ExternalConnectionSecretsTableName).insert({
+                        external_connection_uuid: targetUuid,
+                        encrypted_payload: secret.encrypted_payload,
+                    });
+                }
+
+                // Carry saved samples so in-preview iteration keeps the same
+                // code-gen grounding as upstream.
+                const samples = await trx(ExternalConnectionSamplesTableName)
+                    .where(
+                        'external_connection_uuid',
+                        src.external_connection_uuid,
+                    )
+                    .select<DbExternalConnectionSample[]>('*');
+                if (samples.length > 0) {
+                    await trx(ExternalConnectionSamplesTableName).insert(
+                        samples.map((sample) => ({
+                            external_connection_uuid: targetUuid,
+                            label: sample.label,
+                            request: JSON.stringify(sample.request),
+                            response: JSON.stringify(sample.response),
+                            created_by_user_uuid: sample.created_by_user_uuid,
+                        })),
+                    );
+                }
+            }
+            /* eslint-enable no-await-in-loop */
+            return map;
         });
     }
 
@@ -280,6 +382,8 @@ export class ExternalConnectionModel {
             if (data.name !== undefined) updatePayload.name = data.name;
             if (data.type !== undefined) updatePayload.type = data.type;
             if (data.origin !== undefined) updatePayload.origin = data.origin;
+            if (data.instructions !== undefined)
+                updatePayload.instructions = data.instructions;
             if (data.allowedPathPrefixes !== undefined)
                 updatePayload.allowed_path_prefixes = JSON.stringify(
                     data.allowedPathPrefixes,
@@ -304,6 +408,10 @@ export class ExternalConnectionModel {
                 updatePayload.api_key_name = data.apiKeyName;
             if (data.apiKeyLocation !== undefined)
                 updatePayload.api_key_location = data.apiKeyLocation;
+            if (data.oauthScopes !== undefined)
+                updatePayload.oauth_scopes = data.oauthScopes?.length
+                    ? JSON.stringify(data.oauthScopes)
+                    : null;
 
             await trx(ExternalConnectionsTableName)
                 .where('external_connection_uuid', uuid)
@@ -311,9 +419,17 @@ export class ExternalConnectionModel {
 
             // Secret tri-state: `null` clears it, a non-empty string sets it,
             // and undefined/blank leaves it unchanged. Switching to type
-            // 'none' also clears any stored secret so it can never be used.
+            // 'none', or changing the auth type without supplying a new secret,
+            // also clears any stored secret so an old credential can never be
+            // reused by (or leaked through) the new auth method.
             const resultingType = data.type ?? existing.type;
-            if (resultingType === 'none' || data.secret === null) {
+            const typeChanged =
+                data.type !== undefined && data.type !== existing.type;
+            if (
+                resultingType === 'none' ||
+                data.secret === null ||
+                (typeChanged && !data.secret)
+            ) {
                 await ExternalConnectionModel.deleteSecret(trx, uuid);
             } else if (data.secret) {
                 await ExternalConnectionModel.upsertSecret(

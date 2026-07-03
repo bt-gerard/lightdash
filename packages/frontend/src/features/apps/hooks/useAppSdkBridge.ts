@@ -1,6 +1,9 @@
 import {
-    FeatureFlags,
+    APP_SDK_DATA_APP_VIZ_CONTEXT_MESSAGE,
+    APP_SDK_VIZ_CONTEXT_REQUEST_MESSAGE,
     JWT_HEADER_NAME,
+    LightdashAppUuidHeader,
+    type DataAppVizContext,
     type DashboardFilters,
 } from '@lightdash/common';
 import { useCallback, useEffect, useRef, type RefObject } from 'react';
@@ -10,7 +13,6 @@ import {
     getGdriveAccessToken,
     triggerGdriveLogin,
 } from '../../../hooks/gdrive/useGdrive';
-import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
 import useApp from '../../../providers/App/useApp';
 import {
     handleGsheetExport,
@@ -71,6 +73,33 @@ export type QueryEvent = {
 };
 
 /**
+ * A single external-connection fetch proxied through the bridge, reported for
+ * the external-requests inspector tab. Single-shot lifecycle: one `pending`
+ * event when the fetch starts, one terminal `ready`/`error` event when it
+ * settles — matched by `id` (no queryUuid remap like metric queries need).
+ */
+export type ExternalRequestEvent = {
+    id: string;
+    timestamp: number;
+    /** Connection alias the app called, e.g. `stripe`. */
+    alias: string;
+    method: 'GET' | 'POST';
+    path: string;
+    query: Record<string, string> | null;
+    /** JSON request body (POST); null for GET or an empty body. */
+    requestBody: unknown;
+    status: 'pending' | 'ready' | 'error';
+    /** Upstream HTTP status (null until the fetch settles / on proxy error). */
+    httpStatus: number | null;
+    contentType: string | null;
+    /** Parsed response body; null until the fetch settles. */
+    responseBody: unknown;
+    truncated: boolean | null;
+    durationMs: number | null;
+    error: string | null;
+};
+
+/**
  * Routes the SDK is allowed to call through the postMessage bridge.
  * Everything else is rejected. Patterns use :param for path segments.
  */
@@ -79,6 +108,11 @@ const ALLOWED_ROUTES: Array<{ method: string; pattern: RegExp }> = [
     {
         method: 'POST',
         pattern: /^\/api\/v2\/projects\/[^/]+\/query\/metric-query$/,
+    },
+    // Run a saved chart live by UUID (linked charts)
+    {
+        method: 'POST',
+        pattern: /^\/api\/v2\/projects\/[^/]+\/query\/chart$/,
     },
     // Run underlying-data queries for SDK result rows
     {
@@ -116,6 +150,10 @@ const isMetricQueryPost = (method: string, path: string): boolean =>
     method.toUpperCase() === 'POST' &&
     /^\/api\/v2\/projects\/[^/]+\/query\/metric-query$/.test(path);
 
+const isChartQueryPost = (method: string, path: string): boolean =>
+    method.toUpperCase() === 'POST' &&
+    /^\/api\/v2\/projects\/[^/]+\/query\/chart$/.test(path);
+
 const isQueryResultGet = (method: string, path: string): boolean =>
     method.toUpperCase() === 'GET' &&
     /^\/api\/v2\/projects\/[^/]+\/query\/[^/]+$/.test(path);
@@ -146,8 +184,8 @@ export type ElementSelectedEvent = {
  * availability state itself — the parent owns it and is responsible for
  * resetting on iframe `src` change.
  */
-export function useAppSdkBridge(
-    iframeRef: RefObject<HTMLIFrameElement | null>,
+export type UseAppSdkBridgeParams = {
+    iframeRef: RefObject<HTMLIFrameElement | null>;
     /**
      * The origin this iframe is expected to load from. When previews are
      * served cross-origin this is `https://{customer}.lightdash.app`; in
@@ -158,36 +196,66 @@ export function useAppSdkBridge(
      * matching our iframe's contentWindow (unforgeable); origin is a
      * defence-in-depth check for the non-sandboxed/dev case.
      */
-    expectedPreviewOrigin: string,
+    expectedPreviewOrigin: string;
     /** Project the proxied EE external-fetch calls run against. */
-    projectUuid: string,
+    projectUuid: string;
     /** App the proxied EE external-fetch calls are attributed to. */
-    appUuid: string,
-    onQueryEvent?: (event: QueryEvent) => void,
-    onElementSelected?: (event: ElementSelectedEvent) => void,
-    onInspectorAvailable?: () => void,
-    onScreenshotAvailable?: () => void,
+    appUuid: string;
+    onQueryEvent?: (event: QueryEvent) => void;
+    onElementSelected?: (event: ElementSelectedEvent) => void;
+    onInspectorAvailable?: () => void;
+    onScreenshotAvailable?: () => void;
     /**
      * When set, these filters are stamped onto every intercepted metric-query
      * POST before it reaches the backend. Used by dashboard data-app tiles so
      * the dashboard filter bar applies to the app's queries. The iframe SDK
      * is not involved — generated apps stay filter-agnostic.
      */
-    dashboardFilters?: DashboardFilters,
+    dashboardFilters?: DashboardFilters;
     /**
      * When true, `invalidateCache` is stamped onto every intercepted
      * metric-query POST so the backend bypasses the warehouse results cache —
      * mirrors what chart tiles send after the dashboard refresh button is
      * pressed. Set by `DashboardDataAppTile`; left undefined elsewhere.
      */
-    invalidateCache?: boolean,
+    invalidateCache?: boolean;
     /**
      * Feature capabilities the host page opts into. Currently gates the
      * Google Sheets export flow — hosts that don't pass `gsheetExport: true`
      * will receive an error response for those requests.
      */
-    capabilities?: { gsheetExport?: boolean },
-) {
+    capabilities?: { gsheetExport?: boolean };
+    onLineageAvailable?: () => void;
+    onLineageSelected?: (event: { queryUuid: string }) => void;
+    /**
+     * When provided, external-connection fetches proxied through this bridge
+     * are reported for the external-requests inspector tab — mirrors
+     * `onQueryEvent` for metric queries. Emits `pending` when the fetch starts
+     * and a terminal `ready`/`error` event when it settles.
+     */
+    onExternalRequestEvent?: (event: ExternalRequestEvent) => void;
+    // When set, the host pushes this render context into the iframe over the
+    // existing bridge — on load and on every change. Only set for data app vizs.
+    dataAppVizContext?: DataAppVizContext;
+};
+
+export function useAppSdkBridge({
+    iframeRef,
+    expectedPreviewOrigin,
+    projectUuid,
+    appUuid,
+    onQueryEvent,
+    onElementSelected,
+    onInspectorAvailable,
+    onScreenshotAvailable,
+    dashboardFilters,
+    invalidateCache,
+    capabilities,
+    onLineageAvailable,
+    onLineageSelected,
+    onExternalRequestEvent,
+    dataAppVizContext,
+}: UseAppSdkBridgeParams) {
     // Embed mode adapts the bridge's outgoing fetches in two ways:
     //   - Attaches the embed JWT header in lieu of session cookies
     //     (the parent in embed mode has no session, only the JWT).
@@ -197,14 +265,6 @@ export function useAppSdkBridge(
     //     unchanged — the rewrite happens entirely on the parent side.
     const { embedToken, projectUuid: embedProjectUuid } = useEmbed();
     const { health, user } = useApp();
-
-    const { data: externalAccessFlag } = useServerFeatureFlag(
-        FeatureFlags.EnableDataAppExternalAccess,
-    );
-    // Only short-circuit external fetch when the flag has *resolved* to
-    // disabled. While the query is still in flight, defer to the backend (which
-    // is authoritative) so an on-mount externalFetch is not falsely rejected.
-    const externalAccessDisabled = externalAccessFlag?.enabled === false;
 
     // Maps queryUuid → POST request id. The SDK transport assigns a fresh
     // request id to the POST (`/metric-query`) and again to each GET poll
@@ -217,6 +277,21 @@ export function useAppSdkBridge(
     // in-flight set never drains and the screenshot indicator never
     // mounts).
     const queryUuidToPostIdRef = useRef<Map<string, string>>(new Map());
+
+    // Push the render context into the iframe. Sent in response to the iframe's
+    // `viz-context-request` handshake (the renderer mounts after its bundle
+    // loads, so a single push on `load` can arrive before its listener exists)
+    // and re-sent whenever the context changes. No-op for non-viz apps.
+    const pushDataAppVizContext = useCallback(() => {
+        if (!dataAppVizContext) return;
+        iframeRef.current?.contentWindow?.postMessage(
+            {
+                type: APP_SDK_DATA_APP_VIZ_CONTEXT_MESSAGE,
+                ...dataAppVizContext,
+            },
+            '*',
+        );
+    }, [iframeRef, dataAppVizContext]);
 
     const handleMessage = useCallback(
         async (event: MessageEvent) => {
@@ -244,10 +319,32 @@ export function useAppSdkBridge(
                 return;
             }
 
+            // Handshake: the iframe's viz renderer asks for the current context
+            // once its listener is mounted. Reply with a push (no-op if this
+            // isn't a data app viz).
+            if (data?.type === APP_SDK_VIZ_CONTEXT_REQUEST_MESSAGE) {
+                pushDataAppVizContext();
+                return;
+            }
+
             if (data?.type === 'lightdash:inspect:selected') {
                 const label = typeof data.label === 'string' ? data.label : '';
                 if (label && onElementSelected) {
                     onElementSelected({ label });
+                }
+                return;
+            }
+
+            if (data?.type === 'lightdash:lineage:available') {
+                onLineageAvailable?.();
+                return;
+            }
+
+            if (data?.type === 'lightdash:lineage:selected') {
+                const queryUuid =
+                    typeof data.queryUuid === 'string' ? data.queryUuid : '';
+                if (queryUuid && onLineageSelected) {
+                    onLineageSelected({ queryUuid });
                 }
                 return;
             }
@@ -337,20 +434,53 @@ export function useAppSdkBridge(
                     );
                 };
 
-                if (externalAccessDisabled) {
-                    respondExternal({
-                        error: 'External data access is disabled for this organization',
+                // Report the fetch to the external-requests inspector. Base
+                // request fields are captured up front; each call overlays the
+                // lifecycle status (and, on settle, the response/duration).
+                const startedAt = Date.now();
+                const emitExternal = (
+                    fields: Partial<ExternalRequestEvent> & {
+                        status: ExternalRequestEvent['status'];
+                    },
+                ) => {
+                    onExternalRequestEvent?.({
+                        id: externalId,
+                        timestamp: startedAt,
+                        alias: typeof alias === 'string' ? alias : 'unknown',
+                        method: externalMethod === 'POST' ? 'POST' : 'GET',
+                        path:
+                            typeof externalPath === 'string'
+                                ? externalPath
+                                : '',
+                        query:
+                            (externalQuery as
+                                | Record<string, string>
+                                | undefined) ?? null,
+                        requestBody: externalBody ?? null,
+                        httpStatus: null,
+                        contentType: null,
+                        responseBody: null,
+                        truncated: null,
+                        durationMs: null,
+                        error: null,
+                        ...fields,
                     });
-                    return;
-                }
+                };
+
+                emitExternal({ status: 'pending' });
 
                 // External fetch is not available to embedded apps: the proxy
                 // endpoint requires a registered session, not an embed JWT.
                 // Fail clearly rather than make a doomed authenticated call.
                 if (embedToken) {
-                    respondExternal({
-                        error: 'External data access is not available in embedded apps',
+                    const embedError =
+                        'External data access is not available in embedded apps';
+                    emitExternal({
+                        status: 'error',
+                        error: embedError,
+                        durationMs: Date.now() - startedAt,
                     });
+                    respondExternal({ error: embedError });
                     return;
                 }
 
@@ -381,21 +511,43 @@ export function useAppSdkBridge(
                     );
                     const json = await res.json();
                     if (json.status === 'ok') {
+                        const result = json.results as
+                            | {
+                                  status?: number;
+                                  contentType?: string;
+                                  body?: unknown;
+                                  truncated?: boolean;
+                              }
+                            | undefined;
+                        emitExternal({
+                            status: 'ready',
+                            httpStatus: result?.status ?? null,
+                            contentType: result?.contentType ?? null,
+                            responseBody: result?.body ?? null,
+                            truncated: result?.truncated ?? null,
+                            durationMs: Date.now() - startedAt,
+                        });
                         respondExternal({ result: json.results });
                     } else {
-                        respondExternal({
-                            error:
-                                json.error?.message ??
-                                `External fetch failed (${res.status})`,
+                        const errorMessage =
+                            json.error?.message ??
+                            `External fetch failed (${res.status})`;
+                        emitExternal({
+                            status: 'error',
+                            error: errorMessage,
+                            durationMs: Date.now() - startedAt,
                         });
+                        respondExternal({ error: errorMessage });
                     }
                 } catch (err) {
-                    respondExternal({
-                        error:
-                            err instanceof Error
-                                ? err.message
-                                : 'Unknown error',
+                    const errorMessage =
+                        err instanceof Error ? err.message : 'Unknown error';
+                    emitExternal({
+                        status: 'error',
+                        error: errorMessage,
+                        durationMs: Date.now() - startedAt,
                     });
+                    respondExternal({ error: errorMessage });
                 }
                 return;
             }
@@ -424,18 +576,27 @@ export function useAppSdkBridge(
             }
 
             // Stamp dashboard filters and the cache-invalidation flag onto
-            // outgoing metric-query bodies. The backend drops filters whose
-            // fields aren't in the query's explore, so it's safe to send the
-            // full set on every call. `invalidateCache` mirrors what charts
-            // send on a dashboard refresh so the app's queries bypass the
-            // warehouse results cache too.
+            // outgoing query bodies. The backend drops filters whose fields
+            // aren't in the query's/chart's explore, so it's safe to send the
+            // full set on every call. Both `dashboardFilters` and
+            // `invalidateCache` apply to inline metric queries AND linked
+            // (/query/chart) charts, so a dashboard filter or refresh reaches
+            // linked charts too. App attribution rides on the
+            // LightdashAppUuidHeader instead (see the fetch below).
+            const stampFilters =
+                (isMetricQueryPost(method, path) ||
+                    isChartQueryPost(method, path)) &&
+                !!dashboardFilters;
+            const stampInvalidate =
+                (isMetricQueryPost(method, path) ||
+                    isChartQueryPost(method, path)) &&
+                !!invalidateCache;
             const effectiveBody =
-                isMetricQueryPost(method, path) &&
-                (dashboardFilters || invalidateCache)
+                stampFilters || stampInvalidate
                     ? {
                           ...(body as Record<string, unknown> | undefined),
-                          ...(dashboardFilters ? { dashboardFilters } : {}),
-                          ...(invalidateCache ? { invalidateCache } : {}),
+                          ...(stampFilters ? { dashboardFilters } : {}),
+                          ...(stampInvalidate ? { invalidateCache } : {}),
                       }
                     : body;
 
@@ -492,7 +653,12 @@ export function useAppSdkBridge(
             // already emit their own terminal events, so this only runs
             // for the POST.
             const emitPostFailure = (errorMessage: string) => {
-                if (!isMetricQueryPost(method, path) || !onQueryEvent) return;
+                if (
+                    (!isMetricQueryPost(method, path) &&
+                        !isChartQueryPost(method, path)) ||
+                    !onQueryEvent
+                )
+                    return;
                 onQueryEvent({
                     id,
                     timestamp: Date.now(),
@@ -525,6 +691,11 @@ export function useAppSdkBridge(
                         ...(embedToken
                             ? { [JWT_HEADER_NAME]: embedToken }
                             : {}),
+                        // Self-reported app attribution; the backend tags
+                        // warehouse queries with it. Tracking only.
+                        ...(appUuid
+                            ? { [LightdashAppUuidHeader]: appUuid }
+                            : {}),
                     },
                     ...(effectiveBody
                         ? { body: JSON.stringify(effectiveBody) }
@@ -536,7 +707,8 @@ export function useAppSdkBridge(
                 if (json.status === 'ok') {
                     // Track metric query initiation response (has queryUuid)
                     if (
-                        isMetricQueryPost(method, path) &&
+                        (isMetricQueryPost(method, path) ||
+                            isChartQueryPost(method, path)) &&
                         onQueryEvent &&
                         json.results?.queryUuid
                     ) {
@@ -675,9 +847,12 @@ export function useAppSdkBridge(
             embedToken,
             embedProjectUuid,
             capabilities,
+            onLineageAvailable,
+            onLineageSelected,
+            onExternalRequestEvent,
+            pushDataAppVizContext,
             health.data,
             user.data,
-            externalAccessDisabled,
         ],
     );
 
@@ -698,6 +873,14 @@ export function useAppSdkBridge(
         );
     }, [iframeRef]);
 
+    // Re-push the render context whenever the host's field mapping or rows
+    // change, so an already-loaded iframe re-renders live. The initial delivery
+    // is driven by the iframe's `viz-context-request` handshake, so no push on
+    // `load` is needed here.
+    useEffect(() => {
+        pushDataAppVizContext();
+    }, [pushDataAppVizContext]);
+
     const enableInspector = useCallback(() => {
         iframeRef.current?.contentWindow?.postMessage(
             { type: 'lightdash:inspect:enable' },
@@ -712,9 +895,36 @@ export function useAppSdkBridge(
         );
     }, [iframeRef]);
 
+    const enableLineage = useCallback(() => {
+        iframeRef.current?.contentWindow?.postMessage(
+            { type: 'lightdash:lineage:enable' },
+            '*',
+        );
+    }, [iframeRef]);
+
+    const disableLineage = useCallback(() => {
+        iframeRef.current?.contentWindow?.postMessage(
+            { type: 'lightdash:lineage:disable' },
+            '*',
+        );
+    }, [iframeRef]);
+
+    const highlightLineage = useCallback(
+        (queryUuid: string | null) => {
+            iframeRef.current?.contentWindow?.postMessage(
+                { type: 'lightdash:lineage:highlight', queryUuid },
+                '*',
+            );
+        },
+        [iframeRef],
+    );
+
     return {
         handleIframeLoad,
         enableInspector,
         disableInspector,
+        enableLineage,
+        disableLineage,
+        highlightLineage,
     };
 }

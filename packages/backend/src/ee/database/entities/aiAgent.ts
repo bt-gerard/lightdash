@@ -1,3 +1,4 @@
+import { type AiAgentModelConfig } from '@lightdash/common';
 import { Knex } from 'knex';
 
 export const AiAgentTableName = 'ai_agent';
@@ -15,7 +16,9 @@ export type DbAiAgent = {
     enable_data_access: boolean;
     enable_self_improvement: boolean;
     enable_content_tools: boolean;
+    enable_user_context: boolean;
     admin_only: boolean;
+    model_config: AiAgentModelConfig | null;
     /**
      * @deprecated Per-agent reasoning toggle was removed. The gating feature flag
      * `agent-reasoning` was never enabled so this column was effectively
@@ -283,6 +286,11 @@ export const AiAgentMcpServerToolPermissionModes = [
 
 export type DbAiAgentMcpServerToolPermissionMode =
     (typeof AiAgentMcpServerToolPermissionModes)[number];
+
+export const AI_AGENT_MCP_SERVER_TOOL_PERMISSION_MODE_ALWAYS_ALLOW: DbAiAgentMcpServerToolPermissionMode =
+    'always_allow';
+export const AI_AGENT_MCP_SERVER_TOOL_PERMISSION_MODE_ALWAYS_DENY: DbAiAgentMcpServerToolPermissionMode =
+    'always_deny';
 
 export type DbAiAgentMcpServerTool = {
     ai_agent_uuid: string;

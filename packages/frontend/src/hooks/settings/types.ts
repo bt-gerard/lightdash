@@ -49,9 +49,13 @@ export type SettingsContext = {
     isServiceAccountsEnabled: boolean;
     isAiCopilotEnabledOrTrial: boolean;
     shouldShowAiAgentReviews: boolean;
+    // Org-level AI settings access (router config, org settings, review queue).
+    canManageOrgAiAgent: boolean;
+    // True when the user can manage org AI settings OR has AI agent access in at
+    // least one project they can reach. Gates visibility of the "Ask AI" area.
+    hasAnyAiAgentAccess: boolean;
     isAiOrganizationSettingsLoading: boolean;
     dataAppsFlag: FeatureFlag | undefined;
-    dataAppExternalAccessFlag: FeatureFlag | undefined;
     embeddingEnabled: FeatureFlag | undefined;
     allowPasswordAuthentication: boolean;
     hasSocialLogin: boolean | undefined;

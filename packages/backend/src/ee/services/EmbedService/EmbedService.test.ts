@@ -19,7 +19,7 @@ describe('EmbedService', () => {
 
     beforeEach(() => {
         service = new EmbedService(EmbedServiceArgumentsMock);
-        jest.clearAllMocks();
+        vi.clearAllMocks();
     });
 
     describe('updateConfig', () => {
@@ -180,7 +180,7 @@ describe('EmbedService', () => {
             test('should throw ForbiddenError when embedding feature is disabled', async () => {
                 // Mock feature flag as disabled for this test
                 const featureFlagGet = EmbedServiceArgumentsMock
-                    .featureFlagModel.get as jest.Mock;
+                    .featureFlagModel.get as import('vitest').Mock;
                 featureFlagGet.mockResolvedValueOnce({ enabled: false });
 
                 await expect(
@@ -263,11 +263,11 @@ describe('EmbedService', () => {
         test('uses apiAccess service account over writeActions user', async () => {
             const serviceAccountUserUuid = 'service-account-user-uuid';
             const userModel = {
-                findSessionUserAndOrgByUuid: jest.fn().mockResolvedValue({
+                findSessionUserAndOrgByUuid: vi.fn().mockResolvedValue({
                     userUuid: serviceAccountUserUuid,
                     isActive: false,
                 }),
-                findServiceAccountByUserUuid: jest.fn().mockResolvedValue({
+                findServiceAccountByUserUuid: vi.fn().mockResolvedValue({
                     uuid: 'service-account-uuid',
                     organizationUuid: mockOrganizationUuid,
                     description: 'Embedded customer actions',
@@ -328,20 +328,20 @@ describe('EmbedService', () => {
         const getServiceWithUserAttributes = (
             orgUserAttributes: Array<{
                 name: string;
-                attributeDefault: string | null;
+                attributeDefaults: string[] | null;
             }> = [],
         ) =>
             new EmbedService({
                 ...EmbedServiceArgumentsMock,
                 userAttributesModel: {
-                    find: jest.fn().mockResolvedValue(orgUserAttributes),
+                    find: vi.fn().mockResolvedValue(orgUserAttributes),
                 },
             } as unknown as ConstructorParameters<typeof EmbedService>[0]);
 
         test('returns safe JWT user attributes and intrinsic email', async () => {
             const scopedService = getServiceWithUserAttributes([
-                { name: 'region', attributeDefault: 'default-region' },
-                { name: 'tier', attributeDefault: 'enterprise' },
+                { name: 'region', attributeDefaults: ['default-region'] },
+                { name: 'tier', attributeDefaults: ['enterprise'] },
             ]);
 
             await expect(
@@ -402,10 +402,10 @@ describe('EmbedService', () => {
         test('scopes dashboard lookup to the requested project', async () => {
             const dashboardUuid = 'dashboard-1';
             const dashboardModel = {
-                getByIdOrSlug: jest.fn().mockRejectedValue(new Error('stop')),
+                getByIdOrSlug: vi.fn().mockRejectedValue(new Error('stop')),
             };
             const embedModel = {
-                get: jest.fn().mockResolvedValue({
+                get: vi.fn().mockResolvedValue({
                     dashboardUuids: [dashboardUuid],
                     allowAllDashboards: false,
                     user: {
@@ -439,7 +439,7 @@ describe('EmbedService', () => {
                 organization: {
                     organizationUuid: mockOrganizationUuid,
                 },
-                isAnonymousUser: jest.fn().mockReturnValue(true),
+                isAnonymousUser: vi.fn().mockReturnValue(true),
             } as unknown as AnonymousAccount;
 
             await expect(

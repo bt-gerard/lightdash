@@ -65,6 +65,8 @@ const makeCandidate = (
     tokenUsageTotal: 123,
     queryHistory: [],
     supportingEvidence: [],
+    toolOutcomes: [],
+    pendingApprovalTimeout: false,
     ...overrides,
 });
 
@@ -132,6 +134,7 @@ const makeJudgeOutput = (
     ],
     recommendation: null,
     projectContextEntry: null,
+    matchedExistingItemKey: null,
     reviewItem: {
         title: 'No review needed',
         description: 'Judge found no actionable issue.',
@@ -279,43 +282,55 @@ const makeProjectContextJudgeOutput = (): AiAgentReviewClassifierJudgeOutput =>
 
 describe('AiAgentReviewClassifierService', () => {
     const featureFlagService = {
-        get: jest.fn(),
-    } as unknown as jest.Mocked<FeatureFlagService>;
+        get: vi.fn(),
+    } as unknown as import('vitest').Mocked<FeatureFlagService>;
 
     const model = {
-        listTurnReviewCandidates: jest.fn(),
-        createRun: jest.fn(),
-        updateRun: jest.fn(),
-        createTurnSignal: jest.fn(),
-        getThreadWritebackPullRequests: jest.fn().mockResolvedValue(new Map()),
-    } as unknown as jest.Mocked<AiAgentReviewClassifierModel>;
+        listTurnReviewCandidates: vi.fn(),
+        createRun: vi.fn(),
+        updateRun: vi.fn(),
+        createTurnSignal: vi.fn(),
+        getThreadWritebackPullRequests: vi.fn().mockResolvedValue(new Map()),
+        getAgentMcpCapabilities: vi.fn().mockResolvedValue([]),
+        findReviewItemDedupCandidates: vi.fn().mockResolvedValue([]),
+    } as unknown as import('vitest').Mocked<AiAgentReviewClassifierModel>;
     const aiAgentModel = {
-        getAgent: jest.fn(),
+        getAgent: vi.fn(),
+    };
+    const aiAgentDocumentModel = {
+        findAllForAgent: vi.fn().mockResolvedValue([]),
     };
     const aiOrganizationSettingsModel = {
-        findByOrganizationUuid: jest.fn(),
-    } as unknown as jest.Mocked<AiOrganizationSettingsModel>;
+        findByOrganizationUuid: vi.fn(),
+    } as unknown as import('vitest').Mocked<AiOrganizationSettingsModel>;
     const catalogModel = {
-        getCatalogItemsSummary: jest.fn(),
+        getCatalogItemsSummary: vi.fn(),
     };
     const projectModel = {
-        getSummary: jest.fn(),
+        getSummary: vi.fn(),
+        findExploresFromCache: vi.fn(),
     };
-    const judgeTurn = jest.fn();
+    const aiAgentReviewNotificationService = {
+        notifyNeedsReview: vi.fn(),
+    };
+    const judgeTurn = vi.fn();
 
     const service = new AiAgentReviewClassifierService({
         aiAgentReviewClassifierModel: model,
         aiAgentModel: aiAgentModel as never,
+        aiAgentDocumentModel,
         aiOrganizationSettingsModel,
         catalogModel: catalogModel as never,
         projectModel: projectModel as never,
         featureFlagService,
         lightdashConfig: {} as never,
         judgeTurn,
+        aiAgentReviewNotificationService:
+            aiAgentReviewNotificationService as never,
     });
 
     beforeEach(() => {
-        jest.resetAllMocks();
+        vi.resetAllMocks();
         featureFlagService.get.mockResolvedValue({
             id: FeatureFlags.AiWriteback,
             enabled: true,
@@ -325,11 +340,21 @@ describe('AiAgentReviewClassifierService', () => {
             aiAgentsVisible: true,
             aiAgentReviewsEnabled: true,
             mcpContentWritesEnabled: true,
+            defaultAiAgentModelConfig: null,
         });
         model.createRun.mockResolvedValue(makeRun());
         model.updateRun.mockResolvedValue(makeRun({ status: 'completed' }));
-        model.createTurnSignal.mockResolvedValue(SIGNAL_UUID);
+        model.createTurnSignal.mockResolvedValue({
+            turnSignalUuid: SIGNAL_UUID,
+            reviewItemOutcome: 'created',
+        });
+        model.findReviewItemDedupCandidates.mockResolvedValue([]);
         model.getThreadWritebackPullRequests.mockResolvedValue(new Map());
+        aiAgentReviewNotificationService.notifyNeedsReview.mockResolvedValue(
+            undefined,
+        );
+        aiAgentDocumentModel.findAllForAgent.mockResolvedValue([]);
+        model.getAgentMcpCapabilities.mockResolvedValue([]);
         aiAgentModel.getAgent.mockResolvedValue({
             uuid: AGENT_UUID,
             organizationUuid: ORGANIZATION_UUID,
@@ -344,6 +369,7 @@ describe('AiAgentReviewClassifierService', () => {
             imageUrl: null,
             enableDataAccess: true,
             enableSelfImprovement: false,
+            enableContentTools: false,
             version: 'v1',
             groupAccess: [],
             userAccess: [],
@@ -379,6 +405,7 @@ describe('AiAgentReviewClassifierService', () => {
                 aiAgentsVisible: true,
                 aiAgentReviewsEnabled: false,
                 mcpContentWritesEnabled: true,
+                defaultAiAgentModelConfig: null,
             },
         );
 
@@ -465,6 +492,14 @@ describe('AiAgentReviewClassifierService', () => {
                 }),
             }),
         );
+        expect(
+            aiAgentReviewNotificationService.notifyNeedsReview,
+        ).toHaveBeenCalledWith({
+            organizationUuid: ORGANIZATION_UUID,
+            projectUuid: PROJECT_UUID,
+            reviewRunUuid: RUN_UUID,
+            fingerprints: [expect.stringContaining('ai_agent_review_item:')],
+        });
     });
 
     it('does not promote turns where writeback already opened a pull request', async () => {
@@ -533,6 +568,161 @@ describe('AiAgentReviewClassifierService', () => {
         expect(result.reviewItemCount).toBe(1);
     });
 
+    it('passes tool outcomes and the approval-timeout flag through to the judge packet', async () => {
+        judgeTurn.mockResolvedValueOnce(makeJudgeOutput());
+        model.listTurnReviewCandidates.mockResolvedValue([
+            makeCandidate({
+                toolOutcomes: [
+                    {
+                        toolCallId: 'content-tool-call-1',
+                        toolName: 'editContent',
+                        status: 'success',
+                    },
+                ],
+                pendingApprovalTimeout: true,
+            }),
+        ]);
+
+        await service.run({
+            organizationUuid: ORGANIZATION_UUID,
+            startedAt: NOW,
+            endedAt: NOW,
+        });
+
+        expect(judgeTurn).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({
+                toolOutcomes: [
+                    {
+                        toolCallId: 'content-tool-call-1',
+                        toolName: 'editContent',
+                        status: 'success',
+                    },
+                ],
+                pendingApprovalTimeout: true,
+            }),
+        );
+    });
+
+    it('surfaces MCP servers and content tools as agent capabilities in the judge packet', async () => {
+        judgeTurn.mockResolvedValueOnce(makeJudgeOutput());
+        model.getAgentMcpCapabilities.mockResolvedValue([
+            { name: 'Linear', enabledToolNames: ['list_issues'] },
+        ]);
+        model.listTurnReviewCandidates.mockResolvedValue([makeCandidate()]);
+
+        await service.run({
+            organizationUuid: ORGANIZATION_UUID,
+            startedAt: NOW,
+            endedAt: NOW,
+        });
+
+        expect(judgeTurn).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({
+                agentConfig: expect.objectContaining({
+                    availableCapabilities: expect.arrayContaining([
+                        'mcp_tools',
+                    ]),
+                    mcpServers: [
+                        { name: 'Linear', enabledToolNames: ['list_issues'] },
+                    ],
+                    settings: expect.arrayContaining(['mcp_servers']),
+                }),
+            }),
+        );
+    });
+
+    it('scopes the catalog to the agent explore tags before matching', async () => {
+        judgeTurn.mockResolvedValueOnce(makeJudgeOutput());
+        aiAgentModel.getAgent.mockResolvedValue({
+            uuid: AGENT_UUID,
+            organizationUuid: ORGANIZATION_UUID,
+            projectUuid: PROJECT_UUID,
+            name: 'Jaffle Shop',
+            description: null,
+            tags: ['sales'],
+            integrations: [],
+            updatedAt: NOW,
+            createdAt: NOW,
+            instruction: null,
+            imageUrl: null,
+            enableDataAccess: true,
+            enableSelfImprovement: false,
+            enableContentTools: false,
+            version: 'v1',
+            groupAccess: [],
+            userAccess: [],
+            spaceAccess: [],
+        });
+        catalogModel.getCatalogItemsSummary.mockResolvedValue([
+            {
+                catalogSearchUuid: 'catalog-1',
+                cachedExploreUuid: 'explore-1',
+                projectUuid: PROJECT_UUID,
+                name: 'flightcount',
+                type: 'field',
+                label: 'Flight count',
+                description: null,
+                tableName: 'orders',
+                fieldType: 'metric',
+            },
+            {
+                catalogSearchUuid: 'catalog-2',
+                cachedExploreUuid: 'explore-2',
+                projectUuid: PROJECT_UUID,
+                name: 'flightcount',
+                type: 'field',
+                label: 'Flight count (staff)',
+                description: null,
+                tableName: 'staff',
+                fieldType: 'metric',
+            },
+        ]);
+        projectModel.findExploresFromCache.mockResolvedValue({
+            orders: {
+                name: 'orders',
+                tags: ['sales'],
+                baseTable: 'orders',
+                tables: {
+                    orders: {
+                        dimensions: {},
+                        metrics: { flightcount: {} },
+                    },
+                },
+            },
+            staff: {
+                name: 'staff',
+                tags: [],
+                baseTable: 'staff',
+                tables: {
+                    staff: {
+                        dimensions: {},
+                        metrics: { flightcount: {} },
+                    },
+                },
+            },
+        });
+        model.listTurnReviewCandidates.mockResolvedValue([
+            makeCandidate({ userPrompt: 'what is the flightcount?' }),
+        ]);
+
+        await service.run({
+            organizationUuid: ORGANIZATION_UUID,
+            startedAt: NOW,
+            endedAt: NOW,
+        });
+
+        const evidencePacket = judgeTurn.mock.calls[0][1];
+        expect(evidencePacket.semanticContext.catalogMatches).toHaveLength(1);
+        expect(evidencePacket.semanticContext.catalogMatches[0]).toEqual(
+            expect.objectContaining({
+                name: 'flightcount',
+                tableName: 'orders',
+            }),
+        );
+    });
+
     it('drops project context entries when AI writeback is disabled', async () => {
         featureFlagService.get.mockImplementation(({ featureFlagId }) =>
             Promise.resolve({
@@ -596,6 +786,8 @@ describe('AiAgentReviewClassifierService', () => {
             makeCandidate({
                 userPrompt:
                     'No, country is not available here, so use airport name.',
+                nextUserPromptUuid: '00000000-0000-0000-0000-000000000013',
+                nextUserPrompt: 'Thanks, airport name works.',
                 contextTurns: [
                     {
                         relation: 'previous',
@@ -730,6 +922,170 @@ describe('AiAgentReviewClassifierService', () => {
             }),
         );
     });
+
+    it('passes existing review items to the judge as dedup candidates', async () => {
+        model.findReviewItemDedupCandidates.mockResolvedValue([
+            {
+                fingerprint: 'ai_agent_review_item:existing-1',
+                title: 'Country not available',
+                status: 'open',
+                dismissedReason: null,
+                primaryRootCause: 'semantic_layer',
+                targetRefs: [
+                    {
+                        type: 'dimension',
+                        modelName: 'airports',
+                        dimensionName: 'country',
+                    },
+                ],
+            },
+        ]);
+        model.listTurnReviewCandidates.mockResolvedValue([makeCandidate()]);
+
+        await service.run({
+            organizationUuid: ORGANIZATION_UUID,
+            startedAt: NOW,
+            endedAt: NOW,
+        });
+
+        const packet = judgeTurn.mock.calls[0][1];
+        expect(packet.existingReviewItems).toEqual([
+            {
+                key: 'item_1',
+                title: 'Country not available',
+                status: 'open',
+                dismissedReason: null,
+                primaryRootCause: 'semantic_layer',
+                objectSummary: 'country',
+            },
+        ]);
+    });
+
+    it('falls back to defaults for untitled or unclassified dedup candidates', async () => {
+        model.findReviewItemDedupCandidates.mockResolvedValue([
+            {
+                fingerprint: 'ai_agent_review_item:existing-1',
+                title: null,
+                status: 'triage',
+                dismissedReason: null,
+                primaryRootCause: null,
+                targetRefs: null,
+            },
+        ]);
+        model.listTurnReviewCandidates.mockResolvedValue([makeCandidate()]);
+
+        await service.run({
+            organizationUuid: ORGANIZATION_UUID,
+            startedAt: NOW,
+            endedAt: NOW,
+        });
+
+        const packet = judgeTurn.mock.calls[0][1];
+        expect(packet.existingReviewItems[0]).toEqual({
+            key: 'item_1',
+            title: 'Untitled review item',
+            status: 'triage',
+            dismissedReason: null,
+            primaryRootCause: 'ambiguous',
+            objectSummary: null,
+        });
+    });
+
+    it('degrades to no dedup candidates when the query fails', async () => {
+        model.findReviewItemDedupCandidates.mockRejectedValue(
+            new Error('db down'),
+        );
+        model.listTurnReviewCandidates.mockResolvedValue([makeCandidate()]);
+
+        const result = await service.run({
+            organizationUuid: ORGANIZATION_UUID,
+            startedAt: NOW,
+            endedAt: NOW,
+        });
+
+        expect(result.processedTurns).toBe(1);
+        expect(judgeTurn.mock.calls[0][1].existingReviewItems).toEqual([]);
+    });
+
+    it('reuses an existing item fingerprint when the judge matches a candidate', async () => {
+        model.findReviewItemDedupCandidates.mockResolvedValue([
+            {
+                fingerprint: 'ai_agent_review_item:existing-1',
+                title: 'Country not available',
+                status: 'open',
+                dismissedReason: null,
+                primaryRootCause: 'semantic_layer',
+                targetRefs: null,
+            },
+        ]);
+        model.createTurnSignal.mockResolvedValue({
+            turnSignalUuid: SIGNAL_UUID,
+            reviewItemOutcome: 'recurred',
+        });
+        judgeTurn.mockResolvedValueOnce({
+            ...makeSemanticJudgeOutput(),
+            matchedExistingItemKey: 'item_1',
+        });
+        model.listTurnReviewCandidates.mockResolvedValue([
+            makeCandidate({
+                nextUserPrompt:
+                    'No, country is not available here, so use airport name.',
+            }),
+        ]);
+
+        const result = await service.run({
+            organizationUuid: ORGANIZATION_UUID,
+            startedAt: NOW,
+            endedAt: NOW,
+            persistFindings: true,
+            promoteFindingsToReviewItems: true,
+        });
+
+        expect(model.createTurnSignal).toHaveBeenCalledWith(
+            expect.objectContaining({
+                finding: expect.objectContaining({
+                    reviewItem: expect.objectContaining({
+                        fingerprint: 'ai_agent_review_item:existing-1',
+                    }),
+                }),
+            }),
+        );
+        // A recurrence accrues onto the existing card without re-notifying.
+        expect(result.reviewItemCount).toBe(1);
+        expect(
+            aiAgentReviewNotificationService.notifyNeedsReview,
+        ).not.toHaveBeenCalled();
+    });
+
+    it('computes a fresh fingerprint when the matched key is not a candidate', async () => {
+        model.findReviewItemDedupCandidates.mockResolvedValue([]);
+        judgeTurn.mockResolvedValueOnce({
+            ...makeSemanticJudgeOutput(),
+            matchedExistingItemKey: 'item_99',
+        });
+        model.listTurnReviewCandidates.mockResolvedValue([
+            makeCandidate({
+                nextUserPrompt:
+                    'No, country is not available here, so use airport name.',
+            }),
+        ]);
+
+        await service.run({
+            organizationUuid: ORGANIZATION_UUID,
+            startedAt: NOW,
+            endedAt: NOW,
+            persistFindings: true,
+            promoteFindingsToReviewItems: true,
+        });
+
+        const [{ finding }] = model.createTurnSignal.mock.calls[0];
+        expect(finding?.reviewItem.fingerprint).toContain(
+            'ai_agent_review_item:',
+        );
+        expect(finding?.reviewItem.fingerprint).not.toBe(
+            'ai_agent_review_item:existing-1',
+        );
+    });
 });
 
 describe('resolveReviewJudgeProvider', () => {
@@ -750,5 +1106,124 @@ describe('resolveReviewJudgeProvider', () => {
         expect(resolveReviewJudgeProvider(copilotWith({ openai: {} }))).toBe(
             undefined,
         );
+    });
+});
+
+describe('enforceNextUserSignalGrounding', () => {
+    const promotedWithNextUserSignal = (
+        overrides: Partial<AiAgentReviewClassifierJudgeOutput> = {},
+    ): AiAgentReviewClassifierJudgeOutput =>
+        makeJudgeOutput({
+            signal: 'implicit_correction',
+            implicitSignalSources: ['next_user_correction'],
+            promotedToFinding: true,
+            promotionReason: 'User corrected the metric.',
+            primaryRootCause: 'semantic_layer',
+            ...overrides,
+        });
+
+    it('returns the output untouched when a next user prompt exists', () => {
+        const output = promotedWithNextUserSignal();
+        expect(
+            AiAgentReviewClassifierService.enforceNextUserSignalGrounding(
+                output,
+                { hasNextUserPrompt: true, hasHumanFeedback: false },
+            ),
+        ).toBe(output);
+    });
+
+    it('returns the output untouched when no next_user_* sources were emitted', () => {
+        const output = promotedWithNextUserSignal({
+            implicitSignalSources: ['tool_error'],
+        });
+        expect(
+            AiAgentReviewClassifierService.enforceNextUserSignalGrounding(
+                output,
+                { hasNextUserPrompt: false, hasHumanFeedback: false },
+            ),
+        ).toBe(output);
+    });
+
+    it('strips fabricated next_user_* sources and demotes when nothing else supports promotion', () => {
+        const result =
+            AiAgentReviewClassifierService.enforceNextUserSignalGrounding(
+                promotedWithNextUserSignal({
+                    implicitSignalSources: [
+                        'next_user_correction',
+                        'next_user_retry',
+                    ],
+                }),
+                { hasNextUserPrompt: false, hasHumanFeedback: false },
+            );
+        expect(result.implicitSignalSources).toEqual([]);
+        expect(result.promotedToFinding).toBe(false);
+        expect(result.promotionReason).toBe(
+            'next_user_signal_without_next_user_prompt',
+        );
+    });
+
+    it('strips fabricated sources but keeps the promotion when other promotable evidence remains', () => {
+        const result =
+            AiAgentReviewClassifierService.enforceNextUserSignalGrounding(
+                promotedWithNextUserSignal({
+                    implicitSignalSources: [
+                        'next_user_correction',
+                        'tool_error',
+                    ],
+                }),
+                { hasNextUserPrompt: false, hasHumanFeedback: false },
+            );
+        expect(result.implicitSignalSources).toEqual(['tool_error']);
+        expect(result.promotedToFinding).toBe(true);
+    });
+
+    it('strips output_shape_correction as next-turn-derived and demotes', () => {
+        const result =
+            AiAgentReviewClassifierService.enforceNextUserSignalGrounding(
+                promotedWithNextUserSignal({
+                    implicitSignalSources: [
+                        'next_user_retry',
+                        'output_shape_correction',
+                    ],
+                }),
+                { hasNextUserPrompt: false, hasHumanFeedback: false },
+            );
+        expect(result.implicitSignalSources).toEqual([]);
+        expect(result.promotedToFinding).toBe(false);
+    });
+
+    it('keeps the promotion when explicit human feedback grounds it', () => {
+        const result =
+            AiAgentReviewClassifierService.enforceNextUserSignalGrounding(
+                promotedWithNextUserSignal(),
+                { hasNextUserPrompt: false, hasHumanFeedback: true },
+            );
+        expect(result.implicitSignalSources).toEqual([]);
+        expect(result.promotedToFinding).toBe(true);
+    });
+
+    it('demotes a promotion built only on fabricated output_shape_correction', () => {
+        const result =
+            AiAgentReviewClassifierService.enforceNextUserSignalGrounding(
+                promotedWithNextUserSignal({
+                    implicitSignalSources: ['output_shape_correction'],
+                }),
+                { hasNextUserPrompt: false, hasHumanFeedback: false },
+            );
+        expect(result.promotedToFinding).toBe(false);
+    });
+
+    it('strips without demoting when the output was not promoted', () => {
+        const result =
+            AiAgentReviewClassifierService.enforceNextUserSignalGrounding(
+                promotedWithNextUserSignal({
+                    promotedToFinding: false,
+                    promotionReason: null,
+                }),
+                { hasNextUserPrompt: false, hasHumanFeedback: false },
+            );
+        expect(result.implicitSignalSources).toEqual([]);
+        expect(result.promotedToFinding).toBe(false);
+        expect(result.promotionReason).toBeNull();
     });
 });
