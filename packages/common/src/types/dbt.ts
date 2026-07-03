@@ -20,6 +20,7 @@ import {
     type CompactOrAlias,
     type DimensionType,
     type FieldUrl,
+    type FilterAutocompleteValue,
     type Format,
     type Metric,
     type MetricType,
@@ -218,6 +219,11 @@ type DbtColumnLightdashConfig = {
     metrics?: { [metricName: string]: DbtColumnLightdashMetric };
 };
 
+export type DbtFilterAutocompleteConfig = {
+    values?: FilterAutocompleteValue[];
+    fetch_from_warehouse?: boolean;
+};
+
 export type DbtColumnLightdashDimension = {
     name?: string;
     label?: string;
@@ -244,6 +250,7 @@ export type DbtColumnLightdashDimension = {
     any_attributes?: Record<string, string | string[]>;
     ai_hint?: string | string[];
     case_sensitive?: boolean; // When false, string filters on this dimension will be case insensitive. Default is true
+    filter_autocomplete?: DbtFilterAutocompleteConfig;
     image?: {
         url: string;
         width?: number;
@@ -472,6 +479,16 @@ export interface DbtManifest {
     metadata: DbtRawManifestMetadata;
     metrics: Record<string, DbtMetric>;
     docs: Record<string, DbtDoc>;
+    /**
+     * Opaque manifest sections that Lightdash carries through the multi-source
+     * merge (`combineManifestSources`) but does not interpret during compile —
+     * the already-compiled `nodes` carry resolved relation_names, so these are
+     * not read today. Kept for faithful merging and future write-back source
+     * attribution. Optional: not every manifest (or test fixture) includes them.
+     */
+    sources?: Record<string, AnyType>;
+    macros?: Record<string, AnyType>;
+    semantic_models?: Record<string, AnyType>;
 }
 
 export interface DbtRawManifestMetadata {

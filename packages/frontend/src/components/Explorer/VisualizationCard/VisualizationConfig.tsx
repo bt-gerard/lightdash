@@ -13,6 +13,7 @@ import { lazy, Suspense, useMemo, type FC } from 'react';
 import MantineIcon from '../../common/MantineIcon';
 import { ConfigTabs as BigNumberConfigTabs } from '../../VisualizationConfigs/BigNumberConfig/BigNumberConfigTabs';
 import { ConfigTabs as ChartConfigTabs } from '../../VisualizationConfigs/ChartConfigPanel/ConfigTabs';
+import { ConfigTabs as DataAppVizConfigTabs } from '../../VisualizationConfigs/DataAppVizConfig/DataAppVizConfigTabs';
 import { ConfigTabs as FunnelChartConfigTabs } from '../../VisualizationConfigs/FunnelChartConfig/FunnelChartConfigTabs';
 import { ConfigTabs as GaugeConfigTabs } from '../../VisualizationConfigs/GaugeConfig/GaugeConfigTabs';
 import { ConfigTabs as MapConfigTabs } from '../../VisualizationConfigs/MapConfig';
@@ -62,6 +63,8 @@ const VisualizationConfig: FC<Props> = ({ chartType, onClose }) => {
                 );
             case ChartType.SANKEY:
                 return SankeyConfigTabs;
+            case ChartType.DATA_APP_VIZ:
+                return DataAppVizConfigTabs;
             default:
                 return assertUnreachable(
                     chartType,

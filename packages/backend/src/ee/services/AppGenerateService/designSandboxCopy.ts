@@ -1,12 +1,13 @@
-import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { type S3Client } from '@aws-sdk/client-s3';
 import {
     type AppVersionDesignSnapshot,
     type OrganizationDesignFileKind,
 } from '@lightdash/common';
-import { Sandbox } from 'e2b';
 import type { Logger } from 'winston';
 import type { OrganizationDesignModel } from '../../../models/OrganizationDesignModel';
 import { designS3Key } from '../../../services/OrganizationDesignService/OrganizationDesignService';
+import { type SandboxHandle } from '../SandboxRuntime';
+import { readS3ObjectAsBuffer } from './s3Utils';
 
 /**
  * Sandbox layout the agent sees when a theme is applied. Subdirectories are
@@ -41,25 +42,6 @@ const EMPTY_RESULT: DesignSandboxCopyResult = {
     designSnapshot: null,
 };
 
-const readS3ObjectAsBuffer = async (
-    s3Client: S3Client,
-    bucket: string,
-    key: string,
-): Promise<Buffer> => {
-    const response = await s3Client.send(
-        new GetObjectCommand({ Bucket: bucket, Key: key }),
-    );
-    const body = response.Body;
-    if (!body || typeof (body as NodeJS.ReadableStream).on !== 'function') {
-        throw new Error(`Unexpected S3 response body type for key=${key}`);
-    }
-    const chunks: Uint8Array[] = [];
-    for await (const chunk of body as AsyncIterable<Uint8Array>) {
-        chunks.push(chunk);
-    }
-    return Buffer.concat(chunks);
-};
-
 /**
  * Copy the resolved theme's files into the data-app sandbox and return
  * metadata for the system-prompt assembly + version-resources snapshot.
@@ -73,7 +55,7 @@ const readS3ObjectAsBuffer = async (
  * previous version sitting on a warm sandbox.
  */
 export async function copyDesignIntoSandbox(args: {
-    sandbox: Sandbox;
+    sandbox: SandboxHandle;
     s3Client: S3Client;
     bucket: string;
     organizationDesignModel: OrganizationDesignModel;
@@ -151,13 +133,7 @@ export async function copyDesignIntoSandbox(args: {
                 );
             } else {
                 const sandboxPath = `${dir}/${file.filename}`;
-                await sandbox.files.write(
-                    sandboxPath,
-                    buffer.buffer.slice(
-                        buffer.byteOffset,
-                        buffer.byteOffset + buffer.byteLength,
-                    ) as ArrayBuffer,
-                );
+                await sandbox.files.write(sandboxPath, buffer);
 
                 if (file.kind === 'css') cssEntrypoints.push(sandboxPath);
                 else if (file.kind === 'image') imagePaths.push(sandboxPath);

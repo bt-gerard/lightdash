@@ -3,12 +3,12 @@ import { selectAgent } from '../ai/agents/agentSelector';
 import { getModel } from '../ai/models';
 import { AiRouterService } from './AiRouterService';
 
-jest.mock('../ai/agents/agentSelector', () => ({
-    selectAgent: jest.fn(),
+vi.mock('../ai/agents/agentSelector', () => ({
+    selectAgent: vi.fn(),
 }));
 
-jest.mock('../ai/models', () => ({
-    getModel: jest.fn(),
+vi.mock('../ai/models', () => ({
+    getModel: vi.fn(),
 }));
 
 const organizationUuid = 'org-uuid';
@@ -16,9 +16,9 @@ const projectUuid = 'project-uuid';
 const userUuid = 'user-uuid';
 
 const ability = {
-    can: jest.fn(() => true),
-    cannot: jest.fn(() => false),
-    relevantRuleFor: jest.fn(() => undefined),
+    can: vi.fn(() => true),
+    cannot: vi.fn(() => false),
+    relevantRuleFor: vi.fn(() => undefined),
     rules: [],
 };
 
@@ -62,7 +62,9 @@ const createCandidate = (
     enableDataAccess: true,
     enableSelfImprovement: true,
     enableContentTools: true,
+    enableUserContext: false,
     adminOnly: false,
+    modelConfig: null,
     version: 1,
     context: overrides.context ?? {
         uuid: overrides.uuid,
@@ -84,9 +86,9 @@ const makeService = ({
     routerEnabled?: boolean;
     instruction?: string | null;
 }) => {
-    const analytics = { track: jest.fn() };
+    const analytics = { track: vi.fn() };
     const aiRouterModel = {
-        findByOrganization: jest.fn().mockResolvedValue(
+        findByOrganization: vi.fn().mockResolvedValue(
             routerEnabled
                 ? {
                       routerUuid: 'router-uuid',
@@ -98,7 +100,7 @@ const makeService = ({
                   }
                 : null,
         ),
-        getLatestInstruction: jest.fn().mockResolvedValue(
+        getLatestInstruction: vi.fn().mockResolvedValue(
             instruction
                 ? {
                       instructionVersionUuid: 'instruction-version-uuid',
@@ -110,12 +112,12 @@ const makeService = ({
                   }
                 : null,
         ),
-        createDecision: jest.fn().mockResolvedValue({
+        createDecision: vi.fn().mockResolvedValue({
             decisionUuid: 'decision-uuid',
         }),
     };
     const aiAgentService = {
-        getAvailableAgents: jest.fn().mockResolvedValue(candidates),
+        getAvailableAgents: vi.fn().mockResolvedValue(candidates),
     };
 
     const service = new AiRouterService({
@@ -130,8 +132,10 @@ const makeService = ({
 
 describe('AiRouterService', () => {
     beforeEach(() => {
-        jest.resetAllMocks();
-        (getModel as jest.Mock).mockReturnValue({ model: 'mock-model' });
+        vi.resetAllMocks();
+        (getModel as import('vitest').Mock).mockReturnValue({
+            model: 'mock-model',
+        });
     });
 
     it('uses the latest routing instructions and accessible candidates', async () => {
@@ -141,7 +145,7 @@ describe('AiRouterService', () => {
         ];
         const { service, aiAgentService } = makeService({ candidates });
 
-        (selectAgent as jest.Mock).mockResolvedValue({
+        (selectAgent as import('vitest').Mock).mockResolvedValue({
             selectedAgentUuid: 'agent-2',
             confidence: 'high',
             reasoning: 'Finance agent matches the request.',
@@ -200,7 +204,7 @@ describe('AiRouterService', () => {
         ];
         const { service } = makeService({ candidates });
 
-        (selectAgent as jest.Mock).mockResolvedValue({
+        (selectAgent as import('vitest').Mock).mockResolvedValue({
             selectedAgentUuid: 'agent-1',
             confidence: 'low',
             reasoning: 'General seems safest.',
@@ -226,7 +230,7 @@ describe('AiRouterService', () => {
         ];
         const { service, aiRouterModel } = makeService({ candidates });
 
-        (selectAgent as jest.Mock).mockResolvedValue({
+        (selectAgent as import('vitest').Mock).mockResolvedValue({
             selectedAgentUuid: 'agent-2',
             confidence: 'low',
             reasoning: 'Not fully certain.',

@@ -1,10 +1,19 @@
 import { type AppClarification } from '@lightdash/common';
 import { type ChartKind } from '@lightdash/common';
+import { type DataAppVizSchema } from '@lightdash/common';
 
 export type ChatChart = {
     name: string;
     uuid: string;
     chartKind?: ChartKind;
+    /** True when the chart was attached as a live link (run by uuid). */
+    linkLive?: boolean;
+};
+
+export type ChatConnection = {
+    externalConnectionUuid: string;
+    name: string;
+    alias: string;
 };
 
 export type ChatMessage = {
@@ -13,12 +22,14 @@ export type ChatMessage = {
     imagePreviewUrls: string[];
     imageResourceIds: string[];
     charts: ChatChart[];
+    externalConnections: ChatConnection[];
     dashboardName: string | null;
     clarifications: AppClarification[];
     appUuid: string | null;
     version: number | null;
     timestamp: Date;
     userName: string | null;
+    vizSchema: DataAppVizSchema | null;
     // For optimistic (local) user bubbles only. Records the latest server
     // version number known at submit time. The bubble is dropped from the
     // merged view once the server has produced a higher version — that's the

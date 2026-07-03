@@ -77,16 +77,16 @@ export const useSettingsNavigation = (
         isServiceAccountsEnabled,
         isAiCopilotEnabledOrTrial,
         shouldShowAiAgentReviews,
+        canManageOrgAiAgent,
+        hasAnyAiAgentAccess,
         embeddingEnabled,
         dataAppsFlag,
-        dataAppExternalAccessFlag,
         isGitProject,
     } = context;
 
     const isEmbeddingEnabled = embeddingEnabled?.enabled ?? false;
     const isScimEnabled = isScimTokenManagementEnabled?.enabled ?? false;
     const isDataAppsEnabled = dataAppsFlag?.enabled ?? false;
-    const isExternalAccessEnabled = dataAppExternalAccessFlag?.enabled ?? false;
 
     return useMemo<SettingsNavigationSection[]>(() => {
         const ability = user?.ability;
@@ -378,24 +378,21 @@ export const useSettingsNavigation = (
             });
         }
 
-        if (
-            isAiCopilotEnabledOrTrial &&
-            ability?.can(
-                'manage',
-                subject('AiAgent', {
-                    organizationUuid: organization?.organizationUuid,
-                }),
-            )
-        ) {
-            const aiChildren: SettingsNavigationItem[] = [
-                {
+        if (isAiCopilotEnabledOrTrial && hasAnyAiAgentAccess) {
+            const aiChildren: SettingsNavigationItem[] = [];
+            // General is org-wide config (router, org settings) — org admins only.
+            if (canManageOrgAiAgent) {
+                aiChildren.push({
                     label: 'General',
                     to: '/generalSettings/ai/general',
                     icon: IconSettings,
                     keywords: ['ai', 'settings'],
                     children: [],
                     exact: true,
-                },
+                });
+            }
+            // Threads & Agents are project-filtered for project-scoped users.
+            aiChildren.push(
                 {
                     label: 'Threads',
                     to: '/generalSettings/ai/threads',
@@ -412,14 +409,14 @@ export const useSettingsNavigation = (
                     children: [],
                     exact: true,
                 },
-            ];
+            );
 
             if (shouldShowAiAgentReviews) {
                 aiChildren.push({
-                    label: 'Reviews',
-                    to: '/generalSettings/ai/reviews',
+                    label: 'Issues',
+                    to: '/generalSettings/ai/issues',
                     icon: IconListCheck,
-                    keywords: ['classifier'],
+                    keywords: ['classifier', 'reviews'],
                     children: [],
                     exact: true,
                 });
@@ -625,7 +622,6 @@ export const useSettingsNavigation = (
 
             if (
                 isDataAppsEnabled &&
-                isExternalAccessEnabled &&
                 ability?.can(
                     'manage',
                     subject('ExternalConnection', {
@@ -798,9 +794,10 @@ export const useSettingsNavigation = (
         isServiceAccountsEnabled,
         isAiCopilotEnabledOrTrial,
         shouldShowAiAgentReviews,
+        canManageOrgAiAgent,
+        hasAnyAiAgentAccess,
         isEmbeddingEnabled,
         isDataAppsEnabled,
-        isExternalAccessEnabled,
         isGitProject,
         track,
     ]);

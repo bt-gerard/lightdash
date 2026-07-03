@@ -3,11 +3,20 @@ import {
     type ParametersValuesMap,
     type ParameterValue,
 } from '@lightdash/common';
-import { Button, Divider, Group, Text, Tooltip } from '@mantine-8/core';
+import {
+    ActionIcon,
+    Button,
+    Divider,
+    Group,
+    Text,
+    Tooltip,
+} from '@mantine-8/core';
 import {
     IconAdjustmentsHorizontal,
     IconCalendar,
     IconChevronUp,
+    IconEye,
+    IconEyeOff,
     IconFilter,
 } from '@tabler/icons-react';
 import { type FC, type ReactNode } from 'react';
@@ -25,6 +34,7 @@ type Props = {
     hasTilesThatSupportFilters: boolean;
     hasDashboardTiles: boolean;
     parameters: Record<string, LightdashProjectParameter>;
+    shadowedReservedNames: string[];
     parameterValues: ParametersValuesMap;
     onParameterChange: (key: string, value: ParameterValue | null) => void;
     onParameterClearAll: () => void;
@@ -44,6 +54,7 @@ export const DashboardFiltersBar: FC<Props> = ({
     hasTilesThatSupportFilters,
     hasDashboardTiles,
     parameters,
+    shadowedReservedNames,
     parameterValues,
     onParameterChange,
     onParameterClearAll,
@@ -60,6 +71,9 @@ export const DashboardFiltersBar: FC<Props> = ({
         (c) => c.isAddFilterDisabled,
     );
     const allFilters = useDashboardContext((c) => c.allFilters);
+    const setIsDateZoomDisabled = useDashboardContext(
+        (c) => c.setIsDateZoomDisabled,
+    );
     const hasFilters =
         allFilters.dimensions.length > 0 ||
         allFilters.metrics.length > 0 ||
@@ -131,6 +145,9 @@ export const DashboardFiltersBar: FC<Props> = ({
                                         onParameterChange={onParameterChange}
                                         onClearAll={onParameterClearAll}
                                         parameters={parameters}
+                                        shadowedReservedNames={
+                                            shadowedReservedNames
+                                        }
                                         isLoading={isParameterLoading}
                                         missingRequiredParameters={
                                             missingRequiredParameters
@@ -169,6 +186,35 @@ export const DashboardFiltersBar: FC<Props> = ({
                                         </div>
                                     }
                                 />
+                                {isEditMode && (
+                                    <Tooltip
+                                        withinPortal
+                                        label={
+                                            isDateZoomDisabled
+                                                ? 'Date zoom is hidden from viewers. Click to show.'
+                                                : 'Hide date zoom from viewers'
+                                        }
+                                    >
+                                        <ActionIcon
+                                            aria-label="Toggle date zoom visibility for viewers"
+                                            variant="subtle"
+                                            onClick={() =>
+                                                setIsDateZoomDisabled(
+                                                    !isDateZoomDisabled,
+                                                )
+                                            }
+                                        >
+                                            <MantineIcon
+                                                color="ldGray.6"
+                                                icon={
+                                                    isDateZoomDisabled
+                                                        ? IconEyeOff
+                                                        : IconEye
+                                                }
+                                            />
+                                        </ActionIcon>
+                                    </Tooltip>
+                                )}
                                 <DateZoom isEditMode={isEditMode} />
                             </>
                         )}

@@ -3,7 +3,7 @@ import {
     IconFileText,
     IconLayoutDashboard,
     IconPresentation,
-    IconSparkles,
+    IconPuzzle,
     type Icon as TablerIcon,
 } from '@tabler/icons-react';
 
@@ -36,10 +36,11 @@ export const TEMPLATES: TemplateDefinition[] = [
         icon: IconFileText,
     },
     {
-        id: 'custom',
-        title: 'Custom',
-        description: 'Start from scratch and describe whatever you want.',
-        icon: IconSparkles,
+        id: 'data_app_viz',
+        title: 'Data app visualization',
+        description:
+            'A reusable single-tile chart you can apply to any query like a chart type.',
+        icon: IconPuzzle,
     },
 ];
 

@@ -26,14 +26,16 @@ import {
     ExploreRepoFn,
     FindContentFn,
     FindExploresFn,
-    FindFieldFn,
+    FindFieldsFn,
     GetDashboardChartsFn,
     GetExploreFn,
     GetKnowledgeDocumentContentFn,
     GetProjectInfoFn,
     GetPromptFn,
     GetSavedChartFn,
+    GetVerifiedFieldUsageFn,
     IsPromptInterruptedFn,
+    IsThreadSqlAutoApprovedFn,
     ListContentFn,
     ListExploresFn,
     ListKnowledgeDocumentsFn,
@@ -79,8 +81,20 @@ export type UnavailableMcpServer = {
     status: AiMcpServerConnectionStatus;
 };
 
+export type AiAgentRequestingUserRole = {
+    name: string;
+    isTechnical: boolean;
+};
+
+export type AiAgentRequestingUser = {
+    name: string;
+    role: AiAgentRequestingUserRole | null;
+    groups: string[];
+};
+
 export type AiAgentArgs = AnyAiModel & {
     agentSettings: AiAgent;
+    requestingUser: AiAgentRequestingUser | null;
     knowledgeDocuments: AiAgentDocumentSummary[];
     projectContext: ProjectContextEntry[];
     // Whether the project_context feature is on for this turn (Control = off).
@@ -106,6 +120,10 @@ export type AiAgentArgs = AnyAiModel & {
     writebackAttribution: AiWritebackAttribution | null;
     enablePreviewDeploySetup: boolean;
     enableRepoDiscovery: boolean;
+    // Experimental: swap the discoverFields sub-agent for a deterministic grep
+    // over the in-memory annotated explores (the `grepFields` tool). Gated by
+    // the `ai-grep-fields` feature flag.
+    enableGrepFields: boolean;
     // dbt project root within the repo (from project_sub_path); '.' = repo root,
     // null when repo discovery is off or the project is not git-backed.
     repoFsRoot: string | null;
@@ -121,10 +139,10 @@ export type AiAgentArgs = AnyAiModel & {
     warehouseType: WarehouseTypes | null;
     warehouseSchema: string | null;
     availableSkills: AiAgentSkillReference[];
-    enableAgentRevamp: boolean;
 
     findExploresFieldSearchSize: number;
     findFieldsPageSize: number;
+    toolDescriptionMaxChars: number;
     getDashboardChartsPageSize: number;
     maxQueryLimit: number;
     runSqlMaxLimit: number;
@@ -162,7 +180,8 @@ export type AiAgentDependencies = {
     validateContent: ValidateContentFn;
     getDashboardCharts: GetDashboardChartsFn;
     findExplores: FindExploresFn;
-    findFields: FindFieldFn;
+    getVerifiedFieldUsage: GetVerifiedFieldUsageFn;
+    findFields: FindFieldsFn;
     searchSemanticLayer: SearchSemanticLayerFn;
     analyzeFieldImpact: AnalyzeFieldImpactFn;
     getExplore: GetExploreFn;
@@ -199,6 +218,7 @@ export type AiAgentDependencies = {
     getProjectInfo: GetProjectInfoFn;
     waitForSqlApproval: WaitForSqlApprovalFn;
     recordSqlApproval: RecordSqlApprovalFn;
+    isThreadSqlAutoApproved: IsThreadSqlAutoApprovedFn;
     loadSkill: LoadAgentSkillFn;
     perf: PerformanceMetrics;
 };

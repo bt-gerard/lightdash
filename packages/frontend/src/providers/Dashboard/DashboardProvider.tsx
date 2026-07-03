@@ -4,19 +4,25 @@ import {
     convertDashboardFiltersParamToDashboardFilters,
     DashboardTileTypes,
     DateGranularity,
+    EMPTY_DATE_ZOOM_CONFIG,
     FilterInteractivityValues,
     getFilterInteractivityValue,
     getItemId,
+    getMissingRequiredParameters,
     isDashboardChartTileType,
     isFilterLockedOnTab,
     isStandardDateGranularity,
     isSubDayGranularity,
+    normalizeDateZoomConfig,
+    normalizeGranularityParam,
     stripOverridesForLockedFiltersOnTab,
+    type ChartZoomableField,
     type Dashboard,
     type DashboardFilterableField,
     type DashboardFilterRule,
     type DashboardFilters,
     type DashboardParameters,
+    type DateZoomConfig,
     type FilterableDimension,
     type InteractivityOptions,
     type Metric,
@@ -101,6 +107,10 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
     children,
 }) => {
     const { search, pathname } = useLocation();
+    // Mirrors `search` without re-triggering effects that should fire on other
+    // deps (e.g. dashboard load) while still reading the live URL.
+    const searchRef = useRef(search);
+    searchRef.current = search;
     const navigate = useNavigate();
     const { showToastWarning, showToastInfo } = useToaster();
     const hasNotifiedLockedOverrideRef = useRef(false);
@@ -166,6 +176,13 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
             },
         },
     });
+
+    // Embedded dashboards populate `embedDashboard` instead of the query hook,
+    // so config-derived state must read from whichever holds the dashboard.
+    const currentDashboardConfig = useMemo(
+        () => (dashboard ?? embedDashboard)?.config,
+        [dashboard, embedDashboard],
+    );
 
     const { data: dashboardComments } = useGetComments(
         dashboardUuid,
@@ -297,6 +314,56 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
         setHasDefaultDateZoomGranularityChanged,
     ] = useState<boolean>(false);
 
+    // Configurable date zoom controls (named controls + per-tile targets).
+    const [dateZoomConfig, setDateZoomConfigState] = useState<DateZoomConfig>(
+        EMPTY_DATE_ZOOM_CONFIG,
+    );
+    const [hasDateZoomConfigChanged, setHasDateZoomConfigChanged] =
+        useState(false);
+
+    const setDateZoomConfig = useCallback((config: DateZoomConfig) => {
+        setDateZoomConfigState(config);
+        setHasDateZoomConfigChanged(true);
+    }, []);
+
+    // Persisted config, used to seed editable state on load and after save.
+    const persistedDateZoomConfig = useMemo(
+        () => normalizeDateZoomConfig(currentDashboardConfig),
+        [currentDashboardConfig],
+    );
+    const [syncedDateZoomConfig, setSyncedDateZoomConfig] =
+        useState<DateZoomConfig | null>(null);
+
+    // Re-seed editable state when persisted content changes (load + post-save),
+    // adjusting during render so a no-op refetch can't clobber in-progress edits.
+    if (!isEqual(persistedDateZoomConfig, syncedDateZoomConfig)) {
+        setSyncedDateZoomConfig(persistedDateZoomConfig);
+        setDateZoomConfigState(persistedDateZoomConfig);
+        setHasDateZoomConfigChanged(false);
+    }
+
+    // Per-control runtime grain overrides only; an absent entry means "use the
+    // control's persisted default" (the resolver applies `?? control.granularity`).
+    const [controlGranularities, setControlGranularities] = useState<
+        Record<string, DateGranularity | string>
+    >({});
+
+    const setControlGranularity = useCallback(
+        (
+            controlUuid: string,
+            granularity: DateGranularity | string | undefined,
+        ) => {
+            setControlGranularities((prev) => {
+                if (granularity === undefined) {
+                    const { [controlUuid]: _removed, ...rest } = prev;
+                    return rest;
+                }
+                return { ...prev, [controlUuid]: granularity };
+            });
+        },
+        [],
+    );
+
     // Set parameters to saved parameters when they are loaded
     useEffect(() => {
         if (savedParameters) {
@@ -326,24 +393,37 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
     // Sync date zoom granularities from dashboard config
     // Note: Custom granularities from explores are added by DashboardGranularitySync
     useEffect(() => {
-        if (dashboard?.config?.dateZoomGranularities !== undefined) {
+        if (currentDashboardConfig?.dateZoomGranularities !== undefined) {
             setDateZoomGranularitiesState(
-                dashboard.config.dateZoomGranularities,
+                currentDashboardConfig.dateZoomGranularities,
             );
         } else {
             setDateZoomGranularitiesState(defaultStandardGranularities);
         }
     }, [
-        dashboard?.config?.dateZoomGranularities,
+        currentDashboardConfig?.dateZoomGranularities,
         defaultStandardGranularities,
     ]);
 
     // Sync default date zoom granularity from dashboard config
     useEffect(() => {
         setDefaultDateZoomGranularityState(
-            dashboard?.config?.defaultDateZoomGranularity,
+            currentDashboardConfig?.defaultDateZoomGranularity,
         );
-    }, [dashboard?.config?.defaultDateZoomGranularity]);
+    }, [currentDashboardConfig?.defaultDateZoomGranularity]);
+
+    // Reset per-control runtime overrides when the dashboard identity changes;
+    // each control's default comes from its persisted granularity. Skip when the
+    // URL carries `dateZoom.<control>` overrides (deep link / refresh), mirroring
+    // the global default's URL guard so `useMount` hydration isn't clobbered when
+    // the dashboard query resolves after mount.
+    useEffect(() => {
+        const hasUrlOverride = [
+            ...new URLSearchParams(searchRef.current).keys(),
+        ].some((key) => key.startsWith('dateZoom.'));
+        if (hasUrlOverride) return;
+        setControlGranularities({});
+    }, [dashboard?.uuid]);
 
     // Set active tab when dashboard and tabs are loaded.
     // In view mode, hidden tabs are not selectable — fall back to the first
@@ -497,6 +577,39 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
         }
     }, [dashboardTiles]);
 
+    // The date fields each chart tile can actually be zoomed on, reported up
+    // from each tile (it has the explore + metricQuery). The date-zoom control
+    // modal offers exactly these per tile, instead of every filterable date
+    // dimension in the explore.
+    const [chartZoomableFieldsByTileUuid, setChartZoomableFieldsByTileUuid] =
+        useState<Record<string, ChartZoomableField[]>>({});
+
+    const setChartZoomableFields = useCallback(
+        (tileUuid: string, fields: ChartZoomableField[]) => {
+            setChartZoomableFieldsByTileUuid((prev) => {
+                if (isEqual(prev[tileUuid], fields)) return prev;
+                return { ...prev, [tileUuid]: fields };
+            });
+        },
+        [],
+    );
+
+    // Drop zoomable fields for tiles no longer on the dashboard
+    useEffect(() => {
+        if (dashboardTiles) {
+            setChartZoomableFieldsByTileUuid((old) => {
+                const tileIds = new Set(
+                    dashboardTiles.map((tile) => tile.uuid),
+                );
+                return Object.fromEntries(
+                    Object.entries(old).filter(([tileId]) =>
+                        tileIds.has(tileId),
+                    ),
+                );
+            });
+        }
+    }, [dashboardTiles]);
+
     const parameterValues = useMemo(() => {
         return Object.entries(parameters).reduce((acc, [key, parameter]) => {
             if (
@@ -537,18 +650,26 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
     }, [projectParameters, addParameterDefinitions]);
 
     const missingRequiredParameters = useMemo(() => {
-        // If no parameter references, return empty array
         if (!dashboardParameterReferences.size) return [];
 
-        // Missing required parameters are the ones that are not set and don't have a default value
-        return Array.from(dashboardParameterReferences).filter(
-            (parameterName) =>
-                !parameters[parameterName] &&
-                !parameterDefinitions[parameterName]?.default,
+        // Map by key presence (a param is "set" even with an empty value), not the
+        // empty-stripping `parameterValues`, so dashboard semantics are unchanged.
+        const dashboardParameterValues: ParametersValuesMap =
+            Object.fromEntries(
+                Object.entries(parameters).map(([key, parameter]) => [
+                    key,
+                    parameter.value,
+                ]),
+            );
+
+        return getMissingRequiredParameters(
+            Array.from(dashboardParameterReferences),
+            dashboardParameterValues,
+            parameterDefinitions,
         );
     }, [dashboardParameterReferences, parameters, parameterDefinitions]);
 
-    const [chartsWithDateZoomApplied, setChartsWithDateZoomApplied] =
+    const [tilesWithDateZoomApplied, setTilesWithDateZoomApplied] =
         useState<Set<string>>();
 
     // Update dashboard url date zoom change
@@ -579,6 +700,46 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
             );
         }
     }, [dateZoomGranularity, search, navigate, pathname, embed.mode]);
+
+    // Sync per-control runtime grain overrides to `dateZoom.<controlUuid>` URL
+    // params (the global `?dateZoom` above is unchanged and drives the Default).
+    // Written lowercased to match the global write; normalized back to canonical
+    // DateGranularity case on read.
+    useEffect(() => {
+        if (embed.mode === 'sdk') {
+            return;
+        }
+
+        const params = new URLSearchParams(search);
+        const currentControlParams = [...params.entries()].filter(([key]) =>
+            key.startsWith('dateZoom.'),
+        );
+        const nextControlParams: Array<[string, string]> = Object.entries(
+            controlGranularities,
+        ).map(([uuid, grain]) => [
+            `dateZoom.${uuid}`,
+            grain.toString().toLowerCase(),
+        ]);
+
+        // Compare content order-independently so a deep link with interleaved
+        // params doesn't trigger a no-op navigation just from re-appending.
+        const serialize = (entries: Array<[string, string]>): string =>
+            entries
+                .map(([key, value]) => `${key}=${value}`)
+                .sort()
+                .join('&');
+        if (serialize(currentControlParams) === serialize(nextControlParams)) {
+            return;
+        }
+
+        currentControlParams.forEach(([key]) => params.delete(key));
+        nextControlParams.forEach(([key, value]) => params.set(key, value));
+
+        void navigate(
+            { pathname, search: params.toString() },
+            { replace: true },
+        );
+    }, [controlGranularities, search, navigate, pathname, embed.mode]);
 
     const {
         overridesForSavedDashboardFilters,
@@ -1033,6 +1194,20 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
             }
         }
 
+        // Per-control date zoom grain overrides (`dateZoom.<controlUuid>`),
+        // normalized back to canonical DateGranularity case so the runtime grain
+        // that reaches the wire is e.g. 'Week', never a lowercased 'week'.
+        const controlOverrides: Record<string, DateGranularity | string> = {};
+        searchParams.forEach((value, key) => {
+            if (key.startsWith('dateZoom.')) {
+                controlOverrides[key.slice('dateZoom.'.length)] =
+                    normalizeGranularityParam(value);
+            }
+        });
+        if (Object.keys(controlOverrides).length > 0) {
+            setControlGranularities(controlOverrides);
+        }
+
         // Temp filters
         const tempFilterSearchParam = searchParams.get('tempFilters');
         const filtersStorageKey = dashboardUuid
@@ -1080,28 +1255,26 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
     });
 
     // Apply default date zoom granularity when dashboard loads (if no URL override).
-    // Uses a ref for `search` so URL changes don't re-trigger this effect —
-    // it should only fire when the configured default changes (initial load + after saves).
-    const searchRef = useRef(search);
-    searchRef.current = search;
+    // Uses `searchRef` so URL changes don't re-trigger this effect — it should
+    // only fire when the configured default changes (initial load + after saves).
     useEffect(() => {
         if (isEditMode) return;
         if (
-            dashboard?.config?.defaultDateZoomGranularity &&
-            !dashboard?.config?.isDateZoomDisabled
+            currentDashboardConfig?.defaultDateZoomGranularity &&
+            !currentDashboardConfig?.isDateZoomDisabled
         ) {
             const searchParams = new URLSearchParams(searchRef.current);
             const dateZoomParam = searchParams.get('dateZoom');
             // Only apply default if no URL override is present
             if (!dateZoomParam) {
                 setDateZoomGranularity(
-                    dashboard.config.defaultDateZoomGranularity,
+                    currentDashboardConfig.defaultDateZoomGranularity,
                 );
             }
         }
     }, [
-        dashboard?.config?.defaultDateZoomGranularity,
-        dashboard?.config?.isDateZoomDisabled,
+        currentDashboardConfig?.defaultDateZoomGranularity,
+        currentDashboardConfig?.isDateZoomDisabled,
         isEditMode,
         setDateZoomGranularity,
     ]);
@@ -1549,14 +1722,22 @@ const DashboardProviderInner: React.FC<DashboardProviderProps> = ({
         isLoadingDashboardFilters,
         isFetchingDashboardFilters,
         filterableFieldsByTileUuid,
+        chartZoomableFieldsByTileUuid,
+        setChartZoomableFields,
         allFilters,
         hasTilesThatSupportFilters,
         chartSort,
         setChartSort,
         dateZoomGranularity,
         setDateZoomGranularity,
-        chartsWithDateZoomApplied,
-        setChartsWithDateZoomApplied,
+        tilesWithDateZoomApplied,
+        setTilesWithDateZoomApplied,
+        dateZoomConfig,
+        setDateZoomConfig,
+        hasDateZoomConfigChanged,
+        setHasDateZoomConfigChanged,
+        controlGranularities,
+        setControlGranularity,
         dashboardCommentsCheck,
         dashboardComments,
         hasTileComments,

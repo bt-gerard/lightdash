@@ -24,6 +24,7 @@ import {
     useUpdateAiAgentReviewItemStatus,
 } from '../../hooks/useAiAgentAdmin';
 import { AiAgentIcon } from '../AiAgentIcon';
+import { isExampleReviewItem } from './onboarding';
 import { ProjectContextWritebackModal } from './ProjectContextWritebackModal';
 import { ReviewAssigneeMenu } from './ReviewAssigneeMenu';
 import {
@@ -36,6 +37,7 @@ import {
 } from './reviewItemDetails';
 import styles from './ReviewKanbanBoard.module.css';
 import { getStartWritebackKind, isWritebackRetry } from './reviewLane';
+import { ReviewPriorityMenu } from './ReviewPriorityMenu';
 
 type Props = {
     item: AiAgentReviewItemSummary;
@@ -77,21 +79,25 @@ export const ReviewKanbanCard: FC<Props> = ({ item, isSelected, onSelect }) => {
 
     const title = getIssueTitle(item);
     const targetAnchor = getTargetAnchor(item);
-    const isRecurring = item.findingCount > 1;
 
     const startKind = getStartWritebackKind(item);
     const isRetry = isWritebackRetry(item);
 
+    const isExample = isExampleReviewItem(item.uuid);
+
     const remediation = item.remediation;
     const hasWorkspace = Boolean(remediation);
-    const workspaceHref = `/generalSettings/ai/reviews/${encodeURIComponent(
+    const workspaceHref = `/generalSettings/ai/issues/${encodeURIComponent(
         item.fingerprint,
     )}`;
     const activityLabel = getWorkspaceActivityLabel(item);
 
     return (
         <Box
-            className={`${styles.card}${isSelected ? ` ${styles.cardSelected}` : ''}`}
+            data-tour={isExample ? 'reviews-card' : undefined}
+            className={`${styles.card}${isSelected ? ` ${styles.cardSelected}` : ''}${
+                isExample ? ` ${styles.cardExample}` : ''
+            }`}
         >
             <Box
                 className={styles.cardBody}
@@ -113,6 +119,17 @@ export const ReviewKanbanCard: FC<Props> = ({ item, isSelected, onSelect }) => {
                         wrap="nowrap"
                     >
                         <Stack gap={2} style={{ minWidth: 0 }}>
+                            {isExample && (
+                                <Badge
+                                    size="xs"
+                                    radius="sm"
+                                    variant="default"
+                                    color="gray"
+                                    w="fit-content"
+                                >
+                                    Example
+                                </Badge>
+                            )}
                             <Text fz="sm" fw={550} lineClamp={2}>
                                 {title}
                             </Text>
@@ -128,22 +145,6 @@ export const ReviewKanbanCard: FC<Props> = ({ item, isSelected, onSelect }) => {
                             )}
                         </Stack>
                         <Group gap={8} wrap="nowrap" align="center">
-                            {isRecurring && (
-                                <Tooltip
-                                    variant="xs"
-                                    label={`Seen ${item.findingCount} times`}
-                                    position="top"
-                                >
-                                    <Badge
-                                        size="sm"
-                                        radius="sm"
-                                        variant="light"
-                                        color="orange"
-                                    >
-                                        {item.findingCount}×
-                                    </Badge>
-                                </Tooltip>
-                            )}
                             <Tooltip
                                 variant="xs"
                                 position="top"
@@ -179,22 +180,30 @@ export const ReviewKanbanCard: FC<Props> = ({ item, isSelected, onSelect }) => {
                                     reviewRootCauseLabels[item.primaryRootCause]
                                 }
                             />
+                            {!isExample && (
+                                <ReviewPriorityMenu
+                                    fingerprint={item.fingerprint}
+                                    priority={item.priority}
+                                />
+                            )}
                         </Group>
 
-                        <ReviewAssigneeMenu
-                            projectUuid={
-                                item.projectUuid ??
-                                item.latestFinding?.projectUuid ??
-                                null
-                            }
-                            fingerprint={item.fingerprint}
-                            assignedToUserUuid={item.assignedToUserUuid}
-                            className={
-                                item.assignedToUserUuid
-                                    ? undefined
-                                    : styles.assigneeUnassigned
-                            }
-                        />
+                        {!isExample && (
+                            <ReviewAssigneeMenu
+                                projectUuid={
+                                    item.projectUuid ??
+                                    item.latestFinding?.projectUuid ??
+                                    null
+                                }
+                                fingerprint={item.fingerprint}
+                                assignedToUserUuid={item.assignedToUserUuid}
+                                className={
+                                    item.assignedToUserUuid
+                                        ? undefined
+                                        : styles.assigneeUnassigned
+                                }
+                            />
+                        )}
                     </Group>
                 </Stack>
             </Box>
@@ -220,6 +229,17 @@ export const ReviewKanbanCard: FC<Props> = ({ item, isSelected, onSelect }) => {
                             </Text>
                         </Group>
                     </Box>
+                ) : isExample ? (
+                    <Box
+                        data-tour="reviews-workspace"
+                        className={styles.cardFooter}
+                    >
+                        <Group gap={6} align="center">
+                            <MantineIcon icon={IconLayoutColumns} size={13} />
+                            <Text fz="xs">Open workspace</Text>
+                        </Group>
+                        <MantineIcon icon={IconArrowUpRight} size={14} />
+                    </Box>
                 ) : (
                     <Box
                         component={Link}
@@ -237,41 +257,54 @@ export const ReviewKanbanCard: FC<Props> = ({ item, isSelected, onSelect }) => {
                     </Box>
                 ))}
 
-            {startKind !== null && (
-                <Button
-                    size="compact-xs"
-                    radius="md"
-                    variant="filled"
-                    leftSection={
-                        <MantineIcon
-                            icon={isRetry ? IconRefresh : IconBolt}
-                            size={12}
-                        />
-                    }
-                    loading={createWriteback.isLoading}
-                    className={styles.startAction}
-                    onPointerDown={(e: React.PointerEvent) =>
-                        e.stopPropagation()
-                    }
-                    onClick={(e: React.MouseEvent) => {
-                        e.stopPropagation();
-                        updateStatus.mutate({
-                            fingerprint: item.fingerprint,
-                            body: {
-                                status: 'in_progress',
-                                dismissedReason: null,
-                            },
-                        });
-                        if (startKind === 'modal') {
-                            setPreviewOpen(true);
-                        } else {
-                            createWriteback.mutate(item.fingerprint);
+            {startKind !== null &&
+                (isExample ? (
+                    <Button
+                        data-tour="reviews-pr"
+                        size="compact-xs"
+                        radius="md"
+                        variant="filled"
+                        disabled
+                        leftSection={<MantineIcon icon={IconBolt} size={12} />}
+                        className={styles.startAction}
+                    >
+                        Start fix
+                    </Button>
+                ) : (
+                    <Button
+                        size="compact-xs"
+                        radius="md"
+                        variant="filled"
+                        leftSection={
+                            <MantineIcon
+                                icon={isRetry ? IconRefresh : IconBolt}
+                                size={12}
+                            />
                         }
-                    }}
-                >
-                    {isRetry ? 'Retry fix' : 'Start fix'}
-                </Button>
-            )}
+                        loading={createWriteback.isLoading}
+                        className={styles.startAction}
+                        onPointerDown={(e: React.PointerEvent) =>
+                            e.stopPropagation()
+                        }
+                        onClick={(e: React.MouseEvent) => {
+                            e.stopPropagation();
+                            updateStatus.mutate({
+                                fingerprint: item.fingerprint,
+                                body: {
+                                    status: 'in_progress',
+                                    dismissedReason: null,
+                                },
+                            });
+                            if (startKind === 'modal') {
+                                setPreviewOpen(true);
+                            } else {
+                                createWriteback.mutate(item.fingerprint);
+                            }
+                        }}
+                    >
+                        {isRetry ? 'Retry fix' : 'Start fix'}
+                    </Button>
+                ))}
 
             {startKind === 'modal' && (
                 <ProjectContextWritebackModal

@@ -1,5 +1,7 @@
 import type {
     DiscoverFieldsInput,
+    ToolGrepFieldsArgs,
+    ToolGetMetadataArgs,
     ToolTableVizArgs,
     ToolTimeSeriesArgs,
     ToolVerticalBarArgs,
@@ -45,6 +47,8 @@ import { ExploreToolCallDescription } from './ExploreToolCallDescription';
 import { FieldImpactToolCallDescription } from './FieldImpactToolCallDescription';
 import { FieldSearchToolCallDescription } from './FieldSearchToolCallDescription';
 import { FieldValuesSearchToolCallDescription } from './FieldValuesSearchToolCallDescription';
+import { GetMetadataToolCallDescription } from './GetMetadataToolCallDescription';
+import { GrepFieldsToolCallDescription } from './GrepFieldsToolCallDescription';
 import { KnowledgeDocumentToolCallDescription } from './KnowledgeDocumentToolCallDescription';
 import { ListContentToolCallDescription } from './ListContentToolCallDescription';
 import { ListWarehouseTablesToolCallDescription } from './ListWarehouseTablesToolCallDescription';
@@ -112,6 +116,21 @@ export const ToolCallDescription: FC<{
             return (
                 <DiscoverFieldsToolCallDescription
                     userQuery={discoverFieldsArgs.userQuery}
+                />
+            );
+        case 'grepFields':
+            const grepFieldsArgs = toolCall.toolArgs as ToolGrepFieldsArgs;
+            return (
+                <GrepFieldsToolCallDescription
+                    patterns={grepFieldsArgs.patterns ?? []}
+                    exploreName={grepFieldsArgs.exploreName}
+                />
+            );
+        case 'getMetadata':
+            const getMetadataArgs = toolCall.toolArgs as ToolGetMetadataArgs;
+            return (
+                <GetMetadataToolCallDescription
+                    requests={getMetadataArgs.requests ?? []}
                 />
             );
         case 'searchFieldValues':

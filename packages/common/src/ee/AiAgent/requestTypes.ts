@@ -13,6 +13,12 @@ import {
     type AiAgentRootCause,
 } from './aiAgentReviewClassifierTypes';
 
+export type AiAgentModelConfig = {
+    modelName: string;
+    modelProvider: string;
+    reasoning?: boolean;
+};
+
 /**
  * Runtime state captured at pin time for a chart context. When a user pins a
  * chart from a dashboard view, these are the dashboard-level overrides that
@@ -37,10 +43,51 @@ export type AiPromptTokenUsage = {
     totalTokens: number;
 };
 
+/**
+ * Every origin an ai_thread can be created from. Canonical source for the
+ * DB column type and the admin/list filters — add new origins here.
+ */
+export const AI_THREAD_CREATED_FROM = [
+    'slack',
+    'web_app',
+    'evals',
+    'scheduler',
+] as const;
+export type AiThreadCreatedFrom = (typeof AI_THREAD_CREATED_FROM)[number];
+
+// Subsets use indexed access over const arrays (not Exclude<>, which tsoa
+// can't resolve at API boundaries); `satisfies` keeps each subset inside the
+// canonical union.
+
+/** Origins for threads created through the web app path — everything but Slack. */
+export const AI_WEB_APP_THREAD_CREATED_FROM = [
+    'web_app',
+    'evals',
+    'scheduler',
+] as const satisfies readonly AiThreadCreatedFrom[];
+export type AiWebAppThreadCreatedFrom =
+    (typeof AI_WEB_APP_THREAD_CREATED_FROM)[number];
+
+/** Origins handled through the Slack path. */
+export const AI_SLACK_THREAD_CREATED_FROM = [
+    'slack',
+    'web_app',
+] as const satisfies readonly AiThreadCreatedFrom[];
+export type AiSlackThreadCreatedFrom =
+    (typeof AI_SLACK_THREAD_CREATED_FROM)[number];
+
+/** Origins a thread can be cloned into — Slack and scheduler threads are never clone targets. */
+export const AI_CLONED_THREAD_CREATED_FROM = [
+    'web_app',
+    'evals',
+] as const satisfies readonly AiThreadCreatedFrom[];
+export type AiClonedThreadCreatedFrom =
+    (typeof AI_CLONED_THREAD_CREATED_FROM)[number];
+
 export type CreateSlackThread = {
     organizationUuid: string;
     projectUuid: string;
-    createdFrom: 'slack' | 'web_app';
+    createdFrom: AiSlackThreadCreatedFrom;
     slackUserId: string;
     slackChannelId: string;
     slackThreadTs: string;
@@ -51,7 +98,7 @@ export type CreateWebAppThread = {
     organizationUuid: string;
     projectUuid: string;
     userUuid: string;
-    createdFrom: 'web_app' | 'evals';
+    createdFrom: AiWebAppThreadCreatedFrom;
     agentUuid: string | null;
     embedSpaceUuid?: string | null;
 };
@@ -68,11 +115,7 @@ export type AiPrompt = {
     response: string | null;
     errorMessage: string | null;
     humanScore: number | null;
-    modelConfig: {
-        modelName: string;
-        modelProvider: string;
-        reasoning?: boolean;
-    } | null;
+    modelConfig: AiAgentModelConfig | null;
 };
 
 export type SlackPrompt = AiPrompt & {
@@ -94,6 +137,7 @@ export type CreateSlackPrompt = {
     threadUuid: string;
     createdByUserUuid: string;
     prompt: string;
+    modelConfig?: AiAgentModelConfig;
     slackUserId: string;
     slackChannelId: string;
     promptSlackTs: string;
@@ -229,11 +273,7 @@ export type CreateWebAppPrompt = {
     createdByUserUuid: string;
     prompt: string;
     context?: AiPromptContextInput;
-    modelConfig?: {
-        modelName: string;
-        modelProvider: string;
-        reasoning?: boolean;
-    };
+    modelConfig?: AiAgentModelConfig;
     /** Inject as a hidden turn (agent responds, UI hides the user bubble). */
     hidden?: boolean;
 };
@@ -328,5 +368,5 @@ export type CloneThread = {
     sourceThreadUuid: string;
     sourcePromptUuid: string;
     targetUserUuid: string;
-    createdFrom?: 'web_app' | 'evals';
+    createdFrom?: AiClonedThreadCreatedFrom;
 };

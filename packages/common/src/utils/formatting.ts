@@ -10,6 +10,7 @@ import {
 } from 'numfmt';
 import { LightdashParameters } from '../compiler/parameters';
 import {
+    Compact,
     CompactConfigMap,
     CustomFormatType,
     DimensionType,
@@ -515,6 +516,12 @@ export function getCustomFormatFromLegacy({
                 compact,
                 round,
             };
+        case Format.SI:
+            return {
+                type: CustomFormatType.NUMBER,
+                compact: Compact.AUTO,
+                round,
+            };
         case Format.PERCENT:
             return {
                 type: CustomFormatType.PERCENT,
@@ -584,6 +591,22 @@ export function getEffectiveSeparator(
     return undefined;
 }
 
+// The numfmt locale string used to render an ECMA-376 format expression for an
+// item, derived from its effective separator. Exported so render paths that call
+// formatValueWithExpression directly (e.g. chart series formatters) localise
+// expressions the same way formatItemValue does. Returns undefined for the
+// default/US separator so output stays byte-identical.
+export function getFormatExpressionLocale(
+    item:
+        | Field
+        | AdditionalMetric
+        | TableCalculation
+        | CustomDimension
+        | undefined,
+): string | undefined {
+    return separatorToNumfmtLocale(getEffectiveSeparator(item));
+}
+
 export function getCustomFormat(
     item:
         | Field
@@ -634,6 +657,30 @@ function applyCompact(
 } {
     if (format?.compact === undefined)
         return { compactValue: Number(value), compactSuffix: '' };
+
+    if (format.compact === Compact.AUTO) {
+        const numberValue = Number(value);
+        const compactConfig = [
+            Compact.TRILLIONS,
+            Compact.BILLIONS,
+            Compact.MILLIONS,
+            Compact.THOUSANDS,
+        ]
+            .map((compact) => CompactConfigMap[compact])
+            .find(
+                ({ orderOfMagnitude }) =>
+                    Math.abs(numberValue) >= 10 ** orderOfMagnitude,
+            );
+
+        if (compactConfig) {
+            return {
+                compactValue: compactConfig.convertFn(numberValue),
+                compactSuffix: compactConfig.suffix,
+            };
+        }
+
+        return { compactValue: numberValue, compactSuffix: '' };
+    }
 
     const compactConfig = findCompactConfig(format.compact);
 
@@ -973,6 +1020,10 @@ const customFormatConversionFnMap: Record<
     },
     compact: (formatExpression, format) => {
         if (format.compact) {
+            if (format.compact === Compact.AUTO) {
+                return formatExpression;
+            }
+
             const compactConfig = findCompactConfig(format.compact);
             if (compactConfig) {
                 // Check if this is a binary (IEC) byte unit, like KiB, MiB, etc.
@@ -999,9 +1050,18 @@ const customFormatConversionFnMap: Record<
     },
 };
 
+const hasDynamicCompact = (format: CustomFormat) =>
+    format.compact === Compact.AUTO &&
+    (format.type === CustomFormatType.NUMBER ||
+        format.type === CustomFormatType.CURRENCY);
+
 export function convertCustomFormatToFormatExpression(
     format: CustomFormat,
 ): string | null {
+    if (hasDynamicCompact(format)) {
+        return null;
+    }
+
     // ECMA-376 format expression
     let defaultFormatExpression: string | null = null;
     let conversions: Array<string> = [];
@@ -1065,6 +1125,39 @@ export function convertCustomFormatToFormatExpression(
     );
 }
 
+/**
+ * Converts a UI format override (a metric/dimension `formatOptions`) into the
+ * field-level format props to spread onto a query result field.
+ *
+ * Formats that have an ECMA-376 representation are encoded as a `format`
+ * expression so every render and export path shares a single source of truth.
+ * When there is no expression form — notably dynamic compact (`Compact.AUTO`),
+ * where `convertCustomFormatToFormatExpression` returns null — the structured
+ * `formatOptions` is preserved and any legacy `format` expression cleared,
+ * letting the render path apply it via the structured `applyCompact` path.
+ */
+export function getFieldFormatOverrideProps(formatOptions: CustomFormat): {
+    format: string | undefined;
+    formatOptions?: CustomFormat;
+    separator: NumberSeparator | undefined;
+} {
+    const formatExpression =
+        convertCustomFormatToFormatExpression(formatOptions);
+    if (formatExpression === null) {
+        return {
+            format: undefined,
+            formatOptions,
+            separator: formatOptions.separator,
+        };
+    }
+    return {
+        // The format expression can't encode the separator, so carry it
+        // separately for the render paths (getEffectiveSeparator reads it).
+        format: formatExpression,
+        separator: formatOptions.separator,
+    };
+}
+
 export function getFormatExpression(
     item: Item | AdditionalMetric,
 ): string | undefined {
@@ -1117,9 +1210,7 @@ export function formatItemValue(
         if (hasValidFormatExpression(item)) {
             // A field-level separator localises the ECMA-376 expression, which
             // numfmt otherwise renders with US separators regardless of locale.
-            const separatorLocale = separatorToNumfmtLocale(
-                getEffectiveSeparator(item),
-            );
+            const separatorLocale = getFormatExpressionLocale(item);
 
             // Check if format uses parameter placeholders
             const hasParameterPlaceholders =

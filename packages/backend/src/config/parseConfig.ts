@@ -37,6 +37,7 @@ import { VERSION } from '../version';
 import {
     aiCopilotConfigSchema,
     AiCopilotConfigSchemaType,
+    DEFAULT_AI_TOOL_DESCRIPTION_MAX_CHARS,
     DEFAULT_ANTHROPIC_MODEL_NAME,
     DEFAULT_BEDROCK_MODEL_NAME,
     DEFAULT_DEFAULT_AI_PROVIDER,
@@ -466,13 +467,31 @@ export const getMultiProjectSetupConfig = ():
 const userAttributeSetupEntrySchema = z.object({
     name: z.string().min(1),
     description: z.string().optional(),
-    attributeDefault: z.string().nullable().default(null),
+    attributeDefault: z
+        .union([z.string(), z.array(z.string()), z.null()])
+        .default(null)
+        .transform((v) => {
+            if (v === null) return null;
+            return Array.isArray(v) ? v : [v];
+        }),
     groups: z
         .array(
-            z.object({
-                group: z.string().min(1),
-                value: z.string(),
-            }),
+            z
+                .object({
+                    group: z.string().min(1),
+                    // `value` (single string) is deprecated in favour of `values`
+                    value: z.string().optional(),
+                    values: z.array(z.string()).optional(),
+                })
+                .transform((g) => ({
+                    group: g.group,
+                    values:
+                        g.values ?? (g.value === undefined ? [] : [g.value]),
+                }))
+                .refine((g) => g.values.length > 0, {
+                    message:
+                        'Each group mapping must define a `value` or non-empty `values`',
+                }),
         )
         .default([]),
 });
@@ -921,6 +940,37 @@ export const parsePreAggregateResultsS3Config = ():
     };
 };
 
+export const parseUsageEventsS3Config = (): Omit<
+    S3Config,
+    'expirationTime'
+> | null => {
+    const baseS3Config = parseBaseS3Config();
+
+    if (!baseS3Config) {
+        return null;
+    }
+
+    const {
+        endpoint,
+        forcePathStyle,
+        useCredentialsFrom,
+        bucket: baseBucket,
+        region: baseRegion,
+        accessKey: baseAccessKey,
+        secretKey: baseSecretKey,
+    } = baseS3Config;
+
+    return {
+        endpoint,
+        forcePathStyle,
+        bucket: process.env.USAGE_EVENTS_S3_BUCKET || baseBucket,
+        region: process.env.USAGE_EVENTS_S3_REGION || baseRegion,
+        accessKey: process.env.USAGE_EVENTS_S3_ACCESS_KEY || baseAccessKey,
+        secretKey: process.env.USAGE_EVENTS_S3_SECRET_KEY || baseSecretKey,
+        useCredentialsFrom,
+    };
+};
+
 const validateTaskList = (tasks: string[], envVarName: string) => {
     const validTasks: SchedulerTaskName[] = [];
     const invalidTasks: string[] = [];
@@ -1169,6 +1219,11 @@ export const getAiConfig = () => ({
     mcpConnectionTimeoutMs:
         getIntegerFromEnvironmentVariable('AI_COPILOT_MCP_TIMEOUT_MS') ||
         20_000,
+    mcpAllowPrivateAddresses:
+        process.env.AI_AGENT_MCP_ALLOW_PRIVATE_ADDRESSES === 'true',
+    toolDescriptionMaxChars:
+        getIntegerFromEnvironmentVariable('AI_TOOL_DESCRIPTION_MAX_CHARS') ??
+        DEFAULT_AI_TOOL_DESCRIPTION_MAX_CHARS,
 });
 
 export type LoggingConfig = {
@@ -1481,6 +1536,13 @@ export type LightdashConfig = {
         duckdbQueryMemoryLimit: string | null;
         s3?: Omit<S3Config, 'expirationTime'>;
     };
+    usageEvents: {
+        enabled: boolean;
+        flushIntervalMs: number;
+        flushBatchSize: number;
+        bufferMaxSize: number;
+        s3: Omit<S3Config, 'expirationTime'> | null;
+    };
     appRuntime: AppRuntimeConfig;
     enabledFeatureFlags: Set<string>;
     disabledFeatureFlags: Set<string>;
@@ -1569,6 +1631,104 @@ export type AppRuntimeConfig = {
      */
     e2bAiWritebackTemplateName: string;
     e2bAiWritebackTemplateTag: string;
+    /**
+     * Which sandbox backend the data-app pipeline launches sandboxes on.
+     * `e2b` keeps today's hosted path; `docker` runs a plain local container
+     * (dev / self-host testbed — see docs/sandbox-runtime.md);
+     * `lambda-microvm` runs AWS Lambda MicroVMs (native suspend/resume);
+     * `azure-sandboxes` runs Azure Container Apps Sandboxes (native
+     * suspend/resume — the Azure analog of E2B / Lambda MicroVMs).
+     * Later: kubernetes | ecs | microsandbox.
+     */
+    sandboxProvider: 'e2b' | 'docker' | 'lambda-microvm' | 'azure-sandboxes';
+    /**
+     * OCI image the `docker` sandbox provider launches data-app containers
+     * from. Built locally from sandboxes/data-apps (e.g. `lightdash-sandbox:local`).
+     */
+    sandboxDockerImage: string;
+    /**
+     * OCI image the `docker` sandbox provider launches AI writeback containers
+     * from. Decoupled from the data-app image (different toolchain: dbt venvs +
+     * Lightdash CLI + Claude Code) — the Docker analog of the separate E2B
+     * writeback template. Built locally from sandboxes/ai-writeback (e.g.
+     * `lightdash-ai-writeback:local`).
+     */
+    sandboxAiWritebackDockerImage: string;
+    /**
+     * How long a *running* sandbox can be idle before the backend suspends it.
+     * Feeds the native-pause provider's own idle policy (Lambda MicroVMs'
+     * AWS-side auto-suspend); ignored by E2B (which has its own timeout) and
+     * Docker. Defaults to 30 minutes.
+     */
+    sandboxIdleTimeoutMs: number;
+    /**
+     * How long a *suspended* sandbox snapshot is kept (resumable) before it is
+     * reclaimed. Feeds the native-pause provider's idle policy (Lambda MicroVMs'
+     * AWS-side auto-terminate). Defaults to 7 days.
+     */
+    sandboxSnapshotRetentionMs: number;
+    /**
+     * Static config the `lambda-microvm` sandbox provider needs (region, IAM
+     * execution role, network connectors, idle policy). Idle/suspended durations
+     * are derived from `sandboxIdleTimeoutMs`/`sandboxSnapshotRetentionMs` so the
+     * AWS-side `idlePolicy` (auto-suspend / auto-terminate) governs idle expiry.
+     * Always populated (with defaults); only read when the provider is
+     * `lambda-microvm`.
+     */
+    lambdaMicroVm: {
+        region: string;
+        executionRoleArn: string | null;
+        ingressConnectorArn: string;
+        egressConnectorArn: string;
+        maxIdleDurationSeconds: number;
+        suspendedDurationSeconds: number;
+    };
+    /**
+     * Lambda MicroVM image ARN the data-app pipeline runs from (the
+     * `lambda-microvm` analog of the Docker data-app image).
+     * Built out-of-band by the image pipeline (see sandboxes/). Required only
+     * when `sandboxProvider === 'lambda-microvm'`.
+     */
+    lambdaMicroVmDataAppImageArn: string | null;
+    /**
+     * Lambda MicroVM image ARN the AI writeback pipeline runs from (decoupled
+     * from the data-app image, mirroring the split Docker images).
+     * Required only when `sandboxProvider === 'lambda-microvm'`.
+     */
+    lambdaMicroVmAiWritebackImageArn: string | null;
+    /**
+     * Shared config for the `azure-sandboxes` provider (subscription / resource
+     * group / region + ADC data-plane API version, Entra token scope, and sandbox
+     * resource tier). The per-feature sandbox group + disk image are separate
+     * fields below. Always populated (with defaults); `subscriptionId`/`resourceGroup`
+     * are only required when the provider is `azure-sandboxes`.
+     */
+    azureSandboxes: {
+        subscriptionId: string | null;
+        resourceGroup: string | null;
+        region: string;
+        apiVersion: string;
+        tokenScope: string;
+        resourceTier: string;
+    };
+    /**
+     * Sandbox group the data-app pipeline runs sandboxes in (one group + disk
+     * image per feature, mirroring the split Docker images / Lambda ARNs).
+     * Required only when `sandboxProvider === 'azure-sandboxes'`.
+     */
+    azureSandboxesDataAppGroup: string | null;
+    /** Disk image **id** (UUID assigned at registration) the data-app pipeline
+     * launches from — passed as `sourcesRef.diskImage.id`. Required only when
+     * `azure-sandboxes`. */
+    azureSandboxesDataAppDiskImage: string | null;
+    /**
+     * Sandbox group the AI writeback pipeline runs sandboxes in (decoupled from
+     * the data-app group). Required only when `sandboxProvider === 'azure-sandboxes'`.
+     */
+    azureSandboxesAiWritebackGroup: string | null;
+    /** Disk image the AI writeback pipeline launches (decoupled from the data-app
+     * image). Required only when `azure-sandboxes`. */
+    azureSandboxesAiWritebackDiskImage: string | null;
 };
 
 export type IntercomConfig = {
@@ -1733,6 +1893,15 @@ export type SmtpConfig = {
 
 const DEFAULT_JOB_TIMEOUT = 1000 * 60 * 10; // 10 minutes
 
+const parseSandboxProvider = (
+    value: string | undefined,
+): AppRuntimeConfig['sandboxProvider'] => {
+    if (value === 'docker') return 'docker';
+    if (value === 'lambda-microvm') return 'lambda-microvm';
+    if (value === 'azure-sandboxes') return 'azure-sandboxes';
+    return 'e2b';
+};
+
 const parseAppRuntimeConfig = (siteUrl: string): AppRuntimeConfig => {
     const enabled = process.env.APPS_RUNTIME_ENABLED === 'true';
     const appsBucket = process.env.APPS_S3_BUCKET;
@@ -1770,6 +1939,16 @@ const parseAppRuntimeConfig = (siteUrl: string): AppRuntimeConfig => {
         };
     }
 
+    const sandboxIdleTimeoutMs = process.env.SANDBOX_IDLE_TIMEOUT_MS
+        ? parseInt(process.env.SANDBOX_IDLE_TIMEOUT_MS, 10)
+        : 30 * 60 * 1000;
+    const sandboxSnapshotRetentionMs = process.env.SANDBOX_SNAPSHOT_RETENTION_MS
+        ? parseInt(process.env.SANDBOX_SNAPSHOT_RETENTION_MS, 10)
+        : 7 * 24 * 60 * 60 * 1000;
+    // Lambda MicroVMs run in eu-west-1 (Ireland) — the EU launch region.
+    const lambdaMicroVmRegion =
+        process.env.LAMBDA_MICROVM_REGION || 'eu-west-1';
+
     return {
         enabled,
         lightdashOrigin: process.env.APP_RUNTIME_LIGHTDASH_ORIGIN || siteUrl,
@@ -1793,6 +1972,56 @@ const parseAppRuntimeConfig = (siteUrl: string): AppRuntimeConfig => {
             'lightdash-ai-writeback',
         e2bAiWritebackTemplateTag:
             process.env.E2B_AI_WRITEBACK_TEMPLATE_TAG ?? (VERSION as string),
+        sandboxProvider: parseSandboxProvider(process.env.SANDBOX_PROVIDER),
+        sandboxDockerImage:
+            process.env.SANDBOX_DOCKER_IMAGE || 'lightdash-sandbox:local',
+        sandboxAiWritebackDockerImage:
+            process.env.SANDBOX_AI_WRITEBACK_DOCKER_IMAGE ||
+            'lightdash-ai-writeback:local',
+        sandboxIdleTimeoutMs,
+        sandboxSnapshotRetentionMs,
+        lambdaMicroVm: {
+            region: lambdaMicroVmRegion,
+            executionRoleArn:
+                process.env.LAMBDA_MICROVM_EXECUTION_ROLE_ARN || null,
+            // Managed connectors are fixed, region-scoped ARNs (no list op). The
+            // open `INTERNET_EGRESS` connector is the MVP egress; a custom VPC
+            // connector (egress allowlist) is a later hardening.
+            ingressConnectorArn:
+                process.env.LAMBDA_MICROVM_INGRESS_CONNECTOR_ARN ||
+                `arn:aws:lambda:${lambdaMicroVmRegion}:aws:network-connector:aws-network-connector:ALL_INGRESS`,
+            egressConnectorArn:
+                process.env.LAMBDA_MICROVM_EGRESS_CONNECTOR_ARN ||
+                `arn:aws:lambda:${lambdaMicroVmRegion}:aws:network-connector:aws-network-connector:INTERNET_EGRESS`,
+            maxIdleDurationSeconds: Math.floor(sandboxIdleTimeoutMs / 1000),
+            suspendedDurationSeconds: Math.floor(
+                sandboxSnapshotRetentionMs / 1000,
+            ),
+        },
+        lambdaMicroVmDataAppImageArn:
+            process.env.LAMBDA_MICROVM_DATA_APP_IMAGE_ARN || null,
+        lambdaMicroVmAiWritebackImageArn:
+            process.env.LAMBDA_MICROVM_AI_WRITEBACK_IMAGE_ARN || null,
+        azureSandboxes: {
+            subscriptionId: process.env.AZURE_SANDBOXES_SUBSCRIPTION_ID || null,
+            resourceGroup: process.env.AZURE_SANDBOXES_RESOURCE_GROUP || null,
+            region: process.env.AZURE_SANDBOXES_REGION || 'eastus2',
+            apiVersion:
+                process.env.AZURE_SANDBOXES_API_VERSION || '2026-02-01-preview',
+            // AAD resource for the Sandboxes ADC data plane.
+            tokenScope:
+                process.env.AZURE_SANDBOXES_TOKEN_SCOPE ||
+                'https://management.azuredevcompute.io/.default',
+            resourceTier: process.env.AZURE_SANDBOXES_RESOURCE_TIER || 'M',
+        },
+        azureSandboxesDataAppGroup:
+            process.env.AZURE_SANDBOXES_DATA_APP_GROUP || null,
+        azureSandboxesDataAppDiskImage:
+            process.env.AZURE_SANDBOXES_DATA_APP_DISK_IMAGE || null,
+        azureSandboxesAiWritebackGroup:
+            process.env.AZURE_SANDBOXES_AI_WRITEBACK_GROUP || null,
+        azureSandboxesAiWritebackDiskImage:
+            process.env.AZURE_SANDBOXES_AI_WRITEBACK_DISK_IMAGE || null,
     };
 };
 
@@ -1912,6 +2141,9 @@ export const parseConfig = (): LightdashConfig => {
     const preAggregatesEnabled =
         licenseKey !== null && process.env.PRE_AGGREGATES_ENABLED === 'true';
     const preAggregatesS3 = parsePreAggregateResultsS3Config();
+    const usageEventsEnabled =
+        licenseKey !== null && process.env.USAGE_EVENTS_ENABLED === 'true';
+    const usageEventsS3 = parseUsageEventsS3Config();
     const natsWorkerEnabled = process.env.NATS_ENABLED === 'true';
     const natsWorkerUrl = process.env.NATS_URL;
     const natsWorkerConcurrency =
@@ -1921,6 +2153,9 @@ export const parseConfig = (): LightdashConfig => {
 
     if (preAggregatesEnabled && !preAggregatesS3) {
         throw new ParseError('Pre-aggregates require S3 configuration', {});
+    }
+    if (usageEventsEnabled && !usageEventsS3) {
+        throw new ParseError('Usage events require S3 configuration', {});
     }
     if (natsWorkerEnabled && !natsWorkerUrl) {
         throw new ParseError('NATS_URL is required when NATS_ENABLED=true', {});
@@ -2563,6 +2798,22 @@ export const parseConfig = (): LightdashConfig => {
             duckdbQueryMemoryLimit:
                 process.env.PRE_AGGREGATE_DUCKDB_QUERY_MEMORY_LIMIT ?? null,
             s3: preAggregatesS3,
+        },
+        usageEvents: {
+            enabled: usageEventsEnabled,
+            flushIntervalMs:
+                getIntegerFromEnvironmentVariable(
+                    'USAGE_EVENTS_FLUSH_INTERVAL_MS',
+                ) ?? 60000,
+            flushBatchSize:
+                getIntegerFromEnvironmentVariable(
+                    'USAGE_EVENTS_FLUSH_BATCH_SIZE',
+                ) ?? 1000,
+            bufferMaxSize:
+                getIntegerFromEnvironmentVariable(
+                    'USAGE_EVENTS_BUFFER_MAX_SIZE',
+                ) ?? 10000,
+            s3: usageEventsS3,
         },
         appRuntime: parseAppRuntimeConfig(siteUrl),
         enabledFeatureFlags: new Set([

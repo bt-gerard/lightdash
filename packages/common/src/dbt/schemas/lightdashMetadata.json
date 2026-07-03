@@ -34,9 +34,33 @@
                 ]
             }
         },
+        "FilterAutocomplete": {
+            "type": "object",
+            "properties": {
+                "values": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "value": {
+                                "type": "string"
+                            },
+                            "label": {
+                                "type": "string"
+                            }
+                        },
+                        "required": ["value"]
+                    }
+                },
+                "fetch_from_warehouse": {
+                    "type": "boolean"
+                }
+            }
+        },
         "Compact": {
             "type": "string",
             "enum": [
+                "auto",
                 "thousands",
                 "millions",
                 "billions",
@@ -221,6 +245,9 @@
                 },
                 "any_attributes": {
                     "$ref": "#/definitions/AnyAttributes"
+                },
+                "filter_autocomplete": {
+                    "$ref": "#/definitions/FilterAutocomplete"
                 }
             }
         },
@@ -279,6 +306,9 @@
                 },
                 "any_attributes": {
                     "$ref": "#/definitions/AnyAttributes"
+                },
+                "filter_autocomplete": {
+                    "$ref": "#/definitions/FilterAutocomplete"
                 }
             }
         },

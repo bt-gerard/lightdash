@@ -2,13 +2,14 @@ import dns from 'dns/promises';
 import fetch, { FetchError, Response } from 'node-fetch';
 import { secureFetch, SecureFetchError } from './secureFetch';
 
-jest.mock('dns/promises', () => ({
+vi.mock('dns/promises', () => ({
     __esModule: true,
-    default: { lookup: jest.fn() },
+    default: { lookup: vi.fn() },
 }));
-jest.mock('node-fetch', () => {
-    const actual = jest.requireActual('node-fetch');
-    const mockFetch = jest.fn();
+vi.mock('node-fetch', async () => {
+    const actual =
+        await vi.importActual<typeof import('node-fetch')>('node-fetch');
+    const mockFetch = vi.fn();
     return {
         __esModule: true,
         default: mockFetch,
@@ -17,8 +18,8 @@ jest.mock('node-fetch', () => {
     };
 });
 
-const mockedLookup = dns.lookup as unknown as jest.Mock;
-const mockedFetch = fetch as unknown as jest.Mock;
+const mockedLookup = dns.lookup as unknown as import('vitest').Mock;
+const mockedFetch = fetch as unknown as import('vitest').Mock;
 
 const BASE_OPTIONS = {
     method: 'GET' as const,
@@ -28,7 +29,7 @@ const BASE_OPTIONS = {
 };
 
 beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     mockedLookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
 });
 
@@ -308,7 +309,7 @@ describe('secureFetch timeout', () => {
     });
 
     it('aborts the request after the configured timeout', async () => {
-        jest.useFakeTimers();
+        vi.useFakeTimers();
         let capturedSignal: AbortSignal | undefined;
         // Use a real promise so dns.lookup mock settles without fake timers.
         let resolveFetch!: (value?: unknown) => void;
@@ -331,17 +332,17 @@ describe('secureFetch timeout', () => {
         }
 
         expect(capturedSignal?.aborted).toBe(false);
-        jest.advanceTimersByTime(500);
+        vi.advanceTimersByTime(500);
         expect(capturedSignal?.aborted).toBe(true);
 
         // Let the pending promise settle.
         resolveFetch();
         await pending.catch(() => undefined);
-        jest.useRealTimers();
+        vi.useRealTimers();
     });
 
     it('hard-caps the timeout at 30000ms', async () => {
-        jest.useFakeTimers();
+        vi.useFakeTimers();
         let capturedSignal: AbortSignal | undefined;
         let resolveFetch!: (value?: unknown) => void;
         mockedFetch.mockImplementation((_url, opts) => {
@@ -361,14 +362,14 @@ describe('secureFetch timeout', () => {
         }
 
         expect(capturedSignal?.aborted).toBe(false);
-        jest.advanceTimersByTime(29999);
+        vi.advanceTimersByTime(29999);
         expect(capturedSignal?.aborted).toBe(false);
-        jest.advanceTimersByTime(1);
+        vi.advanceTimersByTime(1);
         expect(capturedSignal?.aborted).toBe(true);
 
         resolveFetch();
         await pending.catch(() => undefined);
-        jest.useRealTimers();
+        vi.useRealTimers();
     });
 });
 
@@ -393,7 +394,7 @@ describe('secureFetch size and content-type', () => {
             status: 200,
             ok: true,
             headers: { get: () => 'application/json' },
-            text: jest
+            text: vi
                 .fn()
                 .mockRejectedValue(
                     new FetchError('content size over limit', 'max-size'),
@@ -433,6 +434,37 @@ describe('secureFetch size and content-type', () => {
         expect(result.bodyText).toBe('{"ok":true}');
     });
 
+    it('accepts structured-syntax JSON content-types when application/json is allowed', async () => {
+        mockedFetch.mockResolvedValue(
+            jsonResponse('{"type":"FeatureCollection","features":[]}', {
+                contentType: 'application/geo+json; charset=utf-8',
+            }),
+        );
+        const result = await secureFetch('https://example.com/map.geojson', {
+            ...BASE_OPTIONS,
+            allowedContentTypes: ['application/json'],
+        });
+        expect(result.contentType).toBe('application/geo+json');
+        expect(result.bodyText).toBe(
+            '{"type":"FeatureCollection","features":[]}',
+        );
+    });
+
+    it('does not treat application/json as a wildcard for non-JSON structured content-types', async () => {
+        mockedFetch.mockResolvedValue(
+            jsonResponse('<feed></feed>', {
+                contentType: 'application/atom+xml',
+            }),
+        );
+        await expectReason(
+            secureFetch('https://example.com/feed', {
+                ...BASE_OPTIONS,
+                allowedContentTypes: ['application/json'],
+            }),
+            'disallowed_content_type',
+        );
+    });
+
     it('skips content-type check when allowedContentTypes is empty', async () => {
         // Empty allowlist = explicit opt-out of the content-type check. Any
         // content-type (or none at all) must be accepted and the body returned.
@@ -459,7 +491,7 @@ describe('secureFetch size and content-type', () => {
             headers: {
                 get: (name: string) => (name === 'content-type' ? null : null),
             },
-            text: jest.fn().mockResolvedValue('{}'),
+            text: vi.fn().mockResolvedValue('{}'),
         };
         mockedFetch.mockResolvedValue(noContentTypeResponse);
         const result = await secureFetch('https://example.com/file', {

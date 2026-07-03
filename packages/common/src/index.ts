@@ -43,6 +43,7 @@ import type { PivotValuesColumn } from './visualizations/types';
 
 dayjs.extend(utc);
 export * from './authorization/buildAccountHelpers';
+export { collapseAbilityRules } from './authorization/collapseAbilityRules';
 export {
     defineUserAbility,
     getUserAbilityBuilder,
@@ -64,11 +65,13 @@ export * from './compiler/filtersCompiler';
 export * from './compiler/lightdashModelConverter';
 export * from './compiler/parameters';
 export * from './compiler/translator';
+export * from './parameters/reservedParameters';
 export * from './constants/screenshot';
 export * from './constants/sessionStorageKeys';
 export * from './constants/spaces';
 export * from './constants/sqlRunner';
 export { default as DbtSchemaEditor } from './dbt/DbtSchemaEditor/DbtSchemaEditor';
+export * from './dbt/manifest';
 export * from './dbt/validation';
 export * from './ee';
 export * from './preAggregates';
@@ -212,6 +215,7 @@ export type {
     CreateDucklakeDataPathS3,
     CreatePostgresCredentials,
     CreatePostgresLikeCredentials,
+    CreateProjectDbtSource,
     CreateRedshiftCredentials,
     CreateSnowflakeCredentials,
     CreateTrinoCredentials,
@@ -246,6 +250,14 @@ export type {
     PostgresCredentials,
     PreviewContentMapping,
     Project,
+    ApiCreateProjectDbtSource,
+    ApiProjectDbtSourceResponse,
+    ApiProjectDbtSourcesResponse,
+    ApiProjectDbtSourceWithConnectionResponse,
+    ApiUpdateProjectDbtSource,
+    ProjectDbtSource,
+    ProjectDbtSourceSummary,
+    ProjectDbtSourceWithConnection,
     ProjectSummary,
     RedshiftCredentials,
     SensitiveCredentialsFieldNames,
@@ -253,6 +265,7 @@ export type {
     SshTunnelConfiguration,
     SslConfiguration,
     TrinoCredentials,
+    UpdateProjectDbtSource,
     UpdateQueryTimezoneSettings,
     UpdateSchedulerSettings,
     WarehouseCredentials,
@@ -283,6 +296,7 @@ export * from './types/tags';
 export * from './types/timeFrames';
 export * from './types/timezone';
 export * from './types/user';
+export * from './types/userAvatars';
 export * from './types/userAttributes';
 export * from './types/userWarehouseCredentials';
 export * from './types/validation';

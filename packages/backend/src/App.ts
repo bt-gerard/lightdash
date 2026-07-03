@@ -28,6 +28,8 @@ import path from 'path';
 import qs from 'qs';
 import reDoc from 'redoc-express';
 import { URL } from 'url';
+import { BufferedEventStreamWriter } from './analytics/eventStream/BufferedEventStreamWriter';
+import { createEventStreamWriter } from './analytics/eventStream/createEventStreamWriter';
 import { LightdashAnalytics } from './analytics/LightdashAnalytics';
 import {
     ClientProviderMap,
@@ -80,12 +82,15 @@ import {
     ServiceProviderMap,
     ServiceRepository,
 } from './services/ServiceRepository';
+import { initOtelTracing, shutdownOtelTracing } from './tracing/tracing';
 import { UtilProviderMap, UtilRepository } from './utils/UtilRepository';
 import { VERSION } from './version';
 
 // Express Request/User type augmentations live in src/@types/express.d.ts
 // so they're picked up as ambient declarations regardless of which file is
 // the compilation entry point (e.g. knex seed/migrate via ts-node).
+
+initOtelTracing();
 
 const schedulerWorkerFactory = (context: {
     lightdashConfig: LightdashConfig;
@@ -174,6 +179,8 @@ export default class App {
 
     private readonly prometheusMetrics: PrometheusMetrics;
 
+    private readonly eventStreamWriter: BufferedEventStreamWriter | null;
+
     private readonly customExpressMiddlewares: Array<(app: Express) => void>;
 
     private readonly analyticsEventEmitter: EventEmitter;
@@ -222,6 +229,10 @@ export default class App {
         });
         this.prometheusMetrics = new PrometheusMetrics(
             this.lightdashConfig.prometheus,
+        );
+        this.eventStreamWriter = createEventStreamWriter(
+            this.lightdashConfig,
+            this.prometheusMetrics,
         );
 
         this.serviceRepository = new ServiceRepository({
@@ -970,7 +981,12 @@ export default class App {
     }
 
     async stop() {
+        if (this.eventStreamWriter) {
+            await this.eventStreamWriter.close();
+            Logger.info('Flushed usage event stream writer');
+        }
         await this.prometheusMetrics.stop();
+        await shutdownOtelTracing();
         if (this.schedulerWorker && this.schedulerWorker.runner) {
             try {
                 await this.schedulerWorker.runner.stop();
@@ -995,5 +1011,9 @@ export default class App {
 
     getDatabase() {
         return this.database;
+    }
+
+    getEventStreamWriter() {
+        return this.eventStreamWriter;
     }
 }

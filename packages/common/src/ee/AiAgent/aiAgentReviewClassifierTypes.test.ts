@@ -4,6 +4,7 @@ import {
     getAiAgentConfigSnapshotHash,
     getAiAgentReviewItemFingerprint,
     getAiAgentReviewItemFingerprintScope,
+    shouldReopenReviewItem,
     type AiAgentConfigSnapshot,
     type AiAgentReviewItemFingerprintInput,
 } from './aiAgentReviewClassifierTypes';
@@ -14,6 +15,7 @@ const baseJudgeOutput = {
     confidence: 'high' as const,
     promotedToFinding: true,
     promotionReason: 'Found a semantic-layer correction.',
+    matchedExistingItemKey: null,
     primaryRootCause: 'semantic_layer' as const,
     secondaryRootCauses: [],
     subcategories: [],
@@ -105,6 +107,198 @@ describe('getAiAgentReviewItemFingerprint', () => {
             }),
         ).toThrow('projectUuid is required for semantic_layer fingerprints');
     });
+
+    it('collapses runtime_reliability findings in one thread regardless of targetRefs or subcategories (Mode A)', () => {
+        const firstTurn: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'runtime_reliability',
+            threadUuid: 'thread-1',
+            subcategories: ['query_execution_failure'],
+            targetRefs: [
+                {
+                    type: 'explore',
+                    modelName: 'customers',
+                    exploreName: 'customers',
+                },
+            ],
+        };
+        const laterTurn: AiAgentReviewItemFingerprintInput = {
+            ...firstTurn,
+            subcategories: ['sql_approval_timeout'],
+            targetRefs: [
+                {
+                    type: 'metric',
+                    modelName: 'payments',
+                    metricName: 'total_revenue',
+                },
+            ],
+        };
+
+        expect(getAiAgentReviewItemFingerprint(laterTurn)).toEqual(
+            getAiAgentReviewItemFingerprint(firstTurn),
+        );
+    });
+
+    it('collapses semantic_layer findings on the same object across different threads, ignoring ref casing (Mode B)', () => {
+        const threadA: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'semantic_layer',
+            threadUuid: 'thread-a',
+            subcategories: ['wrong_field_or_domain_term'],
+            fixTargets: ['semantic_yaml_patch'],
+            targetRefs: [
+                {
+                    type: 'dimension',
+                    modelName: 'fanouts_deals',
+                    dimensionName: 'region',
+                },
+            ],
+        };
+        const threadB: AiAgentReviewItemFingerprintInput = {
+            ...threadA,
+            threadUuid: 'thread-b',
+            subcategories: ['missing_default_filter'],
+            fixTargets: ['dbt_modeling_ticket'],
+            targetRefs: [
+                {
+                    type: 'dimension',
+                    modelName: 'Fanouts_Deals',
+                    dimensionName: 'Region',
+                },
+            ],
+        };
+
+        expect(getAiAgentReviewItemFingerprint(threadB)).toEqual(
+            getAiAgentReviewItemFingerprint(threadA),
+        );
+    });
+
+    it('collapses semantic_layer findings on the same field despite model-name and context-ref variance (Mode B)', () => {
+        const turnOne: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'semantic_layer',
+            threadUuid: 'thread-1',
+            targetRefs: [
+                {
+                    type: 'metric',
+                    modelName: 'orders',
+                    metricName: 'total_order_amount',
+                },
+                {
+                    type: 'metric',
+                    modelName: 'orders',
+                    metricName: 'total_completed_order_amount',
+                },
+                { type: 'explore', modelName: 'orders', exploreName: 'orders' },
+            ],
+        };
+        const turnTwo: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'semantic_layer',
+            threadUuid: 'thread-2',
+            targetRefs: [
+                {
+                    type: 'metric',
+                    modelName: 'country_orders',
+                    metricName: 'total_order_amount',
+                },
+                {
+                    type: 'metric',
+                    modelName: 'orders',
+                    metricName: 'total_completed_order_amount',
+                },
+            ],
+        };
+
+        expect(getAiAgentReviewItemFingerprint(turnTwo)).toEqual(
+            getAiAgentReviewItemFingerprint(turnOne),
+        );
+    });
+
+    it('treats qualified and unqualified field ids as the same object (Mode B)', () => {
+        const qualified: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'semantic_layer',
+            targetRefs: [
+                {
+                    type: 'metric',
+                    modelName: 'orders',
+                    metricName: 'orders_total_order_amount',
+                },
+            ],
+        };
+        const unqualified: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'semantic_layer',
+            targetRefs: [
+                {
+                    type: 'metric',
+                    modelName: 'orders',
+                    metricName: 'total_order_amount',
+                },
+            ],
+        };
+
+        expect(getAiAgentReviewItemFingerprint(qualified)).toEqual(
+            getAiAgentReviewItemFingerprint(unqualified),
+        );
+    });
+
+    it('keeps runtime_reliability incidents in different threads distinct (Mode A)', () => {
+        const incident: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'runtime_reliability',
+            threadUuid: 'thread-1',
+        };
+
+        expect(
+            getAiAgentReviewItemFingerprint({
+                ...incident,
+                threadUuid: 'thread-2',
+            }),
+        ).not.toEqual(getAiAgentReviewItemFingerprint(incident));
+    });
+
+    it('never collides a Mode A incident with a Mode B object', () => {
+        const incident: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'runtime_reliability',
+            threadUuid: 'thread-1',
+        };
+        const object: AiAgentReviewItemFingerprintInput = {
+            ...baseInput,
+            primaryRootCause: 'semantic_layer',
+            threadUuid: 'thread-1',
+        };
+
+        expect(getAiAgentReviewItemFingerprint(incident)).not.toEqual(
+            getAiAgentReviewItemFingerprint(object),
+        );
+    });
+});
+
+describe('shouldReopenReviewItem', () => {
+    it('reopens a resolved item when its finding recurs', () => {
+        expect(shouldReopenReviewItem('resolved', null)).toBe(true);
+    });
+
+    it('reopens a dismissed item unless it was dismissed as expected behavior', () => {
+        expect(shouldReopenReviewItem('dismissed', 'not_actionable')).toBe(
+            true,
+        );
+        expect(shouldReopenReviewItem('dismissed', 'low_confidence')).toBe(
+            true,
+        );
+        expect(shouldReopenReviewItem('dismissed', 'expected_behavior')).toBe(
+            false,
+        );
+    });
+
+    it('leaves non-terminal items untouched', () => {
+        expect(shouldReopenReviewItem('triage', null)).toBe(false);
+        expect(shouldReopenReviewItem('open', null)).toBe(false);
+        expect(shouldReopenReviewItem('in_progress', null)).toBe(false);
+    });
 });
 
 describe('aiAgentJudgeProjectContextEntrySchema', () => {
@@ -183,6 +377,89 @@ describe('aiAgentReviewClassifierJudgeOutputSchema', () => {
             }).success,
         ).toBe(true);
     });
+
+    it.each([
+        'normal_refinement',
+        'output_shape_correction',
+        'new_question',
+        'acceptance_or_continuation',
+    ] as const)('rejects a promoted finding with signal %s', (signal) => {
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse({
+                ...baseJudgeOutput,
+                signal,
+            }).success,
+        ).toBe(false);
+    });
+
+    it('accepts a non-failure signal when not promoted', () => {
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse({
+                ...baseJudgeOutput,
+                signal: 'acceptance_or_continuation',
+                promotedToFinding: false,
+                primaryRootCause: 'not_a_failure',
+            }).success,
+        ).toBe(true);
+    });
+
+    it('rejects a promoted finding whose recommendation is no_action', () => {
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse({
+                ...baseJudgeOutput,
+                recommendation: {
+                    actionType: 'no_action',
+                    title: 'Nothing to do',
+                    rationale: 'n/a',
+                    targetRefs: [],
+                },
+            }).success,
+        ).toBe(false);
+    });
+
+    it('accepts a no_action recommendation when not promoted', () => {
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse({
+                ...baseJudgeOutput,
+                promotedToFinding: false,
+                primaryRootCause: 'not_a_failure',
+                signal: 'new_question',
+                recommendation: {
+                    actionType: 'no_action',
+                    title: 'Nothing to do',
+                    rationale: 'n/a',
+                    targetRefs: [],
+                },
+            }).success,
+        ).toBe(true);
+    });
+
+    it('accepts a matchedExistingItemKey pointing at a candidate', () => {
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse({
+                ...baseJudgeOutput,
+                matchedExistingItemKey: 'item_3',
+            }).success,
+        ).toBe(true);
+    });
+
+    it('accepts a null matchedExistingItemKey', () => {
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse({
+                ...baseJudgeOutput,
+                matchedExistingItemKey: null,
+            }).success,
+        ).toBe(true);
+    });
+
+    it('rejects an output missing matchedExistingItemKey', () => {
+        const withoutKey: Record<string, unknown> = { ...baseJudgeOutput };
+        delete withoutKey.matchedExistingItemKey;
+        expect(
+            aiAgentReviewClassifierJudgeOutputSchema.safeParse(withoutKey)
+                .success,
+        ).toBe(false);
+    });
 });
 
 describe('getAiAgentConfigSnapshotHash', () => {
@@ -206,6 +483,12 @@ describe('getAiAgentConfigSnapshotHash', () => {
                     relevance: 'high',
                     warning: null,
                 },
+            },
+        ],
+        mcpServers: [
+            {
+                name: 'Linear',
+                enabledToolNames: ['list_issues', 'create_issue'],
             },
         ],
     };

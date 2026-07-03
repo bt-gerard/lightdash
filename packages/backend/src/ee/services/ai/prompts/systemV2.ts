@@ -8,6 +8,7 @@ import {
 import { SystemModelMessage } from 'ai';
 import moment from 'moment';
 import { AiAgentSkillReference } from '../skills/types';
+import { AiAgentRequestingUser } from '../types/aiAgent';
 import { xmlBuilder } from '../xmlBuilder';
 import { renderAvailableExplores } from './availableExplores';
 import { getAiWritebackSection } from './systemV2AiWriteback';
@@ -19,6 +20,7 @@ import {
     repoFsRootHint,
     repoFsSearchCaveat,
 } from './systemV2RepoFs';
+import { getRequestingUserSection } from './systemV2RequestingUser';
 import { getRunSqlSection } from './systemV2RunSql';
 import { SEARCH_SEMANTIC_LAYER_SECTION } from './systemV2SearchSemanticLayer';
 import { renderAvailableSkills } from './systemV2Skills';
@@ -31,6 +33,7 @@ export const getSystemPromptV2 = (args: {
     hasProjectContext?: boolean;
     instructions?: string;
     agentName?: string;
+    requestingUser?: AiAgentRequestingUser | null;
     date?: string;
     enableDataAccess?: boolean;
     enableSearchSemanticLayer?: boolean;
@@ -42,6 +45,9 @@ export const getSystemPromptV2 = (args: {
     // Whether the repo host supports server-side code search (GitHub yes,
     // GitLab no). Defaults true; when false the prompt steers off `search`.
     repoFsSupportsCodeSearch?: boolean;
+    // Experimental: steer field discovery to the grepFields tool instead of
+    // discoverFields (the ai-grep-fields flag).
+    enableGrepFields?: boolean;
     enableContentTools?: boolean;
     canRunSql?: boolean;
     warehouseType?: WarehouseTypes | null;
@@ -51,6 +57,7 @@ export const getSystemPromptV2 = (args: {
     const {
         instructions,
         agentName = 'Lightdash AI Analyst',
+        requestingUser = null,
         date = moment().utc().format('YYYY-MM-DD'),
         enableDataAccess = false,
         enableSearchSemanticLayer = false,
@@ -60,6 +67,7 @@ export const getSystemPromptV2 = (args: {
         enableRepoDiscovery = false,
         repoFsRoot = null,
         repoFsSupportsCodeSearch = true,
+        enableGrepFields = false,
         enableContentTools = false,
         canRunSql = false,
         warehouseType = null,
@@ -183,6 +191,10 @@ export const getSystemPromptV2 = (args: {
             '{{instructions}}',
             instructions ? `Special instructions: ${instructions}` : '',
         )
+        .replace(
+            '{{requesting_user_section}}',
+            getRequestingUserSection(requestingUser),
+        )
         .replace('{{date}}', date)
         .replace('{{available_explores}}', availableExploresContent)
         .replace('{{knowledge_documents}}', knowledgeDocumentsContent)
@@ -199,7 +211,27 @@ export const getSystemPromptV2 = (args: {
                   .join('\n')}`
             : '';
 
-    const finalContent = [content, mcpConnectionsSection, skillsSection]
+    // Experimental: when grepFields replaces discoverFields, override the
+    // discovery guidance so the agent greps the field catalog itself.
+    const grepFieldsSection = enableGrepFields
+        ? [
+              '## Finding fields (grepFields)',
+              'To find which explore and fields can answer a question, use the `grepFields` tool instead of any other discovery step. It greps the field catalog (names, labels, descriptions, hints, tags) with case-insensitive keyword patterns (`|` for OR, space or .* between words for AND) and returns `explore/fieldId  [kind type]` lines grouped by explore.',
+              '- The user message may already include a "Candidate fields pre-grepped from the catalog" block. Read it FIRST — if it contains the fields you need, use them directly and skip calling grepFields. Only call grepFields when those candidates do not cover the question or you need a different angle.',
+              '- When you do call grepFields, pass several patterns in ONE call (the `patterns` array) covering the different angles of the question at once — e.g. `["revenue|sales", "country|region"]`. Do not grep one pattern, wait, then grep another.',
+              '- Use meaningful keywords, not long natural-language phrases. Read the returned fieldIds and pick the single explore that answers at the right grain before building a query.',
+              "- Once you have narrowed down to the explore(s) and field(s) you intend to use, call `getMetadata` (batching all of them in one call) to get the detail you need to build a correct query — an explore's joined tables and required filters, and a field's filter type, case-sensitivity and hints. grepFields tells you what exists; getMetadata tells you how to use it.",
+              '- If your literal patterns miss, grepFields automatically returns the closest catalog matches (fuzzy search, verified fields first) under "No exact grep matches" — use those rather than re-grepping a long list of synonyms.',
+              '- Once you have the fieldIds you need, build the query. Do NOT re-grep for fields you already found, and do not call grepFields again between generateVisualization attempts — if a query fails, fix the query itself (filters, metric, grain), not the discovery. If you need a filter value you are unsure of (e.g. which status string exists), use searchFieldValues rather than guessing.',
+          ].join('\n')
+        : '';
+
+    const finalContent = [
+        content,
+        grepFieldsSection,
+        mcpConnectionsSection,
+        skillsSection,
+    ]
         .filter(Boolean)
         .join('\n\n');
 

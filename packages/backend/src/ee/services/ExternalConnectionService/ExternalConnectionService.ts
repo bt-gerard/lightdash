@@ -1,6 +1,6 @@
 import { subject } from '@casl/ability';
 import {
-    FeatureFlags,
+    EXTERNAL_CONNECTION_DEFAULTS,
     ForbiddenError,
     NotFoundError,
     ParameterError,
@@ -13,7 +13,6 @@ import {
     type ExternalConnectionSampleRequest,
     type ExternalFetchRequest,
     type ExternalFetchResponse,
-    type LightdashUser,
     type RegisteredAccount,
     type SessionUser,
     type UpdateExternalConnection,
@@ -21,7 +20,6 @@ import {
 import { performance } from 'node:perf_hooks';
 import { LightdashAnalytics } from '../../../analytics/LightdashAnalytics';
 import { type AppModel } from '../../../models/AppModel';
-import { FeatureFlagModel } from '../../../models/FeatureFlagModel/FeatureFlagModel';
 import { BaseService } from '../../../services/BaseService';
 import type { SpacePermissionService } from '../../../services/SpaceService/SpacePermissionService';
 import {
@@ -30,7 +28,11 @@ import {
 } from '../../../utils/secureFetch/secureFetch';
 import { type ExternalConnectionModel } from '../../models/ExternalConnectionModel';
 import { assertCanViewApp } from '../AppGenerateService/appAuthz';
-import { validateExternalConnectionConfig } from './externalConnectionConfigValidation';
+import {
+    validateExternalConnectionConfig,
+    validateServiceAccountKeyfile,
+} from './externalConnectionConfigValidation';
+import { type GoogleServiceAccountTokenProvider } from './GoogleServiceAccountTokenProvider';
 import {
     assertSafeApiKeyHeaderName,
     buildOutboundUrl,
@@ -42,9 +44,9 @@ import {
 type ExternalConnectionServiceArguments = {
     analytics: LightdashAnalytics;
     externalConnectionModel: ExternalConnectionModel;
-    featureFlagModel: FeatureFlagModel;
     appModel: AppModel;
     spacePermissionService: SpacePermissionService;
+    googleTokenProvider: GoogleServiceAccountTokenProvider;
 };
 
 export class ExternalConnectionService extends BaseService {
@@ -52,11 +54,11 @@ export class ExternalConnectionService extends BaseService {
 
     private readonly externalConnectionModel: ExternalConnectionModel;
 
-    private readonly featureFlagModel: FeatureFlagModel;
-
     private readonly appModel: AppModel;
 
     private readonly spacePermissionService: SpacePermissionService;
+
+    private readonly googleTokenProvider: GoogleServiceAccountTokenProvider;
 
     private static readonly DEFAULT_RATE_LIMIT_PER_MINUTE = 60;
 
@@ -64,32 +66,9 @@ export class ExternalConnectionService extends BaseService {
         super();
         this.analytics = args.analytics;
         this.externalConnectionModel = args.externalConnectionModel;
-        this.featureFlagModel = args.featureFlagModel;
         this.appModel = args.appModel;
         this.spacePermissionService = args.spacePermissionService;
-    }
-
-    private async assertExternalAccessEnabledForUser(
-        user: Pick<LightdashUser, 'userUuid' | 'organizationUuid'>,
-    ): Promise<void> {
-        const { enabled } = await this.featureFlagModel.get({
-            user,
-            featureFlagId: FeatureFlags.EnableDataAppExternalAccess,
-        });
-        if (!enabled) {
-            throw new ForbiddenError(
-                'Data app external access is not enabled for this organization',
-            );
-        }
-    }
-
-    private async assertExternalAccessEnabled(
-        account: RegisteredAccount,
-    ): Promise<void> {
-        return this.assertExternalAccessEnabledForUser({
-            userUuid: account.user.userUuid,
-            organizationUuid: account.organization.organizationUuid,
-        });
+        this.googleTokenProvider = args.googleTokenProvider;
     }
 
     private assertCanManage(
@@ -109,6 +88,27 @@ export class ExternalConnectionService extends BaseService {
         ) {
             throw new ForbiddenError(
                 'You do not have permission to manage external connections',
+            );
+        }
+    }
+
+    private assertCanView(
+        account: RegisteredAccount,
+        projectUuid: string,
+        organizationUuid: string,
+    ): void {
+        const ability = this.createAuditedAbility(account);
+        if (
+            ability.cannot(
+                'view',
+                subject('ExternalConnection', {
+                    organizationUuid,
+                    projectUuid,
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                'You do not have permission to view external connections',
             );
         }
     }
@@ -164,7 +164,6 @@ export class ExternalConnectionService extends BaseService {
         projectUuid: string,
         data: CreateExternalConnection,
     ): Promise<ExternalConnection> {
-        await this.assertExternalAccessEnabled(account);
         // Derive the org from the project — never trust the caller's org — so an
         // org admin cannot create a connection against another org's project.
         const organizationUuid =
@@ -176,6 +175,9 @@ export class ExternalConnectionService extends BaseService {
         }
         this.assertCanManage(account, projectUuid, organizationUuid);
         validateExternalConnectionConfig(data, Boolean(data.secret));
+        if (data.type === 'google_service_account' && data.secret) {
+            validateServiceAccountKeyfile(data.secret);
+        }
         const connection = await this.externalConnectionModel.create(
             projectUuid,
             organizationUuid,
@@ -199,7 +201,6 @@ export class ExternalConnectionService extends BaseService {
         account: RegisteredAccount,
         projectUuid: string,
     ): Promise<ExternalConnection[]> {
-        await this.assertExternalAccessEnabled(account);
         // Derive the org from the project, not the caller, and filter by both,
         // so an org admin cannot list another org's project's connections.
         const organizationUuid =
@@ -209,12 +210,11 @@ export class ExternalConnectionService extends BaseService {
         if (!organizationUuid) {
             throw new NotFoundError('Project not found');
         }
-        this.assertCanManage(account, projectUuid, organizationUuid);
+        this.assertCanView(account, projectUuid, organizationUuid);
         return this.externalConnectionModel.list(projectUuid, organizationUuid);
     }
 
-    private async getOwnedConnection(
-        account: RegisteredAccount,
+    private async loadConnection(
         projectUuid: string,
         connectionUuid: string,
     ): Promise<ExternalConnection> {
@@ -223,7 +223,36 @@ export class ExternalConnectionService extends BaseService {
         if (!connection || connection.projectUuid !== projectUuid) {
             throw new NotFoundError('External connection not found');
         }
+        return connection;
+    }
+
+    private async getOwnedConnection(
+        account: RegisteredAccount,
+        projectUuid: string,
+        connectionUuid: string,
+    ): Promise<ExternalConnection> {
+        const connection = await this.loadConnection(
+            projectUuid,
+            connectionUuid,
+        );
         this.assertCanManage(
+            account,
+            connection.projectUuid,
+            connection.organizationUuid,
+        );
+        return connection;
+    }
+
+    private async getViewableConnection(
+        account: RegisteredAccount,
+        projectUuid: string,
+        connectionUuid: string,
+    ): Promise<ExternalConnection> {
+        const connection = await this.loadConnection(
+            projectUuid,
+            connectionUuid,
+        );
+        this.assertCanView(
             account,
             connection.projectUuid,
             connection.organizationUuid,
@@ -236,8 +265,7 @@ export class ExternalConnectionService extends BaseService {
         projectUuid: string,
         connectionUuid: string,
     ): Promise<ExternalConnection> {
-        await this.assertExternalAccessEnabled(account);
-        return this.getOwnedConnection(account, projectUuid, connectionUuid);
+        return this.getViewableConnection(account, projectUuid, connectionUuid);
     }
 
     async update(
@@ -246,22 +274,68 @@ export class ExternalConnectionService extends BaseService {
         connectionUuid: string,
         data: UpdateExternalConnection,
     ): Promise<ExternalConnection> {
-        await this.assertExternalAccessEnabled(account);
         const existing = await this.getOwnedConnection(
             account,
             projectUuid,
             connectionUuid,
         );
+        const resultingType = data.type ?? existing.type;
+        const typeChanged =
+            data.type !== undefined && data.type !== existing.type;
+
+        // A blank secret keeps the stored one ONLY when the type is unchanged.
+        // On a type change the stored secret belongs to the old auth method, so
+        // it is dropped and the caller must supply a new one (validation then
+        // requires it). This prevents e.g. a stored service-account keyfile from
+        // being reused — and leaked — as a bearer token when switching types.
+        let hasSecretAfter: boolean;
+        if (data.secret === null) {
+            hasSecretAfter = false;
+        } else if (data.secret) {
+            hasSecretAfter = true;
+        } else {
+            hasSecretAfter = !typeChanged && existing.hasSecret;
+        }
+
+        // Resolve a field that belongs only to the resulting auth type: use the
+        // patch value if provided, else keep the existing value — but a type
+        // change never carries the previous type's values forward, and fields
+        // foreign to the resulting type are always cleared.
+        const resolveTypeField = <T>(
+            belongsToResultingType: boolean,
+            patchValue: T | undefined,
+            existingValue: T,
+        ): T | null => {
+            if (!belongsToResultingType) return null;
+            if (patchValue !== undefined) return patchValue;
+            return typeChanged ? null : existingValue;
+        };
+        const resolvedApiKeyName = resolveTypeField(
+            resultingType === 'api_key',
+            data.apiKeyName,
+            existing.apiKeyName,
+        );
+        const resolvedApiKeyLocation = resolveTypeField(
+            resultingType === 'api_key',
+            data.apiKeyLocation,
+            existing.apiKeyLocation,
+        );
+        const resolvedOauthScopes = resolveTypeField(
+            resultingType === 'google_service_account',
+            data.oauthScopes,
+            existing.oauthScopes,
+        );
+
         // Validate the resulting (merged) config so a partial update can't
         // leave the connection in an invalid or unsafe state.
-        const hasSecretAfter =
-            data.secret === null
-                ? false
-                : Boolean(data.secret) || existing.hasSecret;
         validateExternalConnectionConfig(
             {
-                type: data.type ?? existing.type,
+                type: resultingType,
                 origin: data.origin ?? existing.origin,
+                instructions:
+                    data.instructions !== undefined
+                        ? data.instructions
+                        : existing.instructions,
                 allowedPathPrefixes:
                     data.allowedPathPrefixes ?? existing.allowedPathPrefixes,
                 allowedMethods: data.allowedMethods ?? existing.allowedMethods,
@@ -276,21 +350,28 @@ export class ExternalConnectionService extends BaseService {
                     data.rateLimitPerMinute !== undefined
                         ? data.rateLimitPerMinute
                         : existing.rateLimitPerMinute,
-                apiKeyName:
-                    data.apiKeyName !== undefined
-                        ? data.apiKeyName
-                        : existing.apiKeyName,
-                apiKeyLocation:
-                    data.apiKeyLocation !== undefined
-                        ? data.apiKeyLocation
-                        : existing.apiKeyLocation,
+                apiKeyName: resolvedApiKeyName,
+                apiKeyLocation: resolvedApiKeyLocation,
+                oauthScopes: resolvedOauthScopes,
             },
             hasSecretAfter,
         );
+        // Validate the keyfile only when a new secret is supplied — a secret-less
+        // (same-type) update keeps the already-validated stored keyfile.
+        if (resultingType === 'google_service_account' && data.secret) {
+            validateServiceAccountKeyfile(data.secret);
+        }
+        // Persist the resolved type-specific fields so foreign fields (and the
+        // stale scopes/api-key config) are cleared when the type changes.
         const updated = await this.externalConnectionModel.update(
             connectionUuid,
             account.user.id,
-            data,
+            {
+                ...data,
+                apiKeyName: resolvedApiKeyName,
+                apiKeyLocation: resolvedApiKeyLocation,
+                oauthScopes: resolvedOauthScopes,
+            },
         );
         this.analytics.track({
             event: 'external_connection.updated',
@@ -309,7 +390,6 @@ export class ExternalConnectionService extends BaseService {
         projectUuid: string,
         connectionUuid: string,
     ): Promise<void> {
-        await this.assertExternalAccessEnabled(account);
         const existing = await this.getOwnedConnection(
             account,
             projectUuid,
@@ -333,7 +413,6 @@ export class ExternalConnectionService extends BaseService {
         connectionUuid: string,
         secret: string,
     ): Promise<ExternalConnection> {
-        await this.assertExternalAccessEnabled(account);
         const existing = await this.getOwnedConnection(
             account,
             projectUuid,
@@ -357,7 +436,6 @@ export class ExternalConnectionService extends BaseService {
         projectUuid: string,
         appUuid: string,
     ): Promise<Array<{ alias: string; connection: ExternalConnection }>> {
-        await this.assertExternalAccessEnabled(account);
         const app = await this.assertCanManageApp(account, appUuid);
         if (app.project_uuid !== projectUuid) {
             throw new NotFoundError('Data app not found');
@@ -372,7 +450,6 @@ export class ExternalConnectionService extends BaseService {
         externalConnectionUuid: string,
         alias: string,
     ): Promise<void> {
-        await this.assertExternalAccessEnabled(account);
         const app = await this.assertCanManageApp(account, appUuid);
         if (app.project_uuid !== projectUuid) {
             throw new NotFoundError('Data app not found');
@@ -411,7 +488,6 @@ export class ExternalConnectionService extends BaseService {
         appUuid: string,
         alias: string,
     ): Promise<void> {
-        await this.assertExternalAccessEnabled(account);
         const app = await this.assertCanManageApp(account, appUuid);
         if (app.project_uuid !== projectUuid) {
             throw new NotFoundError('Data app not found');
@@ -443,8 +519,6 @@ export class ExternalConnectionService extends BaseService {
         appUuid: string,
         req: ExternalFetchRequest,
     ): Promise<ExternalFetchResponse> {
-        await this.assertExternalAccessEnabledForUser(user);
-
         const start = performance.now();
 
         // 1. Load app + authorize VIEW (same authz as reading the app).
@@ -586,7 +660,6 @@ export class ExternalConnectionService extends BaseService {
      * alias resolution — those live in the caller so M5's testConnection can
      * reuse this exact path with an admin-supplied connection.
      */
-    // eslint-disable-next-line class-methods-use-this
     private async executeExternalFetch(
         connection: ExternalConnection,
         secret: string | null,
@@ -639,6 +712,33 @@ export class ExternalConnectionService extends BaseService {
                     'Connection has an invalid api key location',
                 );
             }
+        } else if (connection.type === 'google_service_account') {
+            // Fail closed: mint a short-lived Google access token from the stored
+            // service account keyfile + scopes and inject it as a bearer token.
+            if (!secret) {
+                throw new ParameterError(
+                    'Connection is missing its service account key',
+                );
+            }
+            const scopes = connection.oauthScopes ?? [];
+            if (scopes.length === 0) {
+                throw new ParameterError(
+                    'Connection is missing its OAuth scopes',
+                );
+            }
+            let accessToken: string;
+            try {
+                accessToken = await this.googleTokenProvider.getAccessToken(
+                    secret,
+                    scopes,
+                );
+            } catch {
+                // No library/upstream detail reaches the client.
+                throw new ParameterError(
+                    'Failed to obtain Google access token',
+                );
+            }
+            headers.Authorization = `Bearer ${accessToken}`;
         }
         // type === 'none' → no auth injected.
 
@@ -792,6 +892,7 @@ export class ExternalConnectionService extends BaseService {
         'secret',
         'password',
         'x-api-key',
+        'private_key',
     ]);
 
     /**
@@ -953,12 +1054,20 @@ export class ExternalConnectionService extends BaseService {
             body?: unknown;
         },
     ): Promise<ExternalFetchResponse> {
-        await this.assertExternalAccessEnabled(account);
         const conn = await this.loadConnectionForProject(
             connectionUuid,
             projectUuid,
         );
         this.assertCanManage(account, conn.projectUuid, conn.organizationUuid);
+
+        // Method allowlist — mirror the runtime proxy so a test rejects a
+        // disallowed method instead of silently sending it.
+        const method: ExternalConnectionMethod = req.method ?? 'GET';
+        if (!conn.allowedMethods.includes(method)) {
+            throw new ParameterError(
+                `Method ${method} is not allowed by this connection`,
+            );
+        }
 
         const secret =
             conn.type === 'none'
@@ -968,7 +1077,92 @@ export class ExternalConnectionService extends BaseService {
                   );
 
         const result = await this.executeExternalFetch(conn, secret, {
-            method: req.method ?? 'GET',
+            method,
+            path: req.path,
+            query: req.query,
+            body: req.body,
+        });
+        return result.response;
+    }
+
+    /**
+     * Admin-only "Test connection config". Runs a single request through the
+     * SAME validation + SSRF-guarded fetch core the runtime proxy uses, but
+     * against an UNSAVED config (including the caller-supplied plaintext
+     * secret) — persisting nothing. Lets the onboarding wizard verify a
+     * connection before it is created.
+     */
+    async testConfig(
+        account: RegisteredAccount,
+        projectUuid: string,
+        data: CreateExternalConnection,
+        req: {
+            method?: ExternalConnectionMethod;
+            path: string;
+            query?: Record<string, string>;
+            body?: unknown;
+        },
+    ): Promise<ExternalFetchResponse> {
+        // Derive the org from the project — never trust the caller — so an org
+        // admin cannot test against another org's project.
+        const organizationUuid =
+            await this.externalConnectionModel.getProjectOrganizationUuid(
+                projectUuid,
+            );
+        if (!organizationUuid) {
+            throw new NotFoundError('Project not found');
+        }
+        this.assertCanManage(account, projectUuid, organizationUuid);
+
+        // Same validation create runs, so a test can never exercise a config we
+        // would refuse to store (SSRF guard, auth invariants, bounded limits).
+        validateExternalConnectionConfig(data, Boolean(data.secret));
+        if (data.type === 'google_service_account' && data.secret) {
+            validateServiceAccountKeyfile(data.secret);
+        }
+
+        const method: ExternalConnectionMethod = req.method ?? 'GET';
+        if (!data.allowedMethods.includes(method)) {
+            throw new ParameterError(
+                `Method ${method} is not allowed by this connection`,
+            );
+        }
+
+        // In-memory connection — never persisted. Numeric limits fall back to
+        // the same defaults create applies, since the proxy core reads them.
+        const connection: ExternalConnection = {
+            externalConnectionUuid: 'unsaved',
+            projectUuid,
+            organizationUuid,
+            name: data.name,
+            type: data.type,
+            origin: data.origin,
+            instructions: data.instructions ?? null,
+            allowedPathPrefixes: data.allowedPathPrefixes,
+            allowedMethods: data.allowedMethods,
+            allowedContentTypes: data.allowedContentTypes,
+            responseMaxBytes:
+                data.responseMaxBytes ??
+                EXTERNAL_CONNECTION_DEFAULTS.responseMaxBytes,
+            requestMaxBytes:
+                data.requestMaxBytes ??
+                EXTERNAL_CONNECTION_DEFAULTS.requestMaxBytes,
+            timeoutMs: data.timeoutMs ?? EXTERNAL_CONNECTION_DEFAULTS.timeoutMs,
+            rateLimitPerMinute: data.rateLimitPerMinute ?? null,
+            apiKeyName: data.apiKeyName ?? null,
+            apiKeyLocation: data.apiKeyLocation ?? null,
+            oauthScopes: data.oauthScopes ?? null,
+            hasSecret: Boolean(data.secret),
+            createdByUserUuid: null,
+            updatedByUserUuid: null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+        };
+
+        const secret = data.type === 'none' ? null : (data.secret ?? null);
+
+        const result = await this.executeExternalFetch(connection, secret, {
+            method,
             path: req.path,
             query: req.query,
             body: req.body,
@@ -987,7 +1181,6 @@ export class ExternalConnectionService extends BaseService {
         connectionUuid: string,
         data: ApiSaveExternalConnectionSampleRequest,
     ): Promise<ExternalConnectionSample> {
-        await this.assertExternalAccessEnabled(account);
         const conn = await this.loadConnectionForProject(
             connectionUuid,
             projectUuid,
@@ -1041,7 +1234,6 @@ export class ExternalConnectionService extends BaseService {
         projectUuid: string,
         connectionUuid: string,
     ): Promise<ExternalConnectionSample[]> {
-        await this.assertExternalAccessEnabled(account);
         const conn = await this.loadConnectionForProject(
             connectionUuid,
             projectUuid,
@@ -1060,7 +1252,6 @@ export class ExternalConnectionService extends BaseService {
         connectionUuid: string,
         sampleUuid: string,
     ): Promise<void> {
-        await this.assertExternalAccessEnabled(account);
         const conn = await this.loadConnectionForProject(
             connectionUuid,
             projectUuid,

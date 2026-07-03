@@ -853,9 +853,7 @@ export class EmbedService extends BaseService {
         });
         const defaultUserAttributes =
             orgUserAttributes.reduce<UserAttributeValueMap>((acc, curr) => {
-                acc[curr.name] = curr.attributeDefault
-                    ? [curr.attributeDefault]
-                    : [];
+                acc[curr.name] = curr.attributeDefaults ?? [];
                 return acc;
             }, {});
         const embedTokenUserAttributes = embedJwt.userAttributes
@@ -1000,6 +998,7 @@ export class EmbedService extends BaseService {
         queryTags: Omit<
             Required<RunQueryTags>,
             | 'user_uuid'
+            | 'app_uuid'
             | 'chart_uuid'
             | 'dashboard_uuid'
             // Scheduler-attribution tags only apply to scheduler-driven jobs,

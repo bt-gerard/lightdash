@@ -2,6 +2,7 @@ import {
     type AppVersionResources,
     type AppVersionStatus,
     type DataAppTemplate,
+    type DataAppVizSchema,
 } from '@lightdash/common';
 import { type Knex } from 'knex';
 
@@ -21,6 +22,12 @@ export type DbApp = {
     description: string;
     project_uuid: string;
     space_uuid: string | null;
+    // Stable, registry-owned sandbox id (`sandbox_registry.sandbox_uuid`). Null
+    // until the app's first generation creates a sandbox. The provider's own
+    // container id changes every turn under persist+destroy, so this indirection
+    // is what survives across turns. The column keeps its original name
+    // `sandbox_id` for backwards compatibility — renaming it would break
+    // in-flight old code during a deploy.
     sandbox_id: string | null;
     template: Exclude<DataAppTemplate, 'custom'> | null;
     design_uuid: string | null;
@@ -78,6 +85,8 @@ export type DbAppVersion = {
     status_message: string | null;
     status_updated_at: Date | null;
     resources: AppVersionResources | null;
+    // Declared schema for data-app-viz versions; null otherwise.
+    viz_schema: DataAppVizSchema | null;
     created_at: Date;
     created_by_user_uuid: string;
 };
@@ -88,11 +97,17 @@ export type AppVersionsTable = Knex.CompositeTableType<
         DbAppVersion,
         'app_id' | 'version' | 'prompt' | 'status' | 'created_by_user_uuid'
     > &
-        Partial<Pick<DbAppVersion, 'app_version_id' | 'resources'>>,
+        Partial<
+            Pick<DbAppVersion, 'app_version_id' | 'resources' | 'viz_schema'>
+        >,
     Partial<
         Pick<
             DbAppVersion,
-            'status' | 'error' | 'status_message' | 'status_updated_at'
+            | 'status'
+            | 'error'
+            | 'status_message'
+            | 'status_updated_at'
+            | 'viz_schema'
         >
     >
 >;

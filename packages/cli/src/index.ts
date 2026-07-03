@@ -754,6 +754,27 @@ program
         'skip writing space metadata files during download',
         false,
     )
+    .option('--skip-charts', 'skip downloading charts', false)
+    .option('--skip-dashboards', 'skip downloading dashboards', false)
+    .option(
+        '--strip-pivot-series',
+        'strip per-value pivot series config from chart YAML for portable downloads',
+        false,
+    )
+    .option(
+        '--apps <appUuids...>',
+        'Include specific data apps by UUID (enterprise). Works for apps not added to a space.',
+    )
+    .option(
+        '--include-apps',
+        'Include the project\'s data apps (enterprise), capped at the first 10. Only lists apps that are in a space; use "--apps <uuids>" for the rest.',
+        false,
+    )
+    .option(
+        '--apps-only',
+        'Download only data apps (implies --skip-charts --skip-dashboards --skip-spaces). Requires --apps <appUuids...> or --include-apps.',
+        false,
+    )
     .action(downloadHandler);
 
 program
@@ -804,6 +825,15 @@ program
     )
     .option('--validate', 'Validate charts and dashboards after upload', false)
     .option('--gzip', 'Enable gzip compression for request bodies', false)
+    .option(
+        '--apps [appUuids...]',
+        'Include data apps (enterprise). Optionally limit to specific app UUIDs; default: all app folders on disk.',
+    )
+    .option(
+        '--create-new',
+        'Always create a new app from the uploaded code instead of updating the app referenced by lightdash-app.yml.',
+        false,
+    )
     .action(uploadHandler);
 
 program

@@ -1,25 +1,25 @@
-// e2b and ai are ESM-only packages that cannot be required by Jest/CJS.
-// Mock them before importing AppGenerateService.
+// Stub the e2b/ai SDKs before importing AppGenerateService so the tests never
+// reach the real sandbox or model client.
 import {
-    FeatureFlags,
     ForbiddenError,
     ParameterError,
     type ExternalConnectionSample,
 } from '@lightdash/common';
 import { AppGenerateService } from './AppGenerateService';
 
-jest.mock('e2b', () => ({
+vi.mock('e2b', () => ({
     Sandbox: class {},
     CommandExitError: class extends Error {},
     ALL_TRAFFIC: '*',
 }));
-jest.mock('ai', () => ({
-    generateObject: jest.fn(),
+vi.mock('ai', () => ({
+    generateObject: vi.fn(),
 }));
 
 type AppExternalConnectionDoc = {
     alias: string;
     origin: string;
+    instructions?: string | null;
     allowedMethods: string[];
     allowedPathPrefixes: string[];
     samples: ExternalConnectionSample[];
@@ -34,7 +34,7 @@ type PrivateWithSamples = {
     resolveExternalConnectionSamples: (
         appId: string,
     ) => Promise<AppExternalConnectionDoc[]>;
-    logger: { info: jest.Mock };
+    logger: { info: import('vitest').Mock };
 };
 
 type PrivateWithLink = {
@@ -45,33 +45,15 @@ type PrivateWithLink = {
         externalConnections:
             | Array<{ externalConnectionUuid: string; alias: string }>
             | undefined,
-    ) => Promise<void>;
+    ) => Promise<unknown>;
 };
 
-function buildService(flagEnabled = true) {
+function buildService() {
     // Build a minimal AppGenerateService with only the deps needed for the
     // private writeExternalConnectionSamples method (which uses only
     // this.logger and the sandbox argument). All other deps are stubbed out.
     const featureFlagModel = {
-        get: jest
-            .fn()
-            .mockImplementation(
-                ({ featureFlagId }: { featureFlagId: string }) => {
-                    if (
-                        featureFlagId ===
-                        FeatureFlags.EnableDataAppExternalAccess
-                    ) {
-                        return Promise.resolve({
-                            id: featureFlagId,
-                            enabled: flagEnabled,
-                        });
-                    }
-                    return Promise.resolve({
-                        id: featureFlagId,
-                        enabled: true,
-                    });
-                },
-            ),
+        get: vi.fn().mockResolvedValue({ enabled: true }),
     };
     return {
         service: new AppGenerateService({
@@ -84,6 +66,7 @@ function buildService(flagEnabled = true) {
             organizationDesignModel: {} as never,
             pinnedListModel: {} as never,
             projectModel: {} as never,
+            projectParametersModel: {} as never,
             spaceModel: {} as never,
             schedulerClient: {} as never,
             savedChartService: {} as never,
@@ -92,6 +75,7 @@ function buildService(flagEnabled = true) {
             projectService: {} as never,
             promoteService: {} as never,
             externalConnectionModel: {} as never,
+            sandboxRegistryModel: {} as never,
         }) as unknown as PrivateWithSamples,
         featureFlagModel,
     };
@@ -99,10 +83,10 @@ function buildService(flagEnabled = true) {
 
 const makeSandbox = () => ({
     commands: {
-        run: jest.fn().mockResolvedValue({ exitCode: 0 }),
+        run: vi.fn().mockResolvedValue({ exitCode: 0 }),
     },
     files: {
-        write: jest.fn().mockResolvedValue(undefined),
+        write: vi.fn().mockResolvedValue(undefined),
     },
 });
 
@@ -153,9 +137,12 @@ describe('AppGenerateService.writeExternalConnectionSamples', () => {
         );
 
         // Weather file contains expected fields
-        const weatherCall = (sandbox.files.write as jest.Mock).mock.calls.find(
-            ([path]: [string]) => path === '/tmp/external-data/weather.json',
+        const weatherCall = (
+            sandbox.files.write as import('vitest').Mock
+        ).mock.calls.find(
+            ([path]) => path === '/tmp/external-data/weather.json',
         );
+        if (!weatherCall) throw new Error('Expected weather sample write');
         const weatherDoc = JSON.parse(weatherCall[1]);
         expect(weatherDoc.howToCall).toContain('weather');
         expect(weatherDoc.howToCall).toContain('externalFetch');
@@ -169,9 +156,10 @@ describe('AppGenerateService.writeExternalConnectionSamples', () => {
         expect(weatherDoc.samples[0].request.method).toBe('GET');
 
         // CRM file has 2 samples
-        const crmCall = (sandbox.files.write as jest.Mock).mock.calls.find(
-            ([path]: [string]) => path === '/tmp/external-data/crm.json',
-        );
+        const crmCall = (
+            sandbox.files.write as import('vitest').Mock
+        ).mock.calls.find(([path]) => path === '/tmp/external-data/crm.json');
+        if (!crmCall) throw new Error('Expected CRM sample write');
         const crmDoc = JSON.parse(crmCall[1]);
         expect(crmDoc.allowedMethods).toEqual(['GET', 'POST']);
         expect(crmDoc.samples).toHaveLength(2);
@@ -207,12 +195,61 @@ describe('AppGenerateService.writeExternalConnectionSamples', () => {
             '/tmp/external-data/weather.json',
             expect.any(String),
         );
-        const call = (sandbox.files.write as jest.Mock).mock.calls[0];
+        const call = (sandbox.files.write as import('vitest').Mock).mock
+            .calls[0];
         const written = JSON.parse(call[1]);
         expect(written.howToCall).toContain('externalFetch');
         expect(written.allowedMethods).toEqual(['GET']);
         expect(written.samples).toEqual([]);
         expect(block).toContain('/tmp/external-data/weather.json');
+    });
+
+    it('embeds admin instructions in the doc and prompt block when set, omits when absent', async () => {
+        const sandbox = makeSandbox();
+        const docs: AppExternalConnectionDoc[] = [
+            {
+                alias: 'withdocs',
+                origin: 'https://api.docs.test',
+                instructions: 'Paginate with ?page=. Rates are in USD.',
+                allowedMethods: ['GET'],
+                allowedPathPrefixes: ['/v1/'],
+                samples: [],
+            },
+            {
+                alias: 'blank',
+                origin: 'https://api.blank.test',
+                instructions: '   ',
+                allowedMethods: ['GET'],
+                allowedPathPrefixes: ['/v1/'],
+                samples: [],
+            },
+        ];
+        const { service } = buildService();
+
+        const block = await service.writeExternalConnectionSamples(
+            sandbox,
+            'app-1',
+            docs,
+        );
+
+        const writeMock = sandbox.files.write as import('vitest').Mock;
+        const withDocsDoc = JSON.parse(
+            writeMock.mock.calls.find(
+                ([path]) => path === '/tmp/external-data/withdocs.json',
+            )![1],
+        );
+        expect(withDocsDoc.instructions).toBe(
+            'Paginate with ?page=. Rates are in USD.',
+        );
+
+        const blankDoc = JSON.parse(
+            writeMock.mock.calls.find(
+                ([path]) => path === '/tmp/external-data/blank.json',
+            )![1],
+        );
+        expect(blankDoc).not.toHaveProperty('instructions');
+
+        expect(block).toContain('instructions');
     });
 
     it('does not mkdir or write when there are no linked connections', async () => {
@@ -231,81 +268,16 @@ describe('AppGenerateService.writeExternalConnectionSamples', () => {
     });
 });
 
-describe('AppGenerateService pipeline external-access flag gate', () => {
+describe('AppGenerateService pipeline external connection samples', () => {
     beforeEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
     });
 
-    it('skips resolveExternalConnectionSamples and writeExternalConnectionSamples when the flag is OFF', async () => {
+    it('calls resolveExternalConnectionSamples during the catalog stage', async () => {
         const sandbox = makeSandbox();
-        const { service } = buildService(false);
+        const { service } = buildService();
 
-        const resolveSpy = jest
-            .spyOn(
-                service as unknown as PrivateWithSamples,
-                'resolveExternalConnectionSamples',
-            )
-            .mockResolvedValue([
-                {
-                    alias: 'weather',
-                    origin: 'https://api.weather.test',
-                    allowedMethods: ['GET'],
-                    allowedPathPrefixes: ['/v1/'],
-                    samples: [makeSample('weather', 1)],
-                },
-            ]);
-        const writeSpy = jest.spyOn(
-            service as unknown as PrivateWithSamples,
-            'writeExternalConnectionSamples',
-        );
-
-        // Call writeCatalogAndPrompt via a cast — it checks the flag before resolving/writing.
-        // We stub catalog and prompt-file writes to avoid real I/O.
-        const privateService = service as unknown as {
-            writeCatalogAndPrompt: (
-                sandbox: unknown,
-                appUuid: string,
-                projectUuid: string,
-                prompt: string,
-                imageIds: undefined,
-                s3Client: unknown,
-                bucket: string,
-                chartReferences: undefined,
-                template: undefined,
-                user: { userUuid: string; organizationUuid: string },
-            ) => Promise<unknown>;
-            catalogModel: { getCatalogItemsSummary: jest.Mock };
-        };
-        privateService.catalogModel = {
-            getCatalogItemsSummary: jest.fn().mockResolvedValue([]),
-        };
-
-        await privateService.writeCatalogAndPrompt(
-            sandbox,
-            'app-1',
-            'project-1',
-            'build me an app',
-            undefined,
-            {} as never,
-            'bucket',
-            undefined,
-            undefined,
-            { userUuid: 'user-1', organizationUuid: 'org-1' },
-        );
-
-        expect(resolveSpy).not.toHaveBeenCalled();
-        expect(writeSpy).not.toHaveBeenCalled();
-        expect(sandbox.files.write).not.toHaveBeenCalledWith(
-            expect.stringContaining('/tmp/external-data/'),
-            expect.anything(),
-        );
-    });
-
-    it('calls resolveExternalConnectionSamples when the flag is ON', async () => {
-        const sandbox = makeSandbox();
-        const { service } = buildService(true);
-
-        const resolveSpy = jest
+        const resolveSpy = vi
             .spyOn(
                 service as unknown as PrivateWithSamples,
                 'resolveExternalConnectionSamples',
@@ -323,12 +295,15 @@ describe('AppGenerateService pipeline external-access flag gate', () => {
                 bucket: string,
                 chartReferences: undefined,
                 template: undefined,
-                user: { userUuid: string; organizationUuid: string },
             ) => Promise<unknown>;
-            catalogModel: { getCatalogItemsSummary: jest.Mock };
+            projectModel: { getAllExploresFromCache: import('vitest').Mock };
+            projectParametersModel: { find: import('vitest').Mock };
         };
-        privateService.catalogModel = {
-            getCatalogItemsSummary: jest.fn().mockResolvedValue([]),
+        privateService.projectModel = {
+            getAllExploresFromCache: vi.fn().mockResolvedValue({}),
+        };
+        privateService.projectParametersModel = {
+            find: vi.fn().mockResolvedValue([]),
         };
 
         await privateService.writeCatalogAndPrompt(
@@ -341,7 +316,6 @@ describe('AppGenerateService pipeline external-access flag gate', () => {
             'bucket',
             undefined,
             undefined,
-            { userUuid: 'user-1', organizationUuid: 'org-1' },
         );
 
         expect(resolveSpy).toHaveBeenCalledWith('app-1');
@@ -352,22 +326,23 @@ describe('AppGenerateService.linkExternalConnections', () => {
     const sameProjectConn = {
         projectUuid: 'proj-1',
         organizationUuid: 'org-1',
+        name: 'Weather API',
     };
     const ref = [{ externalConnectionUuid: 'c1', alias: 'weather' }];
     const user = { userUuid: 'u1', organizationUuid: 'org-1' };
 
     function setup(opts: { connection?: unknown; canManage: boolean }) {
-        const { service } = buildService(true);
-        const linkToApp = jest.fn().mockResolvedValue(undefined);
+        const { service } = buildService();
+        const linkToApp = vi.fn().mockResolvedValue(undefined);
         (
             service as unknown as { externalConnectionModel: unknown }
         ).externalConnectionModel = {
-            findByUuid: jest
+            findByUuid: vi
                 .fn()
                 .mockResolvedValue(opts.connection ?? sameProjectConn),
             linkToApp,
         };
-        jest.spyOn(
+        vi.spyOn(
             service as unknown as { createAuditedAbility: () => unknown },
             'createAuditedAbility',
         ).mockReturnValue({

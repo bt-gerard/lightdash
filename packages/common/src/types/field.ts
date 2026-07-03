@@ -11,6 +11,7 @@ import { type MetricFilterRule } from './filter';
 import type { TimeFrames } from './timeFrames';
 
 export enum Compact {
+    AUTO = 'auto',
     THOUSANDS = 'thousands',
     MILLIONS = 'millions',
     BILLIONS = 'billions',
@@ -78,6 +79,14 @@ type CompactConfig = {
 export type CompactOrAlias = Compact | (typeof CompactAlias)[number];
 
 export const CompactConfigMap: Record<Compact, CompactConfig> = {
+    [Compact.AUTO]: {
+        compact: Compact.AUTO,
+        alias: [],
+        orderOfMagnitude: 0,
+        convertFn: (value: number) => value,
+        label: 'Auto (K, M, B, T)',
+        suffix: '',
+    },
     [Compact.THOUSANDS]: {
         compact: Compact.THOUSANDS,
         alias: ['K', 'thousand'],
@@ -669,6 +678,59 @@ export enum DimensionType {
     BOOLEAN = 'boolean',
 }
 
+export type FilterAutocompleteValue = {
+    value: string;
+    label?: string;
+};
+
+export type FilterAutocompleteConfig = {
+    values?: FilterAutocompleteValue[];
+    fetchFromWarehouse: boolean;
+};
+
+/**
+ * Whether a dimension's curated `filter_autocomplete` values can answer a value
+ * search without querying the warehouse. Mirrors the Explore filter UI
+ * (`useFieldValues`): always use curated values when the warehouse fetch is
+ * turned off; otherwise only as the fast path for an empty ("list all") search.
+ */
+export const shouldUseStaticFilterAutocomplete = (
+    filterAutocomplete: FilterAutocompleteConfig | undefined,
+    search: string,
+): boolean => {
+    if (!filterAutocomplete) return false;
+    const hasValues = (filterAutocomplete.values?.length ?? 0) > 0;
+    return (
+        !filterAutocomplete.fetchFromWarehouse ||
+        (hasValues && search.trim().length === 0)
+    );
+};
+
+export const filterStaticFilterAutocompleteValues = (
+    values: FilterAutocompleteValue[],
+    search: string,
+): string[] => {
+    const normalizedSearch = search.trim().toLowerCase();
+    const matched =
+        normalizedSearch.length === 0
+            ? values
+            : values.filter(
+                  ({ value, label }) =>
+                      value.toLowerCase().includes(normalizedSearch) ||
+                      (label?.toLowerCase().includes(normalizedSearch) ??
+                          false),
+              );
+    const seen = new Set<string>();
+    return matched
+        .map(({ value }) => value)
+        .filter((value) => {
+            if (seen.has(value)) return false;
+            seen.add(value);
+            return true;
+        })
+        .sort((a, b) => a.localeCompare(b));
+};
+
 export interface Dimension extends Field {
     fieldType: FieldType.DIMENSION;
     type: DimensionType;
@@ -679,6 +741,10 @@ export interface Dimension extends Field {
     requiredAttributes?: Record<string, string | string[]>;
     anyAttributes?: Record<string, string | string[]>;
     timeInterval?: TimeFrames;
+    /** Overridden display label for this dimension's grain (project
+     *  `granularity_labels`); undefined when no override — callers fall back
+     *  to `timeFrameConfigs[timeInterval].getLabel()`. */
+    timeIntervalLabel?: string;
     timeIntervalBaseDimensionName?: string;
     timeIntervalBaseDimensionType?: DimensionType;
     customTimeInterval?: string;
@@ -696,6 +762,7 @@ export interface Dimension extends Field {
         fit?: string;
     };
     richText?: string; // The markdown/HTML template with LiquidJS variables
+    filterAutocomplete?: FilterAutocompleteConfig;
     spotlight?: {
         filterBy?: boolean;
         segmentBy?: boolean;
@@ -725,6 +792,17 @@ type CompiledProperties = {
     compilationError?: FieldCompilationError;
     compiledValueSql?: string; // raw value expression before aggregation (for sum_distinct CTE)
     compiledDistinctKeys?: string[]; // compiled SQL for distinct keys (sum_distinct only)
+    // Metric-only: compile-time SQL for each metric filter that uses a relative
+    // date operator (inThePast/inTheNext/...). The query builder re-evaluates
+    // these boundaries at query time by swapping the stored predicate for a
+    // freshly rendered one, so the window is no longer frozen to compile time.
+    compiledRelativeDateFilters?: CompiledMetricRelativeDateFilter[];
+};
+
+export type CompiledMetricRelativeDateFilter = {
+    id: string; // metric filter rule id, maps back to Metric.filters
+    fieldId: string; // resolved dimension id the filter targets
+    compiledSql: string; // compile-time predicate, used as the query-time swap anchor
 };
 export type CompiledDimension = Dimension & CompiledProperties;
 export type CompiledMetric = Metric & CompiledProperties;
@@ -789,6 +867,7 @@ export enum MetricType {
 export enum Format {
     KM = 'km',
     MI = 'mi',
+    SI = 'si',
     USD = 'usd',
     GBP = 'gbp',
     EUR = 'eur',
@@ -1055,10 +1134,19 @@ export function getCompactOptionsForFormatType(
 ): Compact[] {
     if (type === CustomFormatType.BYTES_IEC) return IECByteCompacts;
     if (type === CustomFormatType.BYTES_SI) return SIByteCompacts;
-    return [
+    const numericCompacts = [
         Compact.THOUSANDS,
         Compact.MILLIONS,
         Compact.BILLIONS,
         Compact.TRILLIONS,
     ];
+
+    if (
+        type === CustomFormatType.NUMBER ||
+        type === CustomFormatType.CURRENCY
+    ) {
+        return [Compact.AUTO, ...numericCompacts];
+    }
+
+    return numericCompacts;
 }

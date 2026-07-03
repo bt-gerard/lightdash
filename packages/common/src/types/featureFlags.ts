@@ -51,6 +51,15 @@ export enum FeatureFlags {
     GoogleChatEnabled = 'google-chat-enabled',
 
     /**
+     * On multi-org (shared-tenant) instances, route an organization's recurring
+     * scheduled deliveries into a per-org graphile-worker named queue
+     * (`delivery:<organizationUuid>`) so they run serially and a single org can't
+     * occupy every worker / crash the headless browser pool. Default off; enable
+     * per-org for gradual rollout.
+     */
+    ScheduledDeliveryPerOrgQueue = 'scheduled-delivery-per-org-queue',
+
+    /**
      * Enable admin user impersonation. When disabled, impersonation
      * actions are blocked and active sessions are cleared.
      */
@@ -89,14 +98,6 @@ export enum FeatureFlags {
     EnableDataApps = 'enable-data-apps',
 
     /**
-     * Enable the data-app external-fetch proxy: external connections, the proxy
-     * endpoint, the admin settings page, and the iframe bridge path. Disabled by
-     * default; must be turned on per organization. When off, every external-access
-     * code path is locked down.
-     */
-    EnableDataAppExternalAccess = 'enable-data-app-external-access',
-
-    /**
      * Enable AI Dashboard Summary feature (generates summaries of dashboard
      * contents using the AI Copilot).
      */
@@ -108,10 +109,7 @@ export enum FeatureFlags {
     AiAutopilot = 'ai-autopilot',
 
     /**
-     * Enable AI agent revamp features including built-in skills, the
-     * loadSkill tool, and content tools like readContent/editContent/createContent.
-     * When enabled, these replace older dashboard-specific content lookup
-     * tools in the agent tool surface.
+     * @deprecated Rolled out to all customers. Keep for persisted feature flag config only.
      */
     AiAgentRevamp = 'ai-agent-revamp',
 
@@ -158,16 +156,6 @@ export enum FeatureFlags {
     LockDashboardFilters = 'lock-dashboard-filters',
 
     /**
-     * Enable the new pivot-column-sort UI: per-pivot-column sort menu on
-     * pivot table headers, sort-direction indicators, and the pinned
-     * pivot-column entries in the Sort popover. Backend support
-     * (per-metric anchor CTE, pivot_values persistence) is always on;
-     * this flag only gates the UI/UX so we can validate with design
-     * partners before announcing GA.
-     */
-    PivotColumnSort = 'pivot-column-sort',
-
-    /**
      * Gate the "Schedule delivery" entry point for data apps. Disabled by
      * default while the screenshot pipeline is producing blank pages in
      * production. Enable per-org once the underlying rendering issue is
@@ -176,25 +164,17 @@ export enum FeatureFlags {
     DataAppsScheduledDeliveries = 'data-apps-scheduled-deliveries',
 
     /**
-     * Enable UI for hiding dimensions in pivot table charts (so a dimension
-     * can drive sort order without rendering or leaking into CSV/XLSX).
-     * Off by default while we validate with design partners before GA.
-     */
-    HidePivotDimensions = 'hide-pivot-dimensions',
-
-    /**
-     * Enable the "Group repeated row values" toggle on pivot tables — visual
-     * dedup of row-header dim values without rendering aggregate subtotal
-     * rows. Off by default while we validate the rendering across customer
-     * data shapes before GA.
-     */
-    PivotRowGrouping = 'pivot-row-grouping',
-
-    /**
      * Show a persistent trial warning banner for an organization on shared
      * instances. This does not block product access.
      */
     OrganizationTrialWarning = 'organization-trial-warning',
+
+    /**
+     * Block an organization from running queries because its trial has
+     * expired. Stronger than OrganizationTrialWarning — this DOES block a
+     * product action (query execution). Off by default; enable per-org.
+     */
+    OrganizationTrialBlock = 'organization-trial-block',
 
     /**
      * Enable the (in-progress) AI writeback feature. Spins up an e2b
@@ -204,6 +184,13 @@ export enum FeatureFlags {
      * built out.
      */
     AiWriteback = 'ai-writeback',
+
+    /**
+     * Enable the admin API endpoint that captures AI review judge replay
+     * inputs (candidate + evidence packet) for the offline eval scoreboard.
+     * Off by default — intended only for orgs running classifier evals.
+     */
+    AiReviewReplayCapture = 'ai-review-replay-capture',
 
     /**
      * Enable the `searchSemanticLayer` agent tool, which lets the AI agent
@@ -285,6 +272,37 @@ export enum FeatureFlags {
      * rolled out / disabled per-org at runtime without a deploy.
      */
     RedshiftIamAuth = 'redshift-iam-auth',
+
+    /**
+     * Replace the discoverFields sub-agent with a deterministic grep over an
+     * in-memory, annotated view of the project's cached explores (explore =
+     * directory, field = file). Connection-agnostic (reads compiled explores,
+     * never the warehouse or git) — lets the main agent navigate fields itself
+     * instead of paying the discoverFields sub-agent round-trip. Experimental.
+     */
+    AiGrepFields = 'ai-grep-fields',
+
+    /**
+     * Guard the agent's `searchFieldValues` tool against pathological warehouse
+     * scans. When on, an empty/whitespace query — which compiles to
+     * `LIKE '%%'`, i.e. "distinct the entire column" — is rejected immediately
+     * with an actionable message instead of running a leading-wildcard full
+     * scan that can take minutes on high-cardinality fields. Default off, so
+     * behaviour is byte-identical to today when disabled; a live toggle lets the
+     * new behaviour be trialled per-org without a redeploy. Experimental.
+     */
+    AiFieldValueSearchGuard = 'ai-field-value-search-guard',
+
+    /**
+     * Allow a single Lightdash project to connect to multiple dbt sources
+     * (repos/CLI deploys). Each source stores its latest compiled manifest in
+     * S3; on every deploy or preview the backend merges all sources' manifests
+     * into one, compiles once, and writes a single combined explore set. Off by
+     * default; the N=0 short-circuit (a project with zero registered sources
+     * runs today's single-source code path byte-for-byte) is the regression
+     * firewall. Enable per-org for gradual rollout.
+     */
+    MultiDbtSources = 'multi-dbt-sources',
 }
 
 export type FeatureFlag = {

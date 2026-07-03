@@ -107,6 +107,8 @@ query('orders')
 
 **Never prefix joined table fields with the base explore name.** `'customers.name'` is correct. `'name'` alone would resolve to `orders_name` which doesn't exist.
 
+Each entry under `meta.joins` may carry a `relationship` (`one-to-many`, `many-to-one`, `one-to-one`, `many-to-many`) and a `sql_on` condition — either can be absent. When a `relationship` is present, use it to reason about grain and fan-out: joining a `one-to-many` table multiplies base rows, so aggregating a base metric across that join can double-count — prefer a metric defined on the "many" side, or aggregate before joining.
+
 ### Understanding data grain
 
 When designing queries, consider the model's grain — what combination of dimensions produces one unique row. If the grain includes dimensions you aren't selecting, you may need filters to avoid duplicates. Estimate row counts from the grain to set appropriate `.limit()` values.
@@ -154,6 +156,94 @@ Each file contains:
 4. These are starting points — adapt them based on the user's prompt. You may combine
    multiple referenced queries, add/remove fields, or adjust filters as needed.
 
+### Linked vs. copied charts
+
+Each file has a `linked` boolean and a `chartUuid`:
+
+- **`linked: true`** — the user wants this chart **live**. Import `savedChart`
+  from `@lightdash/query-sdk` (exactly like `query`) and render with
+  `savedChart("<chartUuid>").label("<chartName>")` instead of an inline
+  `query(...)`. **There is NO `lightdash` object — call `savedChart(...)` and
+  `query(...)` directly; a `lightdash.` prefix is undefined and crashes the app.**
+  `savedChart(...)` is chainable like `query(...)` — always `.label()` it. Its
+  query SHAPE is **fixed by the saved chart**: `.label()`, `.limit()`,
+  `.parameters()` and `.filters()` apply, but `.dimensions()/.metrics()/.sorts()`
+  are IGNORED. `.filters()` NARROWS the chart server-side (your filters are
+  ANDed onto the chart's own filters — you cannot widen or replace them), so
+  interactive filter controls on a LINKED chart work: pass the user's selection
+  via `.filters()` and the query re-runs. Filter field ids on a linked chart are
+  the QUALIFIED ids exactly as they appear in the result columns (e.g.
+  `orders_status`) — do NOT strip the explore prefix like you would for
+  `query(...)`. `.filters()` accepts DIMENSION fields only — filtering on a
+  metric column fails the whole run with a 400; if the user needs a metric
+  threshold, that belongs in the saved chart itself. Never filter a linked chart's rows client-side in JS — the rows
+  are limit-truncated, so client-side filtering silently shows wrong data. If
+  the user needs a different SHAPE (other dimensions/metrics), build an inline
+  `query(...)` instead of linking. Do NOT copy the metricQuery.
+  The rows are keyed by the chart's field ids (as listed under
+  `metricQuery.dimensions` / `metricQuery.metrics`); read the returned `columns`
+  to know what's available. The listing line marks these with "LINKED".
+- **`linked: false`** — copy as today: build an inline `query(exploreName)...`
+  from the metricQuery.
+
+A linked chart stays in sync with Lightdash and appears in the Queries panel
+like any other query. If it can't be run (deleted / no access), the app should
+show its normal error state — don't fabricate data.
+
+### Linked charts must be DATA-DRIVEN and crash-proof
+
+A linked chart's query can change in Lightdash *after* the app is generated (the
+user swaps the metric, renames a field, etc.). Your generated code MUST survive
+that. A `TypeError` here (`row.x` undefined, `.toFixed()` on undefined, a stale
+field id) is UNACCEPTABLE — it blanks the whole app.
+
+For every LINKED chart, render from the **runtime data**, never hardcoded field
+ids or labels:
+
+- **Discover fields from `columns` by TYPE, not by name — and DON'T assume a
+  date.** `useLightdash` returns `columns: { name, label, type }[]`. The
+  **category / x-axis is the dimension** — the non-numeric column: a
+  `date`/`timestamp` → a time series (line), a `string` → categories (bar /
+  ranking / table). The **series are the `number` columns** (the metrics). Pick
+  whatever dimension exists — a string dimension (customer, status, region) is
+  completely normal, NOT an error. Never hardcode a field id like
+  `orders_fulfillment_rate`.
+- **Titles / axis labels from `columns[].label`** — do NOT hardcode
+  "Fulfillment Rate"; read the metric column's `label` so a metric swap in
+  Lightdash relabels the app automatically.
+- **Format every value with `format(row, column.name)`** — it renders `%` vs
+  `$` vs dates correctly per field, so a units change follows automatically.
+- **Guard aggregations; fall back only as a LAST resort.** No `Math.max(values)`
+  on a possibly-empty array (yields `-Infinity`), no divide-by-zero, no
+  `.toFixed()` on a maybe-undefined value → render a neutral `—` for a single
+  missing value. Show a whole-chart "no data / unexpected shape" fallback ONLY
+  when the query truly returns **no rows** or **no numeric column at all** — NOT
+  because the dimension is a string, or the metric changed. Bailing on valid
+  categorical data is a bug, not graceful degradation.
+
+Then WRAP each data/chart component in `<ErrorBoundary>` (from `@/lib/ErrorBoundary`):
+
+```jsx
+import { ErrorBoundary } from '@/lib/ErrorBoundary';
+
+<ErrorBoundary>
+    <RevenueChart />
+</ErrorBoundary>
+```
+
+so if a linked chart's shape changed and a component still can't render it, that
+ONE card shows a fallback while the rest of the app keeps working.
+
+**What "live" covers:** new data, filter / limit / sort / parameter changes, and
+metric swaps that keep the same shape (e.g. a weekly-% metric → a weekly-$
+metric) all flow through automatically when you render data-driven. A
+fundamentally different shape (different dimensions / a different chart type)
+can't reshape a fixed layout — degrade gracefully (the ErrorBoundary fallback)
+rather than crash; the user regenerates to get a new layout.
+
+(Copied charts — `linked: false` — don't need this: their shape is frozen at
+generation, so author them normally.)
+
 **Important:** The field IDs in metric queries use qualified names (e.g.,
 `orders_total_revenue`). When mapping to SDK calls:
 - **Base explore fields:** Strip the explore name prefix. `orders_total_revenue` → `total_revenue`
@@ -167,6 +257,7 @@ Each file contains:
 If the app is linked to one or more **external connections** (third-party HTTP APIs the project admin configured), you'll see a `[Linked external connections — each file in /tmp/external-data/ ...]` block at the top of this prompt and one JSON file per connection at **`/tmp/external-data/{alias}.json`**.
 
 Each file documents one connection:
+- `instructions` — admin-authored notes on how to use this API (auth quirks, pagination, which endpoints matter, response caveats). Present only when the admin wrote them; when present, read and follow them.
 - `signature` / `howToCall` — the exact typed SDK call. Auth is injected by Lightdash — never include credentials or API keys.
 - `origin` / `requestUrl` — the connection's base origin (host only) and how the URL is formed: **the full request URL is `origin + path`.** Your `path` is appended to the origin verbatim — the origin and the path prefix are NOT auto-prepended.
 - `rules` — hard requirements. The big ones: (1) **`path` is the COMPLETE path from the origin** — pass the whole path (e.g. `/repos/owner/repo/issues`, never a shortened `/issues`) and make sure it starts with one of `allowedPathPrefixes`. (2) **`query` is `Record<string, string>` — every query value MUST be a string** (`{ latitude: '52.52' }`, never `{ latitude: 52.52 }`); numbers and booleans are rejected with a 422. Read the response from `result.body`.
@@ -330,6 +421,11 @@ query('orders').label('KPI Summary').metrics(['total_revenue', 'order_count']).l
 **Always add `.label()`** — it describes what the query powers and is shown in the query inspector dev tools. Use a short human-readable name like "Revenue by Month Chart" or "Top Customers Table".
 
 The query inspector shows for each query: the label, status, row count, duration, explore name, dimensions, and metrics. If present, it also shows table calculations and additional metrics. Write clear labels so users can match each inspector entry to the component it powers.
+
+**Spread `lineage` on each query block** — `useLightdash` returns a `lineage`
+prop bag; spread it onto the root element of the card/table/chart that renders
+that query (e.g. `<Card {...lineage}>`). This lets users click a value to see
+which query produced it. One spread per query block is enough.
 
 ### Table calculations
 
@@ -941,10 +1037,10 @@ Lightdash that stores the origin (host) and credentials. The app references it b
 
 ```tsx
 const res = await lightdash.externalFetch('stripe', {
-    method: 'GET',          // 'GET' | 'POST' — defaults to 'GET'
+    method: 'GET',          // 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' — defaults to 'GET'. Must be one of the connection's allowed methods.
     path: '/v1/charges',    // COMPLETE path appended to the connection's origin (host). Full URL = origin + path. Must start with an allowed prefix; it is NOT relative to the prefix.
     query: { limit: '10' }, // Record<string, string> — values MUST be strings
-    // body: { ... },       // JSON body (POST only)
+    // body: { ... },       // JSON body — sent for every method except GET
 });
 
 // res.status      — upstream HTTP status (number)
@@ -1126,6 +1222,23 @@ export function RevenueBySegment() {
 ```
 
 **This applies to every `useLightdash()` call — no exceptions.** A chart that ignores `filtersFor(EXPLORE)` silently shows stale or contradictory data after the user filters.
+
+**Linked charts take global filters too — but with QUALIFIED field ids.** `savedChart(...).filters(...)` expects qualified ids (see "Linked vs. copied charts"), while global filters may carry inline-convention fields (short or dot-notation) or already-qualified ids (added from a linked chart's own menu). Qualify without double-prefixing:
+
+```tsx
+const qualify = (field) =>
+    field.includes('.') ? field.replace(/\./g, '_')
+    : field.startsWith(`${EXPLORE}_`) ? field
+    : `${EXPLORE}_${field}`;
+const linkedFilters = filtersFor(EXPLORE).map((f) => ({ ...f, field: qualify(f.field) }));
+```
+
+Filters may target ANY dimension of the chart's explore — selected on the chart or
+not; the query narrows server-side either way. Do NOT allowlist against the result
+`columns` (those are only the chart's selected fields — you'd silently drop valid
+filters). The explore-scoping of `filtersFor(EXPLORE)` is what keeps fields valid:
+they were added from charts on that explore. A field from OUTSIDE the explore fails
+the whole run with a 400.
 
 #### Active filters bar
 

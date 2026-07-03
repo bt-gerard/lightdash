@@ -48,6 +48,16 @@ type Pagination = KnexPaginateArgs & {
     totalResults: number;
 };
 
+export type AiAgentRequiredFilterMetadata = {
+    fieldId: string;
+    fieldRef: string;
+    tableName: string;
+    operator: string;
+    values?: unknown[];
+    settings?: unknown;
+    required: boolean;
+};
+
 export type ListExploresFn = () => Promise<Explore[]>;
 
 export type FindExploresFn = (args: {
@@ -61,6 +71,7 @@ export type FindExploresFn = (args: {
         aiHints?: string[];
         searchRank?: number;
         joinedTables?: string[] | null;
+        requiredFilters?: AiAgentRequiredFilterMetadata[];
     }>;
     topMatchingFields?: Array<{
         name: string;
@@ -74,16 +85,45 @@ export type FindExploresFn = (args: {
     }>;
 }>;
 
+// Project-wide verified-chart usage per field, keyed `table_field::fieldType`.
+// Used to rank verified/governed fields first in grep discovery.
+export type GetVerifiedFieldUsageFn = () => Promise<Map<string, number>>;
+
+export type FindFieldResult = {
+    fields: CatalogField[];
+    pagination: Pagination | undefined;
+};
+
 export type FindFieldFn = (
     args: KnexPaginateArgs & {
         table: ToolFindFieldsArgs['table'];
         fieldSearchQuery: ToolFindFieldsArgs['fieldSearchQueries'][number];
         explore: Explore;
     },
-) => Promise<{
-    fields: CatalogField[];
-    pagination: Pagination | undefined;
-}>;
+) => Promise<FindFieldResult>;
+
+export type FindFieldsSearchQuerySuccess = FindFieldResult & {
+    status: 'success';
+    searchQuery: string;
+};
+
+export type FindFieldsSearchQueryError = {
+    status: 'error';
+    searchQuery: string;
+    error: string;
+};
+
+export type FindFieldsSearchQueryResult =
+    | FindFieldsSearchQuerySuccess
+    | FindFieldsSearchQueryError;
+
+export type FindFieldsFn = (
+    args: KnexPaginateArgs & {
+        table: ToolFindFieldsArgs['table'];
+        fieldSearchQueries: ToolFindFieldsArgs['fieldSearchQueries'];
+        explore: Explore;
+    },
+) => Promise<FindFieldsSearchQueryResult[]>;
 
 export type SearchSemanticLayerFn = (args: {
     searchQuery: string | null;
@@ -446,6 +486,10 @@ export type RecordSqlApprovalFn = (
     toolCallId: string,
     decision: 'approved' | 'rejected',
     decidedByUserUuid: string | null,
+) => Promise<boolean>;
+
+export type IsThreadSqlAutoApprovedFn = (
+    threadUuid: string,
 ) => Promise<boolean>;
 
 export type LoadAgentSkillFn = (

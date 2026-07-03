@@ -179,6 +179,10 @@
                     "description": "Unique identifier for the filter rule",
                     "type": "string"
                 },
+                "includeNull": {
+                    "description": "For the `equals` operator on string fields, also match rows where the\nfield is null (compiles to `field IN (...) OR field IS NULL`). Lets users\ncombine null with selected values in a single \"is\" rule.",
+                    "type": "boolean"
+                },
                 "operator": {
                     "$ref": "#/$defs/FilterOperator",
                     "description": "Filter operator"
@@ -397,6 +401,9 @@
                     "$ref": "#/$defs/GaugeChartConfig"
                 },
                 {
+                    "$ref": "#/$defs/DataAppVizChartConfig"
+                },
+                {
                     "$ref": "#/$defs/MapChartConfig"
                 },
                 {
@@ -414,6 +421,10 @@
         },
         "ChartType.CUSTOM": {
             "enum": ["custom"],
+            "type": "string"
+        },
+        "ChartType.DATA_APP_VIZ": {
+            "enum": ["data_app_viz"],
             "type": "string"
         },
         "ChartType.FUNNEL": {
@@ -476,6 +487,7 @@
         },
         "Compact": {
             "enum": [
+                "auto",
                 "thousands",
                 "millions",
                 "billions",
@@ -1040,6 +1052,37 @@
             "required": ["type"],
             "type": "object"
         },
+        "DataAppVizChart": {
+            "properties": {
+                "dataAppVizUuid": {
+                    "description": "The reusable data app viz this chart renders with (by reference).",
+                    "type": "string"
+                },
+                "fieldMapping": {
+                    "$ref": "#/$defs/DataAppVizFieldMapping"
+                }
+            },
+            "required": ["fieldMapping", "dataAppVizUuid"],
+            "type": "object"
+        },
+        "DataAppVizChartConfig": {
+            "properties": {
+                "config": {
+                    "$ref": "#/$defs/DataAppVizChart",
+                    "description": "Reference to a data app viz plus its field mapping."
+                },
+                "type": {
+                    "$ref": "#/$defs/ChartType.DATA_APP_VIZ",
+                    "description": "Type of chart visualization"
+                }
+            },
+            "required": ["type"],
+            "type": "object"
+        },
+        "DataAppVizFieldMapping": {
+            "$ref": "#/$defs/Record_string.string_",
+            "description": "Maps a data app viz's field name → the host query field id bound to it."
+        },
         "DimensionOverrides": {
             "additionalProperties": {
                 "$ref": "#/$defs/Pick_Dimension.formatOptions_"
@@ -1329,6 +1372,7 @@
             "enum": [
                 "km",
                 "mi",
+                "si",
                 "usd",
                 "gbp",
                 "eur",
@@ -1938,6 +1982,10 @@
                     "description": "Unique identifier for the filter",
                     "type": "string"
                 },
+                "includeNull": {
+                    "description": "For the `equals` operator on string fields, also match rows where the\nfield is null (compiles to `field IN (...) OR field IS NULL`). Lets users\ncombine null with selected values in a single \"is\" rule.",
+                    "type": "boolean"
+                },
                 "operator": {
                     "$ref": "#/$defs/FilterOperator",
                     "description": "Filter operator"
@@ -2227,6 +2275,10 @@
                 },
                 "disabled": {
                     "description": "Whether this filter is disabled",
+                    "type": "boolean"
+                },
+                "includeNull": {
+                    "description": "For the `equals` operator on string fields, also match rows where the\nfield is null (compiles to `field IN (...) OR field IS NULL`). Lets users\ncombine null with selected values in a single \"is\" rule.",
                     "type": "boolean"
                 },
                 "operator": {
@@ -3406,6 +3458,20 @@
                         },
                         "type": {
                             "const": "gauge",
+                            "description": "Type of chart visualization"
+                        }
+                    },
+                    "required": ["type"],
+                    "type": "object"
+                },
+                {
+                    "properties": {
+                        "config": {
+                            "$ref": "#/$defs/DataAppVizChart",
+                            "description": "Reference to a data app viz plus its field mapping."
+                        },
+                        "type": {
+                            "const": "data_app_viz",
                             "description": "Type of chart visualization"
                         }
                     },

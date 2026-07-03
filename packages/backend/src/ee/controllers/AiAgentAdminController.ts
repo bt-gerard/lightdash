@@ -2,24 +2,31 @@ import {
     AiAgentAdminFilters,
     AiAgentAdminSort,
     AiAgentReviewItemStatus,
+    AiAgentReviewReplayCaptureRequest,
     ApiAiAgentAdminConversationsResponse,
     ApiAiAgentAdminPromptActivityResponse,
     ApiAiAgentReviewItemActivityResponse,
     ApiAiAgentReviewItemPrDiffResponse,
     ApiAiAgentReviewItemResponse,
     ApiAiAgentReviewItemsResponse,
+    ApiAiAgentReviewReplayCaptureResponse,
     ApiAiAgentReviewSignalsResponse,
     ApiAiAgentSummaryResponse,
     ApiAiOrganizationSettingsResponse,
+    ApiAiReviewNotificationSettingsResponse,
     ApiErrorPayload,
     ApiSuccessEmpty,
     ApiUpdateAiOrganizationSettingsResponse,
     assertRegisteredAccount,
+    CreateAiAgentReviewItem,
+    CreateAiAgentReviewItemComment,
     KnexPaginateArgs,
     ReorderAiAgentReviewItems,
     UpdateAiAgentReviewItemAssignee,
+    UpdateAiAgentReviewItemPriority,
     UpdateAiAgentReviewItemStatus,
     UpdateAiOrganizationSettings,
+    UpdateAiReviewNotificationSettings,
     type ApiAiAgentReviewItemWritebackPreviewResponse,
 } from '@lightdash/common';
 import {
@@ -31,6 +38,7 @@ import {
     Patch,
     Path,
     Post,
+    Put,
     Query,
     Request,
     Response,
@@ -191,6 +199,33 @@ export class AiAgentAdminController extends BaseController {
     }
 
     /**
+     * Create a manual AI agent issue
+     * @summary Create AI agent review item
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('201', 'Created')
+    @Post('/review-items')
+    @OperationId('createAiAgentReviewItem')
+    async createReviewItem(
+        @Request() req: express.Request,
+        @Body() body: CreateAiAgentReviewItem,
+    ): Promise<ApiAiAgentReviewItemResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(201);
+        return {
+            status: 'ok',
+            results: await this.getAiAgentAdminService().createReviewItem(
+                toSessionUser(req.account),
+                body,
+            ),
+        };
+    }
+
+    /**
      * Get AI agent classifier review signals for admin debugging
      * @summary List AI agent review signals
      */
@@ -214,6 +249,31 @@ export class AiAgentAdminController extends BaseController {
                 toSessionUser(req.account),
                 fingerprint,
             ),
+        };
+    }
+
+    /**
+     * Rebuild judge replay inputs for historical review signals so the eval
+     * scoreboard can replay the judge offline. Read-only; feature-flag gated.
+     * @summary Capture AI review judge replay inputs
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Post('/review-replay-capture')
+    @OperationId('captureAiAgentReviewReplayInputs')
+    async captureReviewReplayInputs(
+        @Request() req: express.Request,
+        @Body() body: AiAgentReviewReplayCaptureRequest,
+    ): Promise<ApiAiAgentReviewReplayCaptureResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results:
+                await this.getAiAgentAdminService().captureReviewReplayInputs(
+                    toSessionUser(req.account),
+                    body,
+                ),
         };
     }
 
@@ -371,6 +431,62 @@ export class AiAgentAdminController extends BaseController {
     }
 
     /**
+     * Set the priority on an AI agent review item
+     * @summary Update AI agent review item priority
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Success')
+    @Patch('/review-items/{fingerprint}/priority')
+    @OperationId('updateAiAgentReviewItemPriority')
+    async updateReviewItemPriority(
+        @Request() req: express.Request,
+        @Path() fingerprint: string,
+        @Body() body: UpdateAiAgentReviewItemPriority,
+    ): Promise<ApiAiAgentReviewItemResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const results =
+            await this.getAiAgentAdminService().updateReviewItemPriority(
+                toSessionUser(req.account),
+                fingerprint,
+                body,
+            );
+        return { status: 'ok', results };
+    }
+
+    /**
+     * Add a comment to an AI agent review item
+     * @summary Add AI agent review item comment
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('/review-items/{fingerprint}/comments')
+    @OperationId('addAiAgentReviewItemComment')
+    async addReviewItemComment(
+        @Request() req: express.Request,
+        @Path() fingerprint: string,
+        @Body() body: CreateAiAgentReviewItemComment,
+    ): Promise<ApiAiAgentReviewItemActivityResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const results =
+            await this.getAiAgentAdminService().addReviewItemComment(
+                toSessionUser(req.account),
+                fingerprint,
+                body.body,
+            );
+        return { status: 'ok', results };
+    }
+
+    /**
      * Open a writeback pull request for a review item (semantic-layer or
      * project-context root cause)
      * @summary Create AI agent review item writeback PR
@@ -487,6 +603,56 @@ export class AiAgentAdminController extends BaseController {
         return {
             status: 'ok',
             results,
+        };
+    }
+
+    /**
+     * Get AI review notification settings
+     * @summary Get AI review notification settings
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('/review-notification-settings')
+    @OperationId('getAiReviewNotificationSettings')
+    async getReviewNotificationSettings(
+        @Request() req: express.Request,
+    ): Promise<ApiAiReviewNotificationSettingsResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results:
+                await this.getAiAgentAdminService().getReviewNotificationSettings(
+                    toSessionUser(req.account),
+                ),
+        };
+    }
+
+    /**
+     * Update AI review notification settings
+     * @summary Update AI review notification settings
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Success')
+    @Put('/review-notification-settings')
+    @OperationId('updateAiReviewNotificationSettings')
+    async updateReviewNotificationSettings(
+        @Request() req: express.Request,
+        @Body() body: UpdateAiReviewNotificationSettings,
+    ): Promise<ApiAiReviewNotificationSettingsResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results:
+                await this.getAiAgentAdminService().updateReviewNotificationSettings(
+                    toSessionUser(req.account),
+                    body,
+                ),
         };
     }
 

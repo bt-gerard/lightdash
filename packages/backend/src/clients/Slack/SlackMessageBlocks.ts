@@ -31,13 +31,13 @@ const SLACK_LIMITS = {
 const DASHBOARD_CSV_COLLAPSE_THRESHOLD = 35;
 
 // Truncate text to fit Slack limits and add ellipsis if needed
-const truncateText = (text: string, maxLength: number): string => {
+export const truncateText = (text: string, maxLength: number): string => {
     if (!text || text.length <= maxLength) return text;
     return `${text.slice(0, maxLength - 3)}...`;
 };
 
 // Sanitize text to prevent invalid blocks
-const sanitizeText = (text: string | undefined): string => {
+export const sanitizeText = (text: string | undefined): string => {
     if (!text || text.trim() === '') return ' ';
     return text.trim();
 };
@@ -53,7 +53,7 @@ const sanitizeHeaderText = (text: string | undefined): string | undefined => {
 // Slack rejects button.url and image_url values that are malformed or longer
 // than 3000 chars. Returns undefined when the URL would be rejected so callers
 // can drop the surrounding block / accessory.
-const safeUrl = (
+export const safeUrl = (
     url: string | undefined,
     maxLength: number = SLACK_LIMITS.URL,
 ): string | undefined => {
@@ -489,6 +489,8 @@ export const getDashboardCsvResultsBlocks = ({
                             )}:* ${sanitizeText(f.error)}`;
                         case PartialFailureType.MISSING_TARGETS:
                             return `\t• No targets found for this scheduled delivery`;
+                        case PartialFailureType.AI_AUGMENTATION:
+                            return `\t• AI summary could not be generated`;
                         default:
                             return assertUnreachable(
                                 f,
@@ -519,6 +521,8 @@ export const getDashboardCsvResultsBlocks = ({
                         )}: ${sanitizeText(f.error)}`;
                     case PartialFailureType.MISSING_TARGETS:
                         return `\t• No targets found for this scheduled delivery`;
+                    case PartialFailureType.AI_AUGMENTATION:
+                        return `\t• AI summary could not be generated`;
                     default:
                         return assertUnreachable(
                             f,

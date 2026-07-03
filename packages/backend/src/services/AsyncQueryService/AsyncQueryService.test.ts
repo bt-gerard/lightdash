@@ -2,6 +2,7 @@ import { Ability } from '@casl/ability';
 import {
     Account,
     AnyType,
+    ChartType,
     CreateWarehouseCredentials,
     DimensionType,
     DownloadFileType,
@@ -11,6 +12,7 @@ import {
     FilterOperator,
     ForbiddenError,
     NotFoundError,
+    OrganizationAccessStatus,
     PossibleAbilities,
     QueryExecutionContext,
     QueryHistory,
@@ -22,6 +24,7 @@ import {
     WarehouseTypes,
 } from '@lightdash/common';
 import type { SshTunnel } from '@lightdash/warehouses';
+import ExecutionContext from 'node-execution-context';
 import { Readable } from 'stream';
 import { analyticsMock } from '../../analytics/LightdashAnalytics.mock';
 import type { S3CacheClient } from '../../clients/Aws/S3CacheClient';
@@ -47,6 +50,7 @@ import type { OrganizationModel } from '../../models/OrganizationModel';
 import type { OrganizationSettingsModel } from '../../models/OrganizationSettingsModel';
 import type { OrganizationWarehouseCredentialsModel } from '../../models/OrganizationWarehouseCredentialsModel';
 import type { ProjectCompileLogModel } from '../../models/ProjectCompileLogModel';
+import type { ProjectDbtSourcesModel } from '../../models/ProjectDbtSourcesModel';
 import type { ProjectModel } from '../../models/ProjectModel/ProjectModel';
 import { projectUuid } from '../../models/ProjectModel/ProjectModel.mock';
 import { ProjectParametersModel } from '../../models/ProjectParametersModel';
@@ -66,6 +70,7 @@ import { warehouseClientMock } from '../../utils/QueryBuilder/MetricQueryBuilder
 import { AdminNotificationService } from '../AdminNotificationService/AdminNotificationService';
 import type { ICacheService } from '../CacheService/ICacheService';
 import { CacheHitCacheResult, MissCacheResult } from '../CacheService/types';
+import { OrganizationAccessService } from '../OrganizationAccessService/OrganizationAccessService';
 import { PermissionsService } from '../PermissionsService/PermissionsService';
 import { PersistentDownloadFileService } from '../PersistentDownloadFileService/PersistentDownloadFileService';
 import { PivotTableService } from '../PivotTableService/PivotTableService';
@@ -108,26 +113,33 @@ const makeMockStrategy = (
     resolveResult: PreAggregateExecutionResolution,
 ): PreAggregateStrategy => ({
     getRoutingDecision: noOpStrategy.getRoutingDecision.bind(noOpStrategy),
-    resolveExecution: jest.fn(async () => resolveResult),
-    createExecutionWarehouseClient: jest.fn(
+    resolveExecution: vi.fn(async () => resolveResult),
+    createExecutionWarehouseClient: vi.fn(
         () => warehouseClientMock as unknown as WarehouseClient,
     ),
-    recordStats: jest.fn(),
-    cleanupStats: jest.fn(async () => 0),
+    recordStats: vi.fn(),
+    cleanupStats: vi.fn(async () => 0),
     getStats: noOpStrategy.getStats.bind(noOpStrategy),
-    getResultsStorageClient: jest.fn(() => undefined),
+    getResultsStorageClient: vi.fn(() => undefined),
     auditDashboard: noOpStrategy.auditDashboard.bind(noOpStrategy),
 });
 
 // Import the mocked function
 const mockSshTunnel = {
-    connect: jest.fn(() => warehouseClientMock.credentials),
-    disconnect: jest.fn(),
+    connect: vi.fn(() => warehouseClientMock.credentials),
+    disconnect: vi.fn(),
 } as unknown as SshTunnel<CreateWarehouseCredentials>;
 
-jest.mock('@lightdash/warehouses', () => ({
-    ...jest.requireActual('@lightdash/warehouses'),
-    SshTunnel: jest.fn(() => mockSshTunnel),
+vi.mock('@lightdash/warehouses', async () => ({
+    ...(await vi.importActual<typeof import('@lightdash/warehouses')>(
+        '@lightdash/warehouses',
+    )),
+    SshTunnel: vi.fn().mockImplementation(
+        // eslint-disable-next-line prefer-arrow-callback
+        function MockSshTunnel() {
+            return mockSshTunnel;
+        },
+    ),
 }));
 
 const warehouseCredentialsMock = {
@@ -136,46 +148,46 @@ const warehouseCredentialsMock = {
 };
 
 const projectModel = {
-    getWithSensitiveFields: jest.fn(async () => projectWithSensitiveFields),
-    get: jest.fn(async () => projectWithSensitiveFields),
-    getSummary: jest.fn(async () => projectSummary),
-    getTablesConfiguration: jest.fn(async () => tablesConfiguration),
-    updateTablesConfiguration: jest.fn(),
-    getQueryTimezone: jest.fn(async () => 'UTC'),
-    getExploreFromCache: jest.fn(async () => validExplore),
-    getProjectWarehouseConfig: jest.fn(async () => ({
+    getWithSensitiveFields: vi.fn(async () => projectWithSensitiveFields),
+    get: vi.fn(async () => projectWithSensitiveFields),
+    getSummary: vi.fn(async () => projectSummary),
+    getTablesConfiguration: vi.fn(async () => tablesConfiguration),
+    updateTablesConfiguration: vi.fn(),
+    getQueryTimezone: vi.fn(async () => 'UTC'),
+    getExploreFromCache: vi.fn(async () => validExplore),
+    getProjectWarehouseConfig: vi.fn(async () => ({
         organizationWarehouseCredentialsUuid: null,
         queryTimezone: null,
     })),
-    findExploresFromCache: jest.fn(async () => allExplores),
-    lockProcess: jest.fn((_projectUuid, fun) => fun()),
-    getWarehouseCredentialsForProject: jest.fn(
+    findExploresFromCache: vi.fn(async () => allExplores),
+    lockProcess: vi.fn((_projectUuid, fun) => fun()),
+    getWarehouseCredentialsForProject: vi.fn(
         async () => warehouseClientMock.credentials,
     ),
-    getWarehouseClientFromCredentials: jest.fn(() => ({
+    getWarehouseClientFromCredentials: vi.fn(() => ({
         ...warehouseClientMock,
-        runQuery: jest.fn(async () => resultsWith1Row),
+        runQuery: vi.fn(async () => resultsWith1Row),
     })),
-    findExploreByTableName: jest.fn(async () => validExplore),
+    findExploreByTableName: vi.fn(async () => validExplore),
 };
 const onboardingModel = {
-    getByOrganizationUuid: jest.fn(async () => ({
+    getByOrganizationUuid: vi.fn(async () => ({
         ranQueryAt: new Date(),
         shownSuccessAt: new Date(),
     })),
 };
 const savedChartModel = {
-    getAllSpaces: jest.fn(async () => spacesWithSavedCharts),
+    getAllSpaces: vi.fn(async () => spacesWithSavedCharts),
 };
 const jobModel = {
-    get: jest.fn(async () => job),
+    get: vi.fn(async () => job),
 };
 const spaceModel = {
-    getAllSpaces: jest.fn(async () => spacesWithSavedCharts),
+    getAllSpaces: vi.fn(async () => spacesWithSavedCharts),
 };
 
 const userAttributesModel = {
-    getAttributeValuesForOrgMember: jest.fn(async () => ({})),
+    getAttributeValuesForOrgMember: vi.fn(async () => ({})),
 };
 
 const getMockedAsyncQueryService = (
@@ -186,6 +198,7 @@ const getMockedAsyncQueryService = (
         lightdashConfig,
         analytics: analyticsMock,
         projectModel: projectModel as unknown as ProjectModel,
+        projectDbtSourcesModel: {} as unknown as ProjectDbtSourcesModel,
         preAggregateModel: {} as PreAggregateModel,
         onboardingModel: onboardingModel as unknown as OnboardingModel,
         savedChartModel: savedChartModel as unknown as SavedChartModel,
@@ -201,7 +214,7 @@ const getMockedAsyncQueryService = (
         analyticsModel: {} as AnalyticsModel,
         dashboardModel: {} as DashboardModel,
         userWarehouseCredentialsModel: {
-            findForProjectWithSecrets: jest.fn(async () => undefined),
+            findForProjectWithSecrets: vi.fn(async () => undefined),
         } as unknown as UserWarehouseCredentialsModel,
         warehouseAvailableTablesModel: {} as WarehouseAvailableTablesModel,
         emailModel: {
@@ -210,16 +223,16 @@ const getMockedAsyncQueryService = (
             }),
         } as unknown as EmailModel,
         schedulerClient: {
-            scheduleTask: jest.fn(),
+            scheduleTask: vi.fn(),
         } as unknown as SchedulerClient,
         natsClient: {
-            enqueueWarehouseQuery: jest.fn(async () => ({
+            enqueueWarehouseQuery: vi.fn(async () => ({
                 jobId: 'test-nats-job-id',
             })),
-            enqueuePreAggregateQuery: jest.fn(async () => ({
+            enqueuePreAggregateQuery: vi.fn(async () => ({
                 jobId: 'test-nats-pre-agg-job-id',
             })),
-            enqueueMaterializationQuery: jest.fn(async () => ({
+            enqueueMaterializationQuery: vi.fn(async () => ({
                 jobId: 'test-nats-materialization-job-id',
             })),
         } as unknown as INatsClient,
@@ -231,23 +244,23 @@ const getMockedAsyncQueryService = (
         contentModel: {} as ContentModel,
         encryptionUtil: {} as EncryptionUtil,
         downloadAuditModel: {
-            logDownload: jest.fn(),
+            logDownload: vi.fn(),
         } as unknown as DownloadAuditModel,
         queryHistoryModel: {
-            create: jest.fn(async () => ({ queryUuid: 'queryUuid' })),
-            get: jest.fn(async () => undefined),
-            getByQueryUuid: jest.fn(async () => undefined),
-            update: jest.fn(),
-            updateStatusToError: jest.fn(async () => 1),
-            updateStatusToQueued: jest.fn(async () => 1),
-            updateStatusToExecuting: jest.fn(async () => 1),
-            updateStatusToExpired: jest.fn(async () => 1),
+            create: vi.fn(async () => ({ queryUuid: 'queryUuid' })),
+            get: vi.fn(async () => undefined),
+            getByQueryUuid: vi.fn(async () => undefined),
+            update: vi.fn(),
+            updateStatusToError: vi.fn(async () => 1),
+            updateStatusToQueued: vi.fn(async () => 1),
+            updateStatusToExecuting: vi.fn(async () => 1),
+            updateStatusToExpired: vi.fn(async () => 1),
         } as unknown as QueryHistoryModel,
         userModel: {} as UserModel,
         savedSqlModel: {} as SavedSqlModel,
         resultsStorageClient: {
             isEnabled: true, // ! Hack for current tests that only check for results saved in S3
-            getDownloadStream: jest.fn(() => {
+            getDownloadStream: vi.fn(() => {
                 const readable = new Readable({
                     read() {
                         // Push some mock data and end the stream
@@ -257,33 +270,29 @@ const getMockedAsyncQueryService = (
                 });
                 return readable;
             }),
-            getFirstLine: jest.fn(async () => '{}'),
-            getFileUrl: jest.fn(
-                async () => 'https://example.com/results.jsonl',
-            ),
-            createUploadStream: jest.fn(() => ({
-                write: jest.fn(),
-                close: jest.fn(),
+            getFirstLine: vi.fn(async () => '{}'),
+            getFileUrl: vi.fn(async () => 'https://example.com/results.jsonl'),
+            createUploadStream: vi.fn(() => ({
+                write: vi.fn(),
+                close: vi.fn(),
             })),
         } as unknown as S3ResultsFileStorageClient,
         featureFlagModel: {
             // Mirror production behaviour: ResultsCacheEnabled resolves from
             // the env-derived lightdashConfig.results.cacheEnabled when there
             // is no DB row.
-            get: jest.fn(
-                async ({ featureFlagId }: { featureFlagId: string }) => {
-                    if (featureFlagId === FeatureFlags.ResultsCacheEnabled) {
-                        return {
-                            id: featureFlagId,
-                            enabled: lightdashConfig.results.cacheEnabled,
-                        };
-                    }
-                    return { id: featureFlagId, enabled: false };
-                },
-            ),
+            get: vi.fn(async ({ featureFlagId }: { featureFlagId: string }) => {
+                if (featureFlagId === FeatureFlags.ResultsCacheEnabled) {
+                    return {
+                        id: featureFlagId,
+                        enabled: lightdashConfig.results.cacheEnabled,
+                    };
+                }
+                return { id: featureFlagId, enabled: false };
+            }),
         } as unknown as FeatureFlagModel,
         projectParametersModel: {
-            find: jest.fn(async () => []),
+            find: vi.fn(async () => []),
         } as unknown as ProjectParametersModel,
         organizationWarehouseCredentialsModel:
             {} as OrganizationWarehouseCredentialsModel,
@@ -294,7 +303,7 @@ const getMockedAsyncQueryService = (
             downloadFileModel: {} as DownloadFileModel,
             persistentDownloadFileService: {} as PersistentDownloadFileService,
             organizationSettingsModel: {
-                get: jest.fn(async () => ({
+                get: vi.fn(async () => ({
                     queryLimit: null,
                     csvCellsLimit: null,
                 })),
@@ -302,11 +311,16 @@ const getMockedAsyncQueryService = (
         }),
         permissionsService: {} as PermissionsService,
         persistentDownloadFileService: {} as PersistentDownloadFileService,
+        organizationAccessService: {
+            getOrganizationAccess: vi.fn(async () => ({
+                status: OrganizationAccessStatus.ACTIVE,
+            })),
+        } as unknown as OrganizationAccessService,
         preAggregateStrategy: new NoOpPreAggregateStrategy(),
         projectCompileLogModel: {} as ProjectCompileLogModel,
         adminNotificationService: {} as AdminNotificationService,
         spacePermissionService: {
-            getSpaceAccessContext: jest.fn(async () => ({
+            getSpaceAccessContext: vi.fn(async () => ({
                 organizationUuid: projectSummary.organizationUuid,
                 projectUuid,
                 inheritsFromOrgOrProject: true,
@@ -314,7 +328,7 @@ const getMockedAsyncQueryService = (
             })),
         } as unknown as SpacePermissionService,
         organizationSettingsModel: {
-            get: jest.fn(async () => ({
+            get: vi.fn(async () => ({
                 queryLimit: null,
                 csvCellsLimit: null,
             })),
@@ -391,7 +405,7 @@ describe('AsyncQueryService', () => {
         test('uses the embedded dashboard for non-write JWTs', async () => {
             const service = getMockedAsyncQueryService(lightdashConfigMock, {
                 dashboardModel: {
-                    getByIdOrSlug: jest.fn(),
+                    getByIdOrSlug: vi.fn(),
                 } as unknown as DashboardModel,
             });
 
@@ -410,7 +424,7 @@ describe('AsyncQueryService', () => {
         test('uses request dashboard when it belongs to the embed write space', async () => {
             const service = getMockedAsyncQueryService(lightdashConfigMock, {
                 dashboardModel: {
-                    getByIdOrSlug: jest.fn(async () => ({
+                    getByIdOrSlug: vi.fn(async () => ({
                         uuid: 'request-dashboard-uuid',
                         name: 'Request dashboard',
                         organizationUuid: projectSummary.organizationUuid,
@@ -434,7 +448,7 @@ describe('AsyncQueryService', () => {
         test('falls back to embedded dashboard when request dashboard is outside the embed write space', async () => {
             const service = getMockedAsyncQueryService(lightdashConfigMock, {
                 dashboardModel: {
-                    getByIdOrSlug: jest.fn(async () => ({
+                    getByIdOrSlug: vi.fn(async () => ({
                         uuid: 'request-dashboard-uuid',
                         name: 'Request dashboard',
                         organizationUuid: projectSummary.organizationUuid,
@@ -469,14 +483,14 @@ describe('AsyncQueryService', () => {
             // clear in memory cache so new mock is applied
             serviceWithCache.warehouseClients = {};
             serviceWithCache.cacheService = {
-                isResultsCacheEnabled: jest.fn(async () => true),
-                findCachedResultsFile: jest.fn(async () => null),
+                isResultsCacheEnabled: vi.fn(async () => true),
+                findCachedResultsFile: vi.fn(async () => null),
             } as unknown as ICacheService;
 
-            jest.clearAllMocks();
+            vi.clearAllMocks();
 
             // Mock the resultsCacheModel.createOrGetExistingCache method
-            serviceWithCache.findResultsCache = jest.fn().mockImplementation(
+            serviceWithCache.findResultsCache = vi.fn().mockImplementation(
                 async () =>
                     ({
                         cacheHit: false,
@@ -508,21 +522,22 @@ describe('AsyncQueryService', () => {
             };
 
             (
-                serviceWithCache.findResultsCache as jest.Mock
+                serviceWithCache.findResultsCache as import('vitest').Mock
             ).mockResolvedValueOnce(mockCacheResult);
 
             (
-                serviceWithCache.queryHistoryModel.create as jest.Mock
+                serviceWithCache.queryHistoryModel
+                    .create as import('vitest').Mock
             ).mockResolvedValue({
                 queryUuid: 'test-query-uuid',
             });
 
             // Spy on methods to verify they are NOT called
-            const runAsyncWarehouseQuerySpy = jest.spyOn(
+            const runAsyncWarehouseQuerySpy = vi.spyOn(
                 serviceWithCache,
                 'runAsyncWarehouseQuery',
             );
-            const warehouseClientExecuteAsyncQuerySpy = jest.spyOn(
+            const warehouseClientExecuteAsyncQuerySpy = vi.spyOn(
                 warehouseClientMock,
                 'executeAsyncQuery',
             );
@@ -607,17 +622,18 @@ describe('AsyncQueryService', () => {
             };
 
             (
-                serviceWithCache.findResultsCache as jest.Mock
+                serviceWithCache.findResultsCache as import('vitest').Mock
             ).mockResolvedValueOnce(mockCacheResult);
 
             (
-                serviceWithCache.queryHistoryModel.create as jest.Mock
+                serviceWithCache.queryHistoryModel
+                    .create as import('vitest').Mock
             ).mockResolvedValue({
                 queryUuid: 'test-query-uuid',
             });
 
             // Spy on runAsyncWarehouseQuery to verify it IS called
-            const runAsyncWarehouseQuerySpy = jest
+            const runAsyncWarehouseQuerySpy = vi
                 .spyOn(serviceWithCache, 'runAsyncWarehouseQuery')
                 .mockResolvedValue(undefined);
 
@@ -707,7 +723,7 @@ describe('AsyncQueryService', () => {
         // apply a +TZ shift on flag-off orgs that have a project timezone.
         test('persists displayTimezone=null when flag is off, even if a resolved timezone exists', async () => {
             (
-                serviceWithCache.findResultsCache as jest.Mock
+                serviceWithCache.findResultsCache as import('vitest').Mock
             ).mockResolvedValueOnce({
                 cacheHit: false,
                 updatedAt: undefined,
@@ -715,10 +731,11 @@ describe('AsyncQueryService', () => {
             } satisfies MissCacheResult);
 
             (
-                serviceWithCache.queryHistoryModel.create as jest.Mock
+                serviceWithCache.queryHistoryModel
+                    .create as import('vitest').Mock
             ).mockResolvedValue({ queryUuid: 'test-query-uuid' });
 
-            jest.spyOn(
+            vi.spyOn(
                 serviceWithCache,
                 'runAsyncWarehouseQuery',
             ).mockResolvedValue(undefined);
@@ -764,7 +781,7 @@ describe('AsyncQueryService', () => {
 
         test('persists displayTimezone when flag is on', async () => {
             (
-                serviceWithCache.findResultsCache as jest.Mock
+                serviceWithCache.findResultsCache as import('vitest').Mock
             ).mockResolvedValueOnce({
                 cacheHit: false,
                 updatedAt: undefined,
@@ -772,10 +789,11 @@ describe('AsyncQueryService', () => {
             } satisfies MissCacheResult);
 
             (
-                serviceWithCache.queryHistoryModel.create as jest.Mock
+                serviceWithCache.queryHistoryModel
+                    .create as import('vitest').Mock
             ).mockResolvedValue({ queryUuid: 'test-query-uuid' });
 
-            jest.spyOn(
+            vi.spyOn(
                 serviceWithCache,
                 'runAsyncWarehouseQuery',
             ).mockResolvedValue(undefined);
@@ -824,17 +842,18 @@ describe('AsyncQueryService', () => {
             };
 
             (
-                serviceWithCache.findResultsCache as jest.Mock
+                serviceWithCache.findResultsCache as import('vitest').Mock
             ).mockResolvedValueOnce(mockCacheResult);
 
             (
-                serviceWithCache.queryHistoryModel.create as jest.Mock
+                serviceWithCache.queryHistoryModel
+                    .create as import('vitest').Mock
             ).mockResolvedValue({
                 queryUuid: 'test-query-uuid',
             });
 
             // Spy on runAsyncWarehouseQuery to verify it IS called
-            const runAsyncWarehouseQuerySpy = jest
+            const runAsyncWarehouseQuerySpy = vi
                 .spyOn(serviceWithCache, 'runAsyncWarehouseQuery')
                 .mockResolvedValue(undefined);
 
@@ -914,16 +933,17 @@ describe('AsyncQueryService', () => {
             };
 
             (
-                serviceWithCache.findResultsCache as jest.Mock
+                serviceWithCache.findResultsCache as import('vitest').Mock
             ).mockResolvedValueOnce(mockCacheResult);
 
             (
-                serviceWithCache.queryHistoryModel.create as jest.Mock
+                serviceWithCache.queryHistoryModel
+                    .create as import('vitest').Mock
             ).mockResolvedValue({
                 queryUuid: 'test-query-uuid',
             });
 
-            jest.spyOn(
+            vi.spyOn(
                 serviceWithCache,
                 'runAsyncWarehouseQuery',
             ).mockResolvedValue(undefined);
@@ -971,22 +991,23 @@ describe('AsyncQueryService', () => {
             // Clear cache and mocks for this service
             serviceWithoutCache.warehouseClients = {};
             serviceWithoutCache.cacheService = {
-                isResultsCacheEnabled: jest.fn(async () => false),
-                findCachedResultsFile: jest.fn(),
+                isResultsCacheEnabled: vi.fn(async () => false),
+                findCachedResultsFile: vi.fn(),
             } as unknown as ICacheService;
 
             (
-                serviceWithoutCache.queryHistoryModel.create as jest.Mock
+                serviceWithoutCache.queryHistoryModel
+                    .create as import('vitest').Mock
             ).mockResolvedValue({
                 queryUuid: 'test-query-uuid',
             });
 
             // Spy on cache and warehouse methods
-            const findResultsCacheSpy = jest.spyOn(
+            const findResultsCacheSpy = vi.spyOn(
                 serviceWithoutCache,
                 'findResultsCache',
             );
-            const runAsyncWarehouseQuerySpy = jest
+            const runAsyncWarehouseQuerySpy = vi
                 .spyOn(serviceWithoutCache, 'runAsyncWarehouseQuery')
                 .mockResolvedValue(undefined);
 
@@ -1067,17 +1088,18 @@ describe('AsyncQueryService', () => {
             };
 
             (
-                serviceWithCache.findResultsCache as jest.Mock
+                serviceWithCache.findResultsCache as import('vitest').Mock
             ).mockResolvedValueOnce(mockCacheResult);
 
             (
-                serviceWithCache.queryHistoryModel.create as jest.Mock
+                serviceWithCache.queryHistoryModel
+                    .create as import('vitest').Mock
             ).mockResolvedValue({
                 queryUuid: 'test-query-uuid',
             });
 
             // Spy on runAsyncWarehouseQuery to verify it is NOT called
-            const runAsyncWarehouseQuerySpy = jest.spyOn(
+            const runAsyncWarehouseQuerySpy = vi.spyOn(
                 serviceWithCache,
                 'runAsyncWarehouseQuery',
             );
@@ -1149,10 +1171,10 @@ describe('AsyncQueryService', () => {
             });
             (service as AnyType).preAggregateStrategy = mockStrategy;
 
-            const runAsyncWarehouseQuerySpy = jest
+            const runAsyncWarehouseQuerySpy = vi
                 .spyOn(service, 'runAsyncWarehouseQuery')
                 .mockResolvedValue(undefined);
-            const runAsyncPreAggregateQuerySpy = jest
+            const runAsyncPreAggregateQuerySpy = vi
                 .spyOn(service, 'runAsyncPreAggregateQuery')
                 .mockResolvedValue(undefined);
 
@@ -1213,15 +1235,17 @@ describe('AsyncQueryService', () => {
             });
             (service as AnyType).preAggregateStrategy = mockStrategy;
 
-            (service.queryHistoryModel.create as jest.Mock).mockResolvedValue({
+            (
+                service.queryHistoryModel.create as import('vitest').Mock
+            ).mockResolvedValue({
                 queryUuid: 'test-query-uuid',
             });
 
-            const runAsyncWarehouseSpy = jest.spyOn(
+            const runAsyncWarehouseSpy = vi.spyOn(
                 service,
                 'runAsyncWarehouseQuery',
             );
-            const runAsyncPreAggSpy = jest.spyOn(
+            const runAsyncPreAggSpy = vi.spyOn(
                 service,
                 'runAsyncPreAggregateQuery',
             );
@@ -1296,14 +1320,16 @@ describe('AsyncQueryService', () => {
             });
             (service as AnyType).preAggregateStrategy = mockStrategy;
 
-            (service.queryHistoryModel.create as jest.Mock).mockResolvedValue({
+            (
+                service.queryHistoryModel.create as import('vitest').Mock
+            ).mockResolvedValue({
                 queryUuid: 'test-query-uuid',
             });
 
-            const runAsyncWarehouseSpy = jest
+            const runAsyncWarehouseSpy = vi
                 .spyOn(service, 'runAsyncWarehouseQuery')
                 .mockResolvedValue(undefined);
-            const enqueuePreAggregateSpy = jest.spyOn(
+            const enqueuePreAggregateSpy = vi.spyOn(
                 service.natsClient,
                 'enqueuePreAggregateQuery',
             );
@@ -1381,14 +1407,16 @@ describe('AsyncQueryService', () => {
             });
             (service as AnyType).preAggregateStrategy = mockStrategy;
 
-            (service.queryHistoryModel.create as jest.Mock).mockResolvedValue({
+            (
+                service.queryHistoryModel.create as import('vitest').Mock
+            ).mockResolvedValue({
                 queryUuid: 'test-query-uuid',
             });
 
-            const runAsyncSpy = jest
+            const runAsyncSpy = vi
                 .spyOn(service, 'runAsyncWarehouseQuery')
                 .mockResolvedValue(undefined);
-            const enqueueWarehouseSpy = jest.spyOn(
+            const enqueueWarehouseSpy = vi.spyOn(
                 service.natsClient,
                 'enqueueWarehouseQuery',
             );
@@ -1435,6 +1463,72 @@ describe('AsyncQueryService', () => {
     });
 
     describe('executeAsyncMetricQuery', () => {
+        test('tags warehouse queries with the originating data app from the request context', async () => {
+            const service = getMockedAsyncQueryService(lightdashConfigMock);
+            service.getExploreWithUserAccessControls = vi
+                .fn()
+                .mockResolvedValue({
+                    explore: validExplore,
+                    userAccessControls: {
+                        userAttributes: {},
+                        intrinsicUserAttributes: {},
+                    },
+                });
+            (service as AnyType).getWarehouseCredentials = vi
+                .fn()
+                .mockResolvedValue(warehouseClientMock.credentials);
+            service.combineParameters = vi.fn().mockResolvedValue(undefined);
+            (service as AnyType).prepareMetricQueryAsyncQueryArgs = vi
+                .fn()
+                .mockResolvedValue({
+                    sql: 'SELECT * FROM test',
+                    fields: {},
+                    warnings: [],
+                    parameterReferences: [],
+                    missingParameterReferences: [],
+                    usedParameters: {},
+                    responseMetricQuery: metricQueryMock,
+                    userAccessControls: {
+                        userAttributes: {},
+                        intrinsicUserAttributes: {},
+                    },
+                    availableParameterDefinitions: {},
+                });
+            service['executeAsyncQuery'] = vi.fn().mockResolvedValue({
+                queryUuid: 'queryUuid',
+                cacheMetadata: {
+                    cacheHit: false,
+                },
+            });
+
+            // app_uuid rides in on the request-scoped ExecutionContext (stamped
+            // by requestExecutionContextMiddleware from the app header), not a
+            // query arg — so exercise the real context the same way.
+            await ExecutionContext.run(
+                () =>
+                    service.executeAsyncMetricQuery({
+                        account: sessionAccount,
+                        projectUuid,
+                        metricQuery: metricQueryMock,
+                        context: QueryExecutionContext.EXPLORE,
+                        invalidateCache: false,
+                        dateZoom: undefined,
+                        parameters: undefined,
+                        pivotConfiguration: undefined,
+                    }),
+                { app_uuid: 'app-uuid' },
+            );
+
+            expect(service['executeAsyncQuery']).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    queryTags: expect.objectContaining({
+                        app_uuid: 'app-uuid',
+                    }),
+                }),
+                expect.any(Object),
+            );
+        });
+
         test('attaches required pre-aggregate routing metadata for direct pre-aggregate explores', async () => {
             const mockStrategy: PreAggregateStrategy = {
                 ...makeMockStrategy({
@@ -1474,7 +1568,7 @@ describe('AsyncQueryService', () => {
                 },
             });
             (service as AnyType).preAggregateStrategy = mockStrategy;
-            service.getExploreWithUserAccessControls = jest
+            service.getExploreWithUserAccessControls = vi
                 .fn()
                 .mockResolvedValue({
                     explore: preAggregateExplore,
@@ -1483,11 +1577,11 @@ describe('AsyncQueryService', () => {
                         intrinsicUserAttributes: {},
                     },
                 });
-            (service as AnyType).getWarehouseCredentials = jest
+            (service as AnyType).getWarehouseCredentials = vi
                 .fn()
                 .mockResolvedValue(warehouseClientMock.credentials);
-            service.combineParameters = jest.fn().mockResolvedValue(undefined);
-            (service as AnyType).prepareMetricQueryAsyncQueryArgs = jest
+            service.combineParameters = vi.fn().mockResolvedValue(undefined);
+            (service as AnyType).prepareMetricQueryAsyncQueryArgs = vi
                 .fn()
                 .mockResolvedValue({
                     sql: 'SELECT * FROM duckdb_preagg',
@@ -1506,7 +1600,7 @@ describe('AsyncQueryService', () => {
                     },
                     availableParameterDefinitions: {},
                 });
-            service['executeAsyncQuery'] = jest.fn().mockResolvedValue({
+            service['executeAsyncQuery'] = vi.fn().mockResolvedValue({
                 queryUuid: 'queryUuid',
                 cacheMetadata: {
                     cacheHit: false,
@@ -1557,11 +1651,11 @@ describe('AsyncQueryService', () => {
             // clear in memory cache so new mock is applied
             serviceWithCache.warehouseClients = {};
             serviceWithCache.cacheService = {
-                isResultsCacheEnabled: jest.fn(async () => true),
-                findCachedResultsFile: jest.fn(async () => null),
+                isResultsCacheEnabled: vi.fn(async () => true),
+                findCachedResultsFile: vi.fn(async () => null),
             } as unknown as ICacheService;
 
-            jest.clearAllMocks();
+            vi.clearAllMocks();
         });
 
         const buildEmbedAiAccount = (embedWriteUserUuid: string) =>
@@ -1629,7 +1723,7 @@ describe('AsyncQueryService', () => {
             const embedWriteUserUuid = 'embed-write-user-uuid';
             const embedAiAccount = buildEmbedAiAccount(embedWriteUserUuid);
 
-            serviceWithCache.queryHistoryModel.get = jest
+            serviceWithCache.queryHistoryModel.get = vi
                 .fn()
                 .mockResolvedValue(
                     buildPendingAiQueryHistory(embedWriteUserUuid),
@@ -1652,7 +1746,7 @@ describe('AsyncQueryService', () => {
         test('rejects embedded AI agent JWTs polling AI queries from another user', async () => {
             const embedAiAccount = buildEmbedAiAccount('embed-write-user-uuid');
 
-            serviceWithCache.queryHistoryModel.get = jest
+            serviceWithCache.queryHistoryModel.get = vi
                 .fn()
                 .mockResolvedValue(
                     buildPendingAiQueryHistory('other-user-uuid'),
@@ -1711,10 +1805,10 @@ describe('AsyncQueryService', () => {
                 processingStartedAt: null,
             });
 
-            serviceWithCache.getExplore = jest
+            serviceWithCache.getExplore = vi
                 .fn()
                 .mockResolvedValue(validExplore);
-            serviceWithCache.queryHistoryModel.findMostRecentByCacheKey = jest
+            serviceWithCache.queryHistoryModel.findMostRecentByCacheKey = vi
                 .fn()
                 .mockResolvedValue(null);
 
@@ -1726,7 +1820,7 @@ describe('AsyncQueryService', () => {
                 'Test error message',
             );
             errorQuery.erroredAt = new Date('2026-03-30T09:00:00.000Z');
-            serviceWithCache.queryHistoryModel.get = jest
+            serviceWithCache.queryHistoryModel.get = vi
                 .fn()
                 .mockResolvedValue(errorQuery);
 
@@ -1749,7 +1843,7 @@ describe('AsyncQueryService', () => {
                 QueryHistoryStatus.EXPIRED,
                 'Query expired in queue',
             );
-            serviceWithCache.queryHistoryModel.get = jest
+            serviceWithCache.queryHistoryModel.get = vi
                 .fn()
                 .mockResolvedValue(expiredQuery);
 
@@ -1772,7 +1866,7 @@ describe('AsyncQueryService', () => {
             const pendingQuery = createMockQueryHistory(
                 QueryHistoryStatus.PENDING,
             );
-            serviceWithCache.queryHistoryModel.get = jest
+            serviceWithCache.queryHistoryModel.get = vi
                 .fn()
                 .mockResolvedValue(pendingQuery);
 
@@ -1792,7 +1886,7 @@ describe('AsyncQueryService', () => {
             const queuedQuery = createMockQueryHistory(
                 QueryHistoryStatus.QUEUED,
             );
-            serviceWithCache.queryHistoryModel.get = jest
+            serviceWithCache.queryHistoryModel.get = vi
                 .fn()
                 .mockResolvedValue(queuedQuery);
 
@@ -1812,7 +1906,7 @@ describe('AsyncQueryService', () => {
             const executingQuery = createMockQueryHistory(
                 QueryHistoryStatus.EXECUTING,
             );
-            serviceWithCache.queryHistoryModel.get = jest
+            serviceWithCache.queryHistoryModel.get = vi
                 .fn()
                 .mockResolvedValue(executingQuery);
 
@@ -1835,7 +1929,7 @@ describe('AsyncQueryService', () => {
             const cancelledQuery = createMockQueryHistory(
                 QueryHistoryStatus.CANCELLED,
             );
-            serviceWithCache.queryHistoryModel.get = jest
+            serviceWithCache.queryHistoryModel.get = vi
                 .fn()
                 .mockResolvedValue(cancelledQuery);
 
@@ -1860,7 +1954,7 @@ describe('AsyncQueryService', () => {
                 null,
                 null,
             );
-            serviceWithCache.queryHistoryModel.get = jest
+            serviceWithCache.queryHistoryModel.get = vi
                 .fn()
                 .mockResolvedValue(readyQueryWithoutFile);
 
@@ -1952,15 +2046,13 @@ describe('AsyncQueryService', () => {
                 processingStartedAt: null,
             };
 
-            serviceWithCache.queryHistoryModel.get = jest
+            serviceWithCache.queryHistoryModel.get = vi
                 .fn()
                 .mockResolvedValue(mockQueryHistory);
-            serviceWithCache.getResultsPageFromS3 = jest
-                .fn()
-                .mockResolvedValue({
-                    rows: [expectedFormattedRow],
-                });
-            serviceWithCache.getExplore = jest
+            serviceWithCache.getResultsPageFromS3 = vi.fn().mockResolvedValue({
+                rows: [expectedFormattedRow],
+            });
+            serviceWithCache.getExplore = vi
                 .fn()
                 .mockResolvedValue(validExplore);
 
@@ -2076,17 +2168,17 @@ describe('AsyncQueryService', () => {
         it('falls back to a flat CSV export when a pivotConfig is requested but the query stored no pivot details', async () => {
             const service = getMockedAsyncQueryService(lightdashConfigMock);
             const internals = asInternals(service);
-            service.queryHistoryModel.get = jest
+            service.queryHistoryModel.get = vi
                 .fn()
                 .mockResolvedValue(baseReadyQueryHistory({}));
 
-            const pivotSpy = jest
+            const pivotSpy = vi
                 .spyOn(service.pivotTableService, 'downloadAsyncPivotTableCsv')
                 .mockResolvedValue({
                     fileUrl: 'should-not-be-used',
                     truncated: false,
                 });
-            const flatSpy = jest
+            const flatSpy = vi
                 .spyOn(internals, 'downloadAsyncQueryResultsAsFormattedFile')
                 .mockResolvedValue({ fileUrl: 'flat-url', truncated: false });
 
@@ -2108,7 +2200,7 @@ describe('AsyncQueryService', () => {
         it('uses the pivot CSV export when the query stored pivot details', async () => {
             const service = getMockedAsyncQueryService(lightdashConfigMock);
             const internals = asInternals(service);
-            service.queryHistoryModel.get = jest.fn().mockResolvedValue(
+            service.queryHistoryModel.get = vi.fn().mockResolvedValue(
                 baseReadyQueryHistory({
                     pivotConfiguration: {
                         indexColumn: {
@@ -2138,10 +2230,10 @@ describe('AsyncQueryService', () => {
                 }),
             );
 
-            const pivotSpy = jest
+            const pivotSpy = vi
                 .spyOn(service.pivotTableService, 'downloadAsyncPivotTableCsv')
                 .mockResolvedValue({ fileUrl: 'pivot-url', truncated: false });
-            const flatSpy = jest
+            const flatSpy = vi
                 .spyOn(internals, 'downloadAsyncQueryResultsAsFormattedFile')
                 .mockResolvedValue({ fileUrl: 'flat-url', truncated: false });
 
@@ -2163,7 +2255,7 @@ describe('AsyncQueryService', () => {
         it('pivots based on stored pivot details even when the request omits pivotConfig', async () => {
             const service = getMockedAsyncQueryService(lightdashConfigMock);
             const internals = asInternals(service);
-            service.queryHistoryModel.get = jest.fn().mockResolvedValue(
+            service.queryHistoryModel.get = vi.fn().mockResolvedValue(
                 baseReadyQueryHistory({
                     pivotConfiguration: {
                         indexColumn: {
@@ -2194,10 +2286,10 @@ describe('AsyncQueryService', () => {
                 }),
             );
 
-            const pivotSpy = jest
+            const pivotSpy = vi
                 .spyOn(service.pivotTableService, 'downloadAsyncPivotTableCsv')
                 .mockResolvedValue({ fileUrl: 'pivot-url', truncated: false });
-            const flatSpy = jest
+            const flatSpy = vi
                 .spyOn(internals, 'downloadAsyncQueryResultsAsFormattedFile')
                 .mockResolvedValue({ fileUrl: 'flat-url', truncated: false });
 
@@ -2228,7 +2320,7 @@ describe('AsyncQueryService', () => {
         it('does not pivot when the user opts out via exportPivotedData=false', async () => {
             const service = getMockedAsyncQueryService(lightdashConfigMock);
             const internals = asInternals(service);
-            service.queryHistoryModel.get = jest.fn().mockResolvedValue(
+            service.queryHistoryModel.get = vi.fn().mockResolvedValue(
                 baseReadyQueryHistory({
                     pivotConfiguration: {
                         indexColumn: {
@@ -2259,13 +2351,13 @@ describe('AsyncQueryService', () => {
                 }),
             );
 
-            const pivotSpy = jest
+            const pivotSpy = vi
                 .spyOn(service.pivotTableService, 'downloadAsyncPivotTableCsv')
                 .mockResolvedValue({
                     fileUrl: 'should-not-be-used',
                     truncated: false,
                 });
-            const flatSpy = jest
+            const flatSpy = vi
                 .spyOn(internals, 'downloadAsyncQueryResultsAsFormattedFile')
                 .mockResolvedValue({ fileUrl: 'flat-url', truncated: false });
 
@@ -2302,9 +2394,9 @@ describe('AsyncQueryService', () => {
             ]);
             const queryHistory = createQueryHistory();
 
-            (service.queryHistoryModel.get as jest.Mock).mockResolvedValue(
-                queryHistory,
-            );
+            (
+                service.queryHistoryModel.get as import('vitest').Mock
+            ).mockResolvedValue(queryHistory);
 
             await expect(
                 service.getAsyncQueryHistory({
@@ -2320,9 +2412,9 @@ describe('AsyncQueryService', () => {
             const account = buildAccount();
             account.user.ability = new Ability<PossibleAbilities>([]);
 
-            (service.queryHistoryModel.get as jest.Mock).mockResolvedValue(
-                createQueryHistory(),
-            );
+            (
+                service.queryHistoryModel.get as import('vitest').Mock
+            ).mockResolvedValue(createQueryHistory());
 
             await expect(
                 service.getAsyncQueryHistory({
@@ -2389,7 +2481,7 @@ describe('AsyncQueryService', () => {
         });
 
         afterEach(() => {
-            jest.restoreAllMocks();
+            vi.restoreAllMocks();
         });
 
         it('returns the ready query history when the query completes before the deadline', async () => {
@@ -2400,7 +2492,7 @@ describe('AsyncQueryService', () => {
             const readyQueryHistory = createMockQueryHistory(
                 QueryHistoryStatus.READY,
             );
-            const getAsyncQueryHistory = jest
+            const getAsyncQueryHistory = vi
                 .spyOn(service, 'getAsyncQueryHistory')
                 .mockResolvedValueOnce(queuedQueryHistory)
                 .mockResolvedValueOnce(readyQueryHistory);
@@ -2417,7 +2509,7 @@ describe('AsyncQueryService', () => {
             const queuedQueryHistory = createMockQueryHistory(
                 QueryHistoryStatus.QUEUED,
             );
-            const getAsyncQueryHistory = jest
+            const getAsyncQueryHistory = vi
                 .spyOn(service, 'getAsyncQueryHistory')
                 .mockResolvedValueOnce(queuedQueryHistory);
 
@@ -2439,7 +2531,7 @@ describe('AsyncQueryService', () => {
             async (status) => {
                 const service = getMockedAsyncQueryService(lightdashConfigMock);
                 const terminalQueryHistory = createMockQueryHistory(status);
-                const getAsyncQueryHistory = jest
+                const getAsyncQueryHistory = vi
                     .spyOn(service, 'getAsyncQueryHistory')
                     .mockResolvedValueOnce(terminalQueryHistory);
 
@@ -2457,7 +2549,7 @@ describe('AsyncQueryService', () => {
             const queuedQueryHistory = createMockQueryHistory(
                 QueryHistoryStatus.QUEUED,
             );
-            const getAsyncQueryHistory = jest
+            const getAsyncQueryHistory = vi
                 .spyOn(service, 'getAsyncQueryHistory')
                 .mockResolvedValue(queuedQueryHistory);
 
@@ -2483,7 +2575,9 @@ describe('AsyncQueryService', () => {
             const account = buildAccount();
             account.user.ability = new Ability<PossibleAbilities>([]);
 
-            (service.queryHistoryModel.get as jest.Mock).mockResolvedValue({
+            (
+                service.queryHistoryModel.get as import('vitest').Mock
+            ).mockResolvedValue({
                 queryUuid: 'test-query-uuid',
                 projectUuid,
                 organizationUuid: projectSummary.organizationUuid,
@@ -2549,7 +2643,8 @@ describe('AsyncQueryService', () => {
         test('transitions queued queries to executing', async () => {
             const service = getMockedAsyncQueryService(lightdashConfigMock);
             (
-                service.queryHistoryModel.getByQueryUuid as jest.Mock
+                service.queryHistoryModel
+                    .getByQueryUuid as import('vitest').Mock
             ).mockResolvedValue(
                 createMockQueryHistory(QueryHistoryStatus.QUEUED),
             );
@@ -2577,7 +2672,8 @@ describe('AsyncQueryService', () => {
                 },
             });
             (
-                service.queryHistoryModel.getByQueryUuid as jest.Mock
+                service.queryHistoryModel
+                    .getByQueryUuid as import('vitest').Mock
             ).mockResolvedValue(
                 createMockQueryHistory(
                     QueryHistoryStatus.QUEUED,
@@ -2621,12 +2717,12 @@ describe('AsyncQueryService', () => {
         beforeEach(() => {
             serviceWithCache.warehouseClients = {};
             serviceWithCache.cacheService = {
-                isResultsCacheEnabled: jest.fn(async () => true),
-                findCachedResultsFile: jest.fn(async () => null),
+                isResultsCacheEnabled: vi.fn(async () => true),
+                findCachedResultsFile: vi.fn(async () => null),
             } as unknown as ICacheService;
-            jest.clearAllMocks();
+            vi.clearAllMocks();
 
-            serviceWithCache.findResultsCache = jest
+            serviceWithCache.findResultsCache = vi
                 .fn()
                 .mockImplementation(async () => ({
                     cacheHit: false,
@@ -2643,15 +2739,16 @@ describe('AsyncQueryService', () => {
             };
 
             (
-                serviceWithCache.findResultsCache as jest.Mock
+                serviceWithCache.findResultsCache as import('vitest').Mock
             ).mockResolvedValueOnce(mockCacheResult);
             (
-                serviceWithCache.queryHistoryModel.create as jest.Mock
+                serviceWithCache.queryHistoryModel
+                    .create as import('vitest').Mock
             ).mockResolvedValue({
                 queryUuid: 'test-query-uuid',
             });
 
-            const runAsyncWarehouseQuerySpy = jest
+            const runAsyncWarehouseQuerySpy = vi
                 .spyOn(serviceWithCache, 'runAsyncWarehouseQuery')
                 .mockResolvedValue(undefined);
 
@@ -2713,22 +2810,22 @@ describe('AsyncQueryService', () => {
             };
 
             beforeEach(() => {
-                (mockSshTunnel.connect as jest.Mock).mockReturnValueOnce(
-                    Promise.resolve(sshTunnelCredentials),
-                );
+                (
+                    mockSshTunnel.connect as import('vitest').Mock
+                ).mockReturnValueOnce(Promise.resolve(sshTunnelCredentials));
             });
 
             test('SSH Tunnel Integration - Complete Flow', async () => {
                 // GIVEN: Credentials contain SSH tunnel configuration
                 const mockProjectModel = {
                     ...projectModel,
-                    getWarehouseCredentialsForProject: jest.fn(() =>
+                    getWarehouseCredentialsForProject: vi.fn(() =>
                         Promise.resolve(originalCredentials),
                     ),
-                    getWarehouseClientFromCredentials: jest.fn(() => ({
+                    getWarehouseClientFromCredentials: vi.fn(() => ({
                         ...warehouseClientMock,
                         credentials: sshTunnelCredentials,
-                        runQuery: jest.fn(async () => resultsWith1Row),
+                        runQuery: vi.fn(async () => resultsWith1Row),
                     })),
                 };
 
@@ -2741,14 +2838,14 @@ describe('AsyncQueryService', () => {
                 );
 
                 // Mock query history update
-                service.queryHistoryModel.update = jest.fn();
+                service.queryHistoryModel.update = vi.fn();
 
-                const getWarehouseClientSpy = jest.spyOn(
+                const getWarehouseClientSpy = vi.spyOn(
                     service,
                     '_getWarehouseClient',
                 );
 
-                const runQueryAndTransformRowsSpy = jest.spyOn(
+                const runQueryAndTransformRowsSpy = vi.spyOn(
                     AsyncQueryService,
                     'runQueryAndTransformRows',
                 );
@@ -2820,12 +2917,12 @@ describe('AsyncQueryService', () => {
             // GIVEN: Valid warehouse credentials and query
             const mockProjectModel = {
                 ...projectModel,
-                getWarehouseCredentialsForProject: jest.fn(() =>
+                getWarehouseCredentialsForProject: vi.fn(() =>
                     Promise.resolve(warehouseClientMock.credentials),
                 ),
-                getWarehouseClientFromCredentials: jest.fn(() => ({
+                getWarehouseClientFromCredentials: vi.fn(() => ({
                     ...warehouseClientMock,
-                    runQuery: jest.fn(async () => resultsWith1Row),
+                    runQuery: vi.fn(async () => resultsWith1Row),
                 })),
             };
 
@@ -2836,17 +2933,17 @@ describe('AsyncQueryService', () => {
             // Mock storage client methods
             const mockStorageClient =
                 service.resultsStorageClient as unknown as {
-                    createUploadStream: jest.Mock;
+                    createUploadStream: import('vitest').Mock;
                 };
-            mockStorageClient.createUploadStream = jest.fn(() => ({
-                write: jest.fn(),
-                close: jest.fn(),
+            mockStorageClient.createUploadStream = vi.fn(() => ({
+                write: vi.fn(),
+                close: vi.fn(),
             }));
 
             // Mock query history update
-            service.queryHistoryModel.update = jest.fn();
+            service.queryHistoryModel.update = vi.fn();
 
-            const runQueryAndTransformRowsSpy = jest.spyOn(
+            const runQueryAndTransformRowsSpy = vi.spyOn(
                 AsyncQueryService,
                 'runQueryAndTransformRows',
             );
@@ -2910,7 +3007,7 @@ describe('AsyncQueryService', () => {
 
     describe('materializationRole', () => {
         afterEach(() => {
-            jest.restoreAllMocks();
+            vi.restoreAllMocks();
         });
 
         it('uses materializationRole instead of the triggering user context during materialization execution', async () => {
@@ -2929,7 +3026,7 @@ describe('AsyncQueryService', () => {
                 },
             };
 
-            service.getUserAttributes = jest.fn(async () => ({
+            service.getUserAttributes = vi.fn(async () => ({
                 userAttributes: {
                     allowed_regions: ['viewer-region'],
                 },
@@ -2937,10 +3034,10 @@ describe('AsyncQueryService', () => {
                     email: 'viewer@example.com',
                 },
             }));
-            jest.spyOn(projectModel, 'getExploreFromCache').mockResolvedValue(
+            vi.spyOn(projectModel, 'getExploreFromCache').mockResolvedValue(
                 materializationExplore,
             );
-            service['executeAsyncQuery'] = jest.fn().mockResolvedValue({
+            service['executeAsyncQuery'] = vi.fn().mockResolvedValue({
                 queryUuid: 'queryUuid',
                 cacheMetadata: {
                     cacheHit: false,
@@ -3016,34 +3113,34 @@ describe('AsyncQueryService', () => {
 
                 service.warehouseClients = {};
                 service.cacheService = {
-                    isResultsCacheEnabled: jest.fn(async () => true),
-                    findCachedResultsFile: jest.fn(async () => null),
+                    isResultsCacheEnabled: vi.fn(async () => true),
+                    findCachedResultsFile: vi.fn(async () => null),
                 } as unknown as ICacheService;
 
-                service.findResultsCache = jest.fn().mockResolvedValue({
+                service.findResultsCache = vi.fn().mockResolvedValue({
                     cacheHit: false,
                     updatedAt: undefined,
                     expiresAt: undefined,
                 } satisfies MissCacheResult);
 
                 (
-                    service.queryHistoryModel.create as jest.Mock
+                    service.queryHistoryModel.create as import('vitest').Mock
                 ).mockResolvedValue({
                     queryUuid: 'test-query-uuid',
                 });
 
-                jest.spyOn(service, 'runAsyncWarehouseQuery').mockResolvedValue(
+                vi.spyOn(service, 'runAsyncWarehouseQuery').mockResolvedValue(
                     undefined,
                 );
 
-                service.getUserAttributes = jest.fn(async () => ({
+                service.getUserAttributes = vi.fn(async () => ({
                     userAttributes: {},
                     intrinsicUserAttributes: { email: 'test@example.com' },
                 }));
 
                 const mockWarehouseClient = {
                     ...warehouseClientMock,
-                    streamQuery: jest.fn(async (_sql, callback) => {
+                    streamQuery: vi.fn(async (_sql, callback) => {
                         await callback({
                             fields: {
                                 test_col: { type: DimensionType.STRING },
@@ -3053,9 +3150,10 @@ describe('AsyncQueryService', () => {
                     }),
                 };
 
-                service._getWarehouseClient = jest.fn(async () => ({
+                service._getWarehouseClient = vi.fn(async () => ({
                     warehouseClient: mockWarehouseClient,
                     sshTunnel: mockSshTunnel,
+                    tunnelConnectMs: null,
                 }));
 
                 await service.executeAsyncSqlQuery({
@@ -3079,26 +3177,26 @@ describe('AsyncQueryService', () => {
             it('should replace user attributes in SQL queries', async () => {
                 // GIVEN: Service with mocked user attributes
                 const mockUserModel = {
-                    findSessionUserByUUID: jest.fn(async () => ({
+                    findSessionUserByUUID: vi.fn(async () => ({
                         email: 'test@example.com',
                     })),
                 };
 
                 const mockUserAttributesModel = {
-                    getAttributeValuesForOrgMember: jest.fn(async () => ({
+                    getAttributeValuesForOrgMember: vi.fn(async () => ({
                         department: ['engineering'],
                         region: ['us-west'],
                     })),
                 };
 
                 const mockEmailModel = {
-                    getPrimaryEmailStatus: jest.fn(async () => ({
+                    getPrimaryEmailStatus: vi.fn(async () => ({
                         isVerified: true,
                     })),
                 };
 
                 const mockProjectParametersModel = {
-                    find: jest.fn(async () => []),
+                    find: vi.fn(async () => []),
                 };
 
                 const service = getMockedAsyncQueryService(
@@ -3114,7 +3212,7 @@ describe('AsyncQueryService', () => {
                 );
 
                 // Mock getUserAttributes method to return the expected attributes
-                service.getUserAttributes = jest.fn(async () => ({
+                service.getUserAttributes = vi.fn(async () => ({
                     userAttributes: {
                         department: ['engineering'],
                         region: ['us-west'],
@@ -3128,7 +3226,7 @@ describe('AsyncQueryService', () => {
                 let capturedSql = '';
                 const mockWarehouseClient = {
                     ...warehouseClientMock,
-                    streamQuery: jest.fn(async (sql, callback) => {
+                    streamQuery: vi.fn(async (sql, callback) => {
                         capturedSql = sql;
                         // Simulate empty results for column discovery
                         await callback({
@@ -3141,9 +3239,10 @@ describe('AsyncQueryService', () => {
                 };
 
                 // Override the _getWarehouseClient method to return our mock
-                service._getWarehouseClient = jest.fn(async () => ({
+                service._getWarehouseClient = vi.fn(async () => ({
                     warehouseClient: mockWarehouseClient,
                     sshTunnel: mockSshTunnel,
+                    tunnelConnectMs: null,
                 }));
 
                 // WHEN: executeAsyncSqlQuery is called with SQL containing user attributes
@@ -3168,7 +3267,7 @@ describe('AsyncQueryService', () => {
                 });
 
                 const createCall = (
-                    service.queryHistoryModel.create as jest.Mock
+                    service.queryHistoryModel.create as import('vitest').Mock
                 ).mock.calls[0][1];
                 expect(createCall.requestParameters).toEqual(
                     expect.objectContaining({
@@ -3182,7 +3281,7 @@ describe('AsyncQueryService', () => {
             it('should handle missing user attributes gracefully', async () => {
                 // GIVEN: Service with no user attributes
                 const mockProjectParametersModel = {
-                    find: jest.fn(async () => []),
+                    find: vi.fn(async () => []),
                 };
 
                 const service = getMockedAsyncQueryService(
@@ -3194,7 +3293,7 @@ describe('AsyncQueryService', () => {
                 );
 
                 // Mock getUserAttributes to return empty attributes
-                service.getUserAttributes = jest.fn(async () => ({
+                service.getUserAttributes = vi.fn(async () => ({
                     userAttributes: {},
                     intrinsicUserAttributes: { email: 'test@example.com' },
                 }));
@@ -3218,7 +3317,7 @@ describe('AsyncQueryService', () => {
             it('should handle unverified email by not replacing intrinsic attributes', async () => {
                 // GIVEN: Service with unverified email (empty intrinsic attributes)
                 const mockProjectParametersModel = {
-                    find: jest.fn(async () => []),
+                    find: vi.fn(async () => []),
                 };
 
                 const service = getMockedAsyncQueryService(
@@ -3230,7 +3329,7 @@ describe('AsyncQueryService', () => {
                 );
 
                 // Mock getUserAttributes to return empty intrinsic attributes (unverified email)
-                service.getUserAttributes = jest.fn(async () => ({
+                service.getUserAttributes = vi.fn(async () => ({
                     userAttributes: {},
                     intrinsicUserAttributes: {}, // Empty because email is not verified
                 }));
@@ -3269,7 +3368,7 @@ describe('AsyncQueryService', () => {
                 }[] = [],
             ) => {
                 const mockProjectParametersModel = {
-                    find: jest.fn(async () => projectParameterConfigs),
+                    find: vi.fn(async () => projectParameterConfigs),
                 };
 
                 const service = getMockedAsyncQueryService(
@@ -3280,19 +3379,20 @@ describe('AsyncQueryService', () => {
                     },
                 );
 
-                service.getUserAttributes = jest.fn(async () => ({
+                service.getUserAttributes = vi.fn(async () => ({
                     userAttributes: {},
                     intrinsicUserAttributes: { email: 'test@example.com' },
                 }));
 
-                const streamQuery = jest.fn();
+                const streamQuery = vi.fn();
 
-                service._getWarehouseClient = jest.fn(async () => ({
+                service._getWarehouseClient = vi.fn(async () => ({
                     warehouseClient: {
                         ...warehouseClientMock,
                         streamQuery,
                     },
                     sshTunnel: mockSshTunnel,
+                    tunnelConnectMs: null,
                 }));
 
                 return { service, streamQuery };
@@ -3334,7 +3434,7 @@ describe('AsyncQueryService', () => {
 
         describe('legacy total and subtotal flows', () => {
             beforeEach(() => {
-                jest.clearAllMocks();
+                vi.clearAllMocks();
             });
 
             it('preserves dashboard filters and parameter precedence for saved chart totals', async () => {
@@ -3348,17 +3448,17 @@ describe('AsyncQueryService', () => {
 
                 const warehouseClient = {
                     ...warehouseClientMock,
-                    runQuery: jest.fn(),
-                    executeAsyncQuery: jest.fn(
+                    runQuery: vi.fn(),
+                    executeAsyncQuery: vi.fn(
                         warehouseClientMock.executeAsyncQuery,
                     ),
                 };
 
                 (
-                    projectModel.getWarehouseClientFromCredentials as jest.Mock
+                    projectModel.getWarehouseClientFromCredentials as import('vitest').Mock
                 ).mockReturnValue(warehouseClient);
                 (service as AnyType).savedChartModel = {
-                    get: jest.fn().mockResolvedValue({
+                    get: vi.fn().mockResolvedValue({
                         uuid: 'chart-1',
                         organizationUuid: projectSummary.organizationUuid,
                         projectUuid,
@@ -3372,17 +3472,19 @@ describe('AsyncQueryService', () => {
                     }),
                 };
                 (service as AnyType).spacePermissionService = {
-                    getSpaceAccessContext: jest.fn().mockResolvedValue({
+                    getSpaceAccessContext: vi.fn().mockResolvedValue({
                         organizationUuid: projectSummary.organizationUuid,
                         projectUuid,
                         inheritsFromOrgOrProject: true,
                         access: [],
                     }),
                 };
-                service.pollForQueryCompletion = jest
+                service.pollForQueryCompletion = vi
                     .fn()
                     .mockResolvedValue(undefined);
-                (service.queryHistoryModel.get as jest.Mock).mockResolvedValue({
+                (
+                    service.queryHistoryModel.get as import('vitest').Mock
+                ).mockResolvedValue({
                     context: QueryExecutionContext.CALCULATE_TOTAL,
                     resultsFileName: 'results.jsonl',
                     pivotConfiguration: null,
@@ -3396,7 +3498,8 @@ describe('AsyncQueryService', () => {
                     createdByUserUuid: 'user-uuid',
                 } satisfies Partial<QueryHistory>);
                 (
-                    service.resultsStorageClient.getDownloadStream as jest.Mock
+                    service.resultsStorageClient
+                        .getDownloadStream as import('vitest').Mock
                 ).mockReturnValue(getJsonlStream([{ a_met1: '456' }]));
 
                 await service.calculateTotalFromSavedChart(
@@ -3425,7 +3528,7 @@ describe('AsyncQueryService', () => {
                 );
 
                 const createCall = (
-                    service.queryHistoryModel.create as jest.Mock
+                    service.queryHistoryModel.create as import('vitest').Mock
                 ).mock.calls[0][1];
 
                 expect(createCall.metricQuery.filters.dimensions).toEqual(
@@ -3451,19 +3554,21 @@ describe('AsyncQueryService', () => {
                 const service = getMockedAsyncQueryService(lightdashConfigMock);
                 const warehouseClient = {
                     ...warehouseClientMock,
-                    runQuery: jest.fn(),
-                    executeAsyncQuery: jest.fn(
+                    runQuery: vi.fn(),
+                    executeAsyncQuery: vi.fn(
                         warehouseClientMock.executeAsyncQuery,
                     ),
                 };
 
                 (
-                    projectModel.getWarehouseClientFromCredentials as jest.Mock
+                    projectModel.getWarehouseClientFromCredentials as import('vitest').Mock
                 ).mockReturnValue(warehouseClient);
-                service.pollForQueryCompletion = jest
+                service.pollForQueryCompletion = vi
                     .fn()
                     .mockResolvedValue(undefined);
-                (service.queryHistoryModel.get as jest.Mock).mockResolvedValue({
+                (
+                    service.queryHistoryModel.get as import('vitest').Mock
+                ).mockResolvedValue({
                     context: QueryExecutionContext.CALCULATE_SUBTOTAL,
                     resultsFileName: 'results.jsonl',
                     pivotConfiguration: null,
@@ -3477,7 +3582,8 @@ describe('AsyncQueryService', () => {
                     createdByUserUuid: 'user-uuid',
                 } satisfies Partial<QueryHistory>);
                 (
-                    service.resultsStorageClient.getDownloadStream as jest.Mock
+                    service.resultsStorageClient
+                        .getDownloadStream as import('vitest').Mock
                 ).mockReturnValue(
                     getJsonlStream([{ a_dim1: 'group-1', a_met1: '123' }]),
                 );
@@ -3510,7 +3616,7 @@ describe('AsyncQueryService', () => {
 
     describe('executeAsyncCalculateTotalFromQueryHistory', () => {
         afterEach(() => {
-            jest.restoreAllMocks();
+            vi.restoreAllMocks();
         });
 
         it('threads the source dateZoom from request_parameters into the totals query', async () => {
@@ -3522,7 +3628,9 @@ describe('AsyncQueryService', () => {
                 xAxisFieldId: 'orders_order_date_day',
             };
 
-            (service.queryHistoryModel.get as jest.Mock).mockResolvedValue({
+            (
+                service.queryHistoryModel.get as import('vitest').Mock
+            ).mockResolvedValue({
                 queryUuid: 'test-query-uuid',
                 projectUuid,
                 organizationUuid: projectSummary.organizationUuid,
@@ -3551,7 +3659,7 @@ describe('AsyncQueryService', () => {
                 },
             } as unknown as QueryHistory);
 
-            const runSpy = jest
+            const runSpy = vi
                 .spyOn(
                     service as unknown as {
                         runAsyncMetricQueryWithoutPermissionCheck: (
@@ -3573,6 +3681,320 @@ describe('AsyncQueryService', () => {
             expect(runSpy.mock.calls[0][0]).toEqual(
                 expect.objectContaining({ dateZoom }),
             );
+        });
+    });
+
+    describe('executeAsyncSavedChartQuery pivotDimensions wiring', () => {
+        const pivotColumn = 'a_dim1';
+
+        const authorizedAccount = {
+            ...sessionAccount,
+            user: {
+                ...sessionAccount.user,
+                ability: new Ability<PossibleAbilities>([
+                    { subject: 'Project', action: ['view'] },
+                    { subject: 'SavedChart', action: ['view'] },
+                ]),
+            },
+        } as unknown as Account;
+
+        const bigNumberChart = {
+            uuid: 'savedChartUuid',
+            name: 'Big number chart',
+            organizationUuid: projectSummary.organizationUuid,
+            projectUuid,
+            spaceUuid: 'spaceUuid',
+            tableName: validExplore.name,
+            metricQuery: metricQueryMock,
+            parameters: undefined,
+            pivotConfig: { columns: [pivotColumn] },
+            chartConfig: { type: ChartType.BIG_NUMBER },
+        };
+
+        test('passes savedChart.pivotConfig.columns as pivotDimensions to prepareMetricQueryAsyncQueryArgs', async () => {
+            const service = getMockedAsyncQueryService(lightdashConfigMock, {
+                savedChartModel: {
+                    get: vi.fn(async () => bigNumberChart),
+                } as unknown as SavedChartModel,
+                analyticsModel: {
+                    addChartViewEvent: vi.fn(async () => {}),
+                } as unknown as AnalyticsModel,
+            });
+
+            service.getExploreWithUserAccessControls = vi
+                .fn()
+                .mockResolvedValue({
+                    explore: validExplore,
+                    userAccessControls: {
+                        userAttributes: {},
+                        intrinsicUserAttributes: {},
+                    },
+                });
+            (service as AnyType).getWarehouseCredentials = vi
+                .fn()
+                .mockResolvedValue(warehouseClientMock.credentials);
+            service.combineParameters = vi.fn().mockResolvedValue(undefined);
+            (service as AnyType).getMetricQueryFields = vi
+                .fn()
+                .mockResolvedValue({ fields: {} });
+
+            const prepareSpy = vi.fn().mockResolvedValue({
+                sql: 'SELECT 1',
+                fields: {},
+                warnings: [],
+                parameterReferences: [],
+                missingParameterReferences: [],
+                usedParameters: {},
+                responseMetricQuery: metricQueryMock,
+                userAccessControls: {
+                    userAttributes: {},
+                    intrinsicUserAttributes: {},
+                },
+                availableParameterDefinitions: {},
+            });
+            (service as AnyType).prepareMetricQueryAsyncQueryArgs = prepareSpy;
+
+            service['executeAsyncQuery'] = vi.fn().mockResolvedValue({
+                queryUuid: 'queryUuid',
+                cacheMetadata: { cacheHit: false },
+            });
+
+            await service.executeAsyncSavedChartQuery({
+                account: authorizedAccount,
+                projectUuid,
+                chartUuid: bigNumberChart.uuid,
+                versionUuid: undefined,
+                context: QueryExecutionContext.CHART,
+                invalidateCache: false,
+                limit: undefined,
+                parameters: undefined,
+                pivotResults: false,
+                filterOverrides: undefined,
+            });
+
+            expect(prepareSpy).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    pivotDimensions: [pivotColumn],
+                }),
+            );
+        });
+    });
+
+    describe('executeAsyncSavedChartQuery filterOverrides wiring', () => {
+        const authorizedAccount = {
+            ...sessionAccount,
+            user: {
+                ...sessionAccount.user,
+                ability: new Ability<PossibleAbilities>([
+                    { subject: 'Project', action: ['view'] },
+                    { subject: 'SavedChart', action: ['view'] },
+                ]),
+            },
+        } as unknown as Account;
+
+        // metricQueryMock.filters is `{}`, so give the chart its own
+        // dimensions filter group here to make the AND-merge assertion
+        // meaningful (otherwise there'd be nothing on the chart side to merge).
+        const chartFilterGroup = {
+            id: 'chart-root',
+            and: [
+                {
+                    id: 'chart-filter-0',
+                    target: { fieldId: 'a_dim1' },
+                    operator: FilterOperator.EQUALS,
+                    values: ['chart-value'],
+                },
+            ],
+        };
+
+        const chart = {
+            uuid: 'savedChartUuid',
+            name: 'Chart with filters',
+            organizationUuid: projectSummary.organizationUuid,
+            projectUuid,
+            spaceUuid: 'spaceUuid',
+            tableName: validExplore.name,
+            metricQuery: {
+                ...metricQueryMock,
+                filters: { dimensions: chartFilterGroup },
+            },
+            parameters: undefined,
+            pivotConfig: undefined,
+            chartConfig: { type: ChartType.CARTESIAN },
+        };
+
+        test('ANDs filterOverrides onto the chart metricQuery filters', async () => {
+            const service = getMockedAsyncQueryService(lightdashConfigMock, {
+                savedChartModel: {
+                    get: vi.fn(async () => chart),
+                } as unknown as SavedChartModel,
+                analyticsModel: {
+                    addChartViewEvent: vi.fn(async () => {}),
+                } as unknown as AnalyticsModel,
+            });
+            service.getExploreWithUserAccessControls = vi
+                .fn()
+                .mockResolvedValue({
+                    explore: validExplore,
+                    userAccessControls: {
+                        userAttributes: {},
+                        intrinsicUserAttributes: {},
+                    },
+                });
+            (service as AnyType).getWarehouseCredentials = vi
+                .fn()
+                .mockResolvedValue(warehouseClientMock.credentials);
+            service.combineParameters = vi.fn().mockResolvedValue(undefined);
+            (service as AnyType).getMetricQueryFields = vi
+                .fn()
+                .mockResolvedValue({ fields: {} });
+            const prepareSpy = vi.fn().mockResolvedValue({
+                sql: 'SELECT 1',
+                fields: {},
+                warnings: [],
+                parameterReferences: [],
+                missingParameterReferences: [],
+                usedParameters: {},
+                responseMetricQuery: metricQueryMock,
+                userAccessControls: {
+                    userAttributes: {},
+                    intrinsicUserAttributes: {},
+                },
+                availableParameterDefinitions: {},
+            });
+            (service as AnyType).prepareMetricQueryAsyncQueryArgs = prepareSpy;
+            service['executeAsyncQuery'] = vi.fn().mockResolvedValue({
+                queryUuid: 'queryUuid',
+                cacheMetadata: { cacheHit: false },
+            });
+
+            const overrideGroup = {
+                id: 'app-root',
+                and: [
+                    {
+                        id: 'app-filter-0',
+                        target: { fieldId: 'a_dim1' },
+                        operator: FilterOperator.EQUALS,
+                        values: ['enterprise'],
+                    },
+                ],
+            };
+            await service.executeAsyncSavedChartQuery({
+                account: authorizedAccount,
+                projectUuid,
+                chartUuid: chart.uuid,
+                versionUuid: undefined,
+                context: QueryExecutionContext.CHART,
+                invalidateCache: false,
+                limit: undefined,
+                parameters: undefined,
+                pivotResults: false,
+                filterOverrides: {
+                    dimensions: overrideGroup,
+                },
+            });
+
+            const merged = prepareSpy.mock.calls[0][0].metricQuery;
+            // Chart's own dimensions filter group survives AND the override
+            // group is added alongside it (AND semantics, not a replace).
+            expect(merged.filters.dimensions.and).toHaveLength(2);
+            expect(merged.filters.dimensions.and).toContainEqual(
+                chartFilterGroup,
+            );
+            expect(merged.filters.dimensions.and).toContainEqual(overrideGroup);
+        });
+
+        test('merges dashboard filters targeting the explore and silently drops the rest', async () => {
+            const service = getMockedAsyncQueryService(lightdashConfigMock, {
+                savedChartModel: {
+                    get: vi.fn(async () => chart),
+                } as unknown as SavedChartModel,
+                analyticsModel: {
+                    addChartViewEvent: vi.fn(async () => {}),
+                } as unknown as AnalyticsModel,
+            });
+            service.getExploreWithUserAccessControls = vi
+                .fn()
+                .mockResolvedValue({
+                    explore: validExplore,
+                    userAccessControls: {
+                        userAttributes: {},
+                        intrinsicUserAttributes: {},
+                    },
+                });
+            (service as AnyType).getWarehouseCredentials = vi
+                .fn()
+                .mockResolvedValue(warehouseClientMock.credentials);
+            service.combineParameters = vi.fn().mockResolvedValue(undefined);
+            (service as AnyType).getMetricQueryFields = vi
+                .fn()
+                .mockResolvedValue({ fields: {} });
+            const prepareSpy = vi.fn().mockResolvedValue({
+                sql: 'SELECT 1',
+                fields: {},
+                warnings: [],
+                parameterReferences: [],
+                missingParameterReferences: [],
+                usedParameters: {},
+                responseMetricQuery: metricQueryMock,
+                userAccessControls: {
+                    userAttributes: {},
+                    intrinsicUserAttributes: {},
+                },
+                availableParameterDefinitions: {},
+            });
+            (service as AnyType).prepareMetricQueryAsyncQueryArgs = prepareSpy;
+            service['executeAsyncQuery'] = vi.fn().mockResolvedValue({
+                queryUuid: 'queryUuid',
+                cacheMetadata: { cacheHit: false },
+            });
+
+            await service.executeAsyncSavedChartQuery({
+                account: authorizedAccount,
+                projectUuid,
+                chartUuid: chart.uuid,
+                versionUuid: undefined,
+                context: QueryExecutionContext.CHART,
+                invalidateCache: false,
+                limit: undefined,
+                parameters: undefined,
+                pivotResults: false,
+                filterOverrides: undefined,
+                dashboardFilters: {
+                    dimensions: [
+                        {
+                            // Different field than the chart's own filter —
+                            // same-field dashboard filters OVERRIDE chart
+                            // filters (standard dashboard-tile semantics).
+                            id: 'dash-rule-in-explore',
+                            target: { fieldId: 'b_dim1', tableName: 'b' },
+                            operator: FilterOperator.EQUALS,
+                            values: ['dashboard-value'],
+                            label: undefined,
+                        },
+                        {
+                            id: 'dash-rule-other-explore',
+                            target: {
+                                fieldId: 'customers_segment',
+                                tableName: 'customers',
+                            },
+                            operator: FilterOperator.EQUALS,
+                            values: ['enterprise'],
+                            label: undefined,
+                        },
+                    ],
+                    metrics: [],
+                    tableCalculations: [],
+                },
+            });
+
+            const merged = prepareSpy.mock.calls[0][0].metricQuery;
+            const mergedJson = JSON.stringify(merged.filters);
+            // The in-explore rule is applied alongside the chart's own filter…
+            expect(mergedJson).toContain('dashboard-value');
+            expect(mergedJson).toContain('chart-value');
+            // …the out-of-explore rule is dropped without failing the run.
+            expect(mergedJson).not.toContain('customers_segment');
         });
     });
 });

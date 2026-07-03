@@ -213,6 +213,17 @@ boolean to `true` on the first refresh and forwards it through `AppIframePreview
 so the initial page load can still serve cached results fast; once you've asked for a refresh, every subsequent query
 runs against the warehouse fresh. (This mirrors the sticky behaviour of the dashboard tile below.)
 
+### Manual app thumbnails
+
+The builder's Screenshot button uses the iframe-side screenshot handler (`screenshotHandler.js`) to rasterize the current
+preview. In addition to attaching that PNG to the next prompt as a screenshot reference, the frontend immediately uploads
+it as the app thumbnail.
+
+Storage is intentionally simple and app-scoped: the latest manual screenshot overwrites
+`apps/{appUuid}/thumbnail.png` in the app runtime S3 bucket. There is no DB row or per-version history; the object key is
+the metadata convention. The backend exposes a signed-url endpoint for that optional object, and the My Apps settings
+table lazy-loads it on name hover to show a preview when a thumbnail exists.
+
 ### Refreshing a data app inside a dashboard
 
 A data app embedded as a `DashboardDataAppTile` refreshes the same way a chart tile does when the dashboard's
@@ -343,6 +354,15 @@ Orchestration lives in `AppGenerateService.duplicateAppsForPreview`, called once
 - **Spaces.** `ProjectModel.duplicateContent` now returns the source→preview space-uuid mapping; each app lands in the
   preview's mirror of its source space (ancestors already created by the content copy). Personal apps
   (`space_uuid IS NULL`) stay personal.
+- **External connections.** Because connections are project-scoped and runtime fetches resolve against
+  `app_external_connections` (`resolveAppAlias`), the preview needs its own connections or the copied apps' external
+  fetches would dangle. Before copying apps, `ExternalConnectionModel.copyConnectionsToProject` clones every non-deleted
+  upstream connection — with its secret and saved samples — into the preview project, returning a source→preview
+  connection-uuid map. The secret ciphertext is copied verbatim (`EncryptionUtil` is instance-wide, so the payload is
+  portable). Each app's live links are then translated through that map onto the preview's own connections, and the
+  version snapshot's `externalConnections` is rebuilt from the same translated set. Project deletion cascades
+  (`external_connections.project_uuid ON DELETE CASCADE`) clean the copies up when the preview is torn down. This copy is
+  best-effort: if it fails, apps are still copied (just without working connections).
 - **The round trip — `upstream_app_uuid`.** Each preview copy's `upstream_app_uuid` is set back to the production app it
   was copied from. That is the same link `promoteApp` writes on first promotion, so iterating on the copy inside the
   preview and then promoting **updates the original production app** rather than creating a duplicate. Preview
@@ -357,6 +377,28 @@ Orchestration lives in `AppGenerateService.duplicateAppsForPreview`, called once
   duplication entirely.
 
 Tracked in [PROD-7819](https://linear.app/lightdash/issue/PROD-7819/make-it-possible-to-build-data-apps-in-previews-and-promote-them).
+
+### Browsing apps
+
+Data apps are a first-class content type in the **Browse** section, alongside charts, dashboards, and spaces. The
+`/projects/:projectUuid/apps` page (`SavedApps.tsx`) renders the shared `InfiniteResourceTable` filtered to
+`ContentType.DATA_APP`, so apps get the same search, sort, pin, rename, move, duplicate, promote, and delete actions.
+The "All data apps" entry in `BrowseMenu` and the page itself are gated on the `EnableDataApps` feature flag plus
+`view:DataApp`. The whole content type — `ContentType.DATA_APP`, `DataAppContent`, `dataAppContentConfiguration` in the
+`ContentModel` UNION — is served by the standard `GET /api/v2/content` endpoint; no app-specific browse API exists.
+
+**Personal apps in the browse list.** Space apps follow normal space-access filtering. Personal apps
+(`space_uuid IS NULL`) are private, so they are hidden from space-based listings by default and surfaced only when the
+caller opts in via `includePersonalDataApps` (set by `SavedApps`, never by the home page or global search). The
+service (`ContentService.find`) then resolves *whose* personal apps the caller may see and passes a `dataApps` filter
+to the model: the caller always sees their **own** personal apps, and in projects where they hold the unconditional
+project-wide `manage:DataApp` (project/org admin) they also see **everyone's**. Personal-app rows render a `-` in the
+space column (matching the "My apps" settings list), and the Pin action is hidden for them (the backend rejects pinning
+a space-less app).
+Because `DataAppContent.space` is therefore nullable (unlike other content types), it overrides the non-null `space` on
+the shared `Content` base via `Omit`, so only DATA_APP-handling code has to deal with the null.
+
+Tracked in [PROD-8427](https://linear.app/lightdash/issue/PROD-8427/add-a-content-section-for-browsing-apps).
 
 ---
 
@@ -763,11 +805,17 @@ defences keep the path robust:
 
 ## External connections
 
-External connections let a project admin register a third-party HTTP API (base URL, auth) that generated data apps can fetch from at runtime, through a parent-mediated proxy that mirrors the metric-query [PostMessage Bridge](#postmessage-bridge-useappsdkbridge). The feature is enterprise-only and gated on the `manage:ExternalConnection` scope for configuration.
+External connections let a project admin register a third-party HTTP API (base URL, auth) that generated data apps can fetch from at runtime, through a parent-mediated proxy that mirrors the metric-query [PostMessage Bridge](#postmessage-bridge-useappsdkbridge). The feature is enterprise-only. Two scopes split the surface: **configuring** a connection (create / edit / delete, including its host, auth secret, and allowed methods) requires the admin-only `manage:ExternalConnection` scope; **viewing** the connection list — so an app builder can pick an existing connection to link in the builder — requires `view:ExternalConnection`, granted to interactive-viewer+ (the same tier that can build data apps). Linking a viewed connection to an app is gated by manage rights on the app itself (`manage:DataApp`, via `assertCanManageApp`), not by connection-manage — so a space editor can link an admin-created connection to an app they own.
 
 ### Connection model
 
-A connection lives on the `external_connections` table (`packages/backend/src/ee/database/entities/externalConnections.ts`), scoped to a project. It stores a human-readable **alias**, a **base URL** (origin), the auth method, and an **encrypted secret** (never returned to the client — stripped on read, only decrypted server-side for an actual fetch). Apps opt into a connection by linking it (`app_external_connections`); an app can reference a connection's data only after the admin links it.
+A connection lives on the `external_connections` table (`packages/backend/src/ee/database/entities/externalConnections.ts`), scoped to a project. It stores a human-readable **alias**, a **base URL** (origin), the auth method, an **encrypted secret** (never returned to the client — stripped on read, only decrypted server-side for an actual fetch), and optional freeform **instructions** (admin-authored markdown, capped at 10 000 chars; not sensitive, returned on read). Apps opt into a connection by linking it (`app_external_connections`); an app can reference a connection's data only after the admin links it.
+
+The **instructions** are usage guidance for the app builder — auth quirks, pagination, which endpoints matter, response caveats — injected into the generation prompt (see [Saved samples → `/tmp/external-data`](#saved-samples--tmpexternal-data) below). They inherit the same admin-trust boundary as the rest of the connection: only `manage:ExternalConnection` (project admin) can set them, and an admin authoring prose is strictly weaker than an admin who already pins the host, secret, and allowed methods.
+
+The auth method (`type`) is one of **`none`**, **`api_key`** (header or query, named by `apiKeyName`/`apiKeyLocation`), **`bearer_token`**, or **`google_service_account`**. For a Google service account the encrypted secret is the service-account **keyfile JSON** and `oauth_scopes` holds the admin-entered OAuth scopes (e.g. `https://www.googleapis.com/auth/bigquery`); the proxy mints a short-lived Google access token from them per request (cached in memory by `GoogleServiceAccountTokenProvider`) and injects it as `Authorization: Bearer …`. This is what lets a data app write back to BigQuery via its REST API.
+
+Runtime fetches resolve the alias against `app_external_connections` (`resolveAppAlias`), so the link rows — not the version `resources` snapshot — are what grant an app access. When an app is **duplicated** (`AppGenerateService.duplicateApp`), its live links are copied onto the new app so the duplicate can make the same external fetches; both apps share a project, so the connection UUIDs stay valid. **Preview duplication** is the cross-project case: the target preview project has none of the source's connections, so it first clones the connections themselves (see [Preview environments](#preview-environments-copy-on-preview)) and re-links the copied apps onto those clones. **Promotion** (`promoteApp`, preview → upstream) still does **not** carry links across today — the upstream project's connections are separate entities and would need identity mapping to re-link.
 
 ### Proxy security model
 
@@ -775,16 +823,18 @@ The sandboxed preview iframe has no network access of its own (`default-src 'non
 
 1. The app SDK requests an external fetch over postMessage.
 2. The parent forwards it to the backend external-fetch route, which loads the linked connection, decrypts its secret server-side, and runs the request through `executeExternalFetch`.
-3. `executeExternalFetch` validates the request, enforces the SSRF guard (the request must resolve under the connection's configured base URL/host; private/loopback/link-local targets are rejected), injects the secret as the configured auth, reads a **bounded** response body, and returns `{ status, contentType, body, truncated }`.
+3. `executeExternalFetch` validates the request, enforces the SSRF guard (the request must resolve under the connection's configured base URL/host; private/loopback/link-local targets are rejected), injects the secret as the configured auth (for `google_service_account`, it first mints a short-lived OAuth access token from the stored keyfile + scopes — that token mint calls Google's fixed token endpoint directly, outside the SSRF-guarded fetch), reads a **bounded** response body, and returns `{ status, contentType, body, truncated }`.
 4. The bounded response is posted back to the iframe. The decrypted secret never crosses to the frontend.
 
-### GET / POST rules
+### Method rules
 
-Only `GET` and `POST` are allowed. `GET` is for reads; `POST` carries a JSON body. Other methods are rejected. The request `path` is resolved against the connection's base URL and cannot escape its host (SSRF guard). Responses are size-capped; oversized bodies come back with `truncated: true` rather than streaming unbounded data into the browser.
+Each connection carries a per-connection **allowed-methods** list; an admin opts a connection into whichever of `GET`, `POST`, `PUT`, `PATCH`, and `DELETE` it needs (the shared universe is `EXTERNAL_CONNECTION_METHODS` in `packages/common/src/ee/externalConnections/types.ts`). A fetch whose method is not in that list is rejected. `GET` is for reads and carries no body; every other method may carry a server-serialized JSON body. The request `path` is resolved against the connection's base URL and cannot escape its host (SSRF guard). Responses are size-capped; oversized bodies come back with `truncated: true` rather than streaming unbounded data into the browser.
+
+New connections default to `['GET']` only; broadening the set is an explicit admin opt-in per connection, keeping the exfiltration surface (see [Why the exfiltration warning matters](#why-the-exfiltration-warning-matters)) as small as the app actually needs.
 
 ### Why the exfiltration warning matters
 
-Because the proxy injects a server-held secret and can reach an admin-configured external host, a **generated app could be coaxed into exfiltrating warehouse data** to that host (e.g. POST query results to an attacker-influenced endpoint). The trust model is therefore: **only a project admin can configure and link connections** (`manage:ExternalConnection`), the base URL is admin-pinned (the app can't redirect the fetch to an arbitrary host), and methods/paths are constrained. Admins should only link connections to hosts they trust with project data, and review which apps are linked to which connections.
+Because the proxy injects a server-held secret and can reach an admin-configured external host, a **generated app could be coaxed into exfiltrating warehouse data** to that host (e.g. POST query results to an attacker-influenced endpoint). The trust decision that bounds this lives entirely with the admin: **only a project admin can configure a connection** (`manage:ExternalConnection`) — i.e. pin its host, secret, and allowed methods. Once a connection exists, an app builder can select it and link it to an app they manage (gated by `manage:DataApp`, not connection-manage), but the base URL stays admin-pinned (the app can't redirect the fetch to an arbitrary host) and methods/paths are constrained. So a builder can only ever reach hosts an admin already chose to trust with project data. Admins should only create connections to hosts they trust, keep the allowed-methods set as narrow as the apps need, and review which apps are linked to which connections.
 
 ### Admin "Test connection"
 
@@ -796,6 +846,93 @@ From a successful test, an admin can **Save as sample** (`POST .../external-conn
 
 During a generation, for every linked connection that has a saved sample, the pipeline (`AppGenerateService.writeCatalogAndPrompt` → `writeExternalConnectionSamples`) writes `/tmp/external-data/{alias}.json` into the sandbox and prepends a one-line reference to `/tmp/prompt.txt`, mirroring how chart-reference and image files are surfaced. This grounds Claude in the API's response shape (field names, nesting, formats) so its fetch/render code matches reality. The sample is for code generation only — at runtime the app fetches live data through the proxy, never from these files. The skill (`sandboxes/data-apps/template/skill.md`, "Linked external connections" section) documents the convention; keep the prompt-prepend wording and that section in sync.
 
+The same `/tmp/external-data/{alias}.json` doc carries the connection's **instructions** (when the admin set any) as a top-level `instructions` string field, alongside the auto-generated `signature`/`origin`/`rules`/`samples`. The field is omitted entirely when empty, so existing connections with no instructions are unchanged. The prompt-prepend block tells Claude to read and follow the `instructions` field when present.
+
+### Inspecting external requests at runtime
+
+The builder/preview inspector overlay is a **tabbed panel** (`AppInspectorPanel.tsx`) with two tabs that mirror each other: **Queries** (metric queries) and **External requests** (external-connection fetches). Both are captured client-side from the same `useAppSdkBridge` postMessage bridge — nothing is persisted server-side beyond the existing `external_connection.fetch` audit event (which stores byte counts, not bodies).
+
+- **Capture.** The bridge's external-fetch branch emits an `ExternalRequestEvent` when a fetch starts (`pending`) and a terminal `ready`/`error` event when it settles (carrying the upstream HTTP status, content type, response body, `truncated` flag, and round-trip duration). Because an external fetch is a single request → single response, entries merge by `id` with no `queryUuid` remap — `useTrackedExternalRequests` is the simpler sibling of `useTrackedAppQueries`.
+- **Always visible.** Both tabs are always shown (the Requests tab reads `Requests (0)` when idle), so clearing the log doesn't yank the tab out from under the user, and the tab surfaces the feature to apps that haven't used a connection yet.
+- **What's shown.** Per request: connection alias, method + path, query params, request body, response status/content-type/body (collapsible + copy), truncation, error, and duration. The frontend only knows the **alias + path**, never the connection's origin or secret — auth is injected server-side in `executeExternalFetch`, so the panel can never display credential material.
+- **Persistence.** Entries live in in-memory React state, cleared on iframe refresh / new-version load unless the shared **Persist** toggle is on (the same `data-apps:persist-logs` preference the Queries tab uses). "Persist" moves still-`pending` entries to a terminal `error` on reload rather than dropping them.
+
+---
+
+## Data apps as code
+
+Data apps can be **downloaded as source, versioned in git, edited, and re-uploaded** — the server rebuilds them. This parallels charts/dashboards-as-code, but the artifact is the app's **source tree** and upload triggers a **server-side build** (no built `dist` is ever shipped by the client).
+
+### CLI
+
+Opt-in flags on the existing `lightdash download` / `lightdash upload` commands (off by default — core users never touch app code paths unless they ask):
+
+- **`lightdash download --apps [appUuids...]`** — download data apps into `lightdash/apps/<slug>/`. Bare `--apps` = all apps in the project (listed via the content API); with UUIDs = just those. Each folder holds `lightdash-app.yml` (manifest) + the app's `src/` tree. The built `dist` is intentionally excluded — it's regenerated on upload.
+- **`lightdash upload --apps [appUuids...]`** — upload each `lightdash/apps/<slug>/` folder; the server rebuilds the source. **Fire-and-forget:** the CLI posts and returns immediately — the app shows `building` in the UI until the server finishes.
+
+**Identity:** the manifest's `appUuid` is the source of truth (apps have no persistent slug; the `<slug>` folder name is derived from the app name via `generateSlug`). Uploading to the **same project** appends a new version of that app; uploading to a **different project** creates a new app there.
+
+### What the endpoints do
+
+- **Download** — `GET /api/v1/ee/projects/{projectUuid}/apps/{appUuid}/download` reads the version's `source.tar` from S3, extracts it in-process (`tar-stream`), and returns the `src/` files + manifest (`AppGenerateService.getAppCode`).
+- **Upload** — `POST /api/v1/ee/projects/{projectUuid}/apps/upload` (`AppGenerateService.importAppCode`) validates the source (`validateDataAppCode` rejects path traversal), re-tars it, stores `source.tar` at the new version's prefix, creates a `pending` version, and enqueues the **build-only pipeline** `APP_BUILD_FROM_SOURCE` (`runBuildFromSourcePipeline`): sandbox → restore source → `pnpm build` (**fail-loud, no AI autofix**) → package → store → `ready`. Concurrent builds are **rate-limited per project** (`MAX_CONCURRENT_APP_BUILDS_PER_PROJECT`, HTTP 429 when exceeded).
+
+### Moving an app between projects or instances
+
+- **Different project (same instance):** `lightdash upload --apps --project <target-project>` — creates and builds the app in the target project.
+- **Different instance:** point the CLI at the destination first — `lightdash login <destination-url>` (or set `LIGHTDASH_URL` / `LIGHTDASH_API_KEY`) — then `lightdash upload --apps --project <target>`. The **destination builds the source in its own sandbox** (so it must have data apps / the build sandbox enabled); it never receives code built elsewhere.
+
+### Constraints & notes
+
+- **Enterprise-only** (`APP_RUNTIME_ENABLED`); the caller needs `view` / `create` / `manage:DataApp`.
+- **Fixed dependency set:** upload rebuilds against the sandbox template's pre-installed libraries — you can edit source but can't add libraries the sandbox lacks (a future "bring your own libraries" phase covers that via local builds).
+- **Semantic-layer coupling:** a moved app's queries run against the **target project's** fields *by name*; fields missing in the target surface as in-app query errors, not upload failures.
+- **Security:** because the server only ever builds source in its trusted, network-locked sandbox and never serves client-supplied *built* code, the runtime trust model is unchanged from AI-generated apps. See [Security Model](#security-model). (Follow-up: the query bridge runs as the *viewing* user — a pre-existing consideration for any app, generated or uploaded.)
+
+### Local authoring (Phase 2)
+
+Phase 1 makes apps [downloadable and uploadable from source](#cli); Phase 2 makes the downloaded tree **locally buildable**, so you can verify changes compile before uploading.
+
+#### What `lightdash download --apps` now includes
+
+The download folder adds to the Phase 1 output (`src/` + `lightdash-app.yml`):
+
+- **Build scaffolding:** `package.json` (Lightdash App SDK pinned to the same published version the server uses), `vite.config.js`, `tailwind.config.js`, `postcss.config.js`, `tsconfig.json`, `index.html`
+- **Agent skills:** `.claude/skills/lightdash-data-app` (SDK reference) and `.claude/skills/developing-data-apps-locally` (local authoring workflow)
+- **Project files:** `AGENTS.md`, `README.md`, `.gitignore`
+- **Context snapshot** (`.lightdash/context/`): `semantic-layer.yml`, `parameters.yml` (if the app uses parameters), `prompt-history.md`, and `theme/`
+
+All scaffolding and context files are read-only reference — see [Upload is source-only](#upload-is-source-only) below.
+
+#### The local loop
+
+```sh
+edit src/  →  pnpm install && pnpm build  →  lightdash upload --apps  →  server rebuilds
+```
+
+1. Edit files under `src/`.
+2. Run `pnpm install && pnpm build` as a pre-flight compile check against the downloaded scaffolding.
+3. Upload with `lightdash upload --apps` (fire-and-forget, as in Phase 1). The server rebuilds in its trusted sandbox.
+
+**The server's build is authoritative.** Your local build is a compile check only; the deployed app is always the server's output.
+
+#### Upload is source-only
+
+Only `src/` is sent on upload. Scaffolding files and `.lightdash/context/` are local reference; the server ignores them and rebuilds against its own trusted template. Editing a local config file has **no effect** on the deployed app. The [Phase 1 trust model](#security-model) is unchanged — no new security surface.
+
+#### Context is a point-in-time snapshot
+
+`.lightdash/context/` reflects the **source project's** semantic layer at download time. On a cross-project or cross-instance upload, the target project's semantic layer may differ — queries referencing renamed or absent fields will fail in-app after upload (the existing [semantic-layer coupling caveat](#constraints--notes)). Re-download from the source project to refresh the snapshot.
+
+#### Theme asset cap
+
+If the org design linked to the app has more than **30 asset files**, the theme assets are skipped during download and a warning is printed; the theme instruction markdown is still written to `.lightdash/context/theme/`. An app whose theme was skipped may not build locally without those assets — the server-side rebuild is unaffected.
+
+#### Out of scope (Phase 3)
+
+- **Local preview against real data** — `pnpm build` is a compile check only, not a live data preview.
+- **Bring-your-own libraries** — running `pnpm add` locally has no effect on the server's sandbox. This is the "future bring your own libraries" path noted in [Constraints & notes](#constraints--notes).
+
 ---
 
 ## Frontend Architecture
@@ -804,6 +941,7 @@ During a generation, for every linked connection that has a saved sample, the pi
 
 | Route                                                            | Component            | Purpose                                   |
 | ---------------------------------------------------------------- | -------------------- | ----------------------------------------- |
+| `/projects/:projectUuid/apps`                                    | `SavedApps.tsx`      | Browse all data apps (content section)    |
 | `/projects/:projectUuid/apps/generate`                           | `AppGenerate.tsx`    | New app creation (split-panel chat UI)    |
 | `/projects/:projectUuid/apps/:appUuid`                           | `AppGenerate.tsx`    | Edit existing app (loads version history) |
 | `/projects/:projectUuid/apps/:appUuid/versions/:version/preview` | `AppPreviewTest.tsx` | Standalone preview                        |

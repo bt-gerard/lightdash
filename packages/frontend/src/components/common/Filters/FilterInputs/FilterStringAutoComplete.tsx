@@ -1,4 +1,4 @@
-import { type FilterableItem } from '@lightdash/common';
+import { isDimension, type FilterableItem } from '@lightdash/common';
 import {
     ActionIcon,
     Group,
@@ -45,6 +45,8 @@ import {
     isValueSelected,
     mergeWithHiddenValues,
     MORE_VALUES_TOKEN,
+    NULL_VALUE_LABEL,
+    NULL_VALUE_TOKEN,
     SUMMARY_MODE_THRESHOLD,
     wasTokenRemoved,
 } from './FilterStringAutoComplete.utils';
@@ -59,6 +61,10 @@ type Props = Omit<MultiSelectProps, 'data' | 'onChange'> & {
     suggestions: string[];
     onChange: (values: string[]) => void;
     singleValue?: boolean;
+    /** Show a static "(null)" option that toggles the rule's includeNull flag. */
+    showNullOption?: boolean;
+    includeNull?: boolean;
+    onIncludeNullChange?: (includeNull: boolean) => void;
 };
 
 // Single value component that mimics a single select behavior - maxSelectedValues={1} behaves weirdly so we don't use it.
@@ -133,8 +139,13 @@ const FilterStringAutoComplete: FC<Props> = ({
     onFocus: onInputFocus,
     onBlur: onInputBlur,
     singleValue,
+    showNullOption,
+    includeNull,
+    onIncludeNullChange,
     ...rest
 }) => {
+    // The "(null)" option is only meaningful for multi-value filters.
+    const showNull = !!showNullOption && !singleValue;
     const multiSelectRef = useRef<HTMLInputElement>(null);
     const { projectUuid, getAutocompleteFilterGroup, parameterValues } =
         useFiltersContext();
@@ -176,7 +187,7 @@ const FilterStringAutoComplete: FC<Props> = ({
 
     const {
         isInitialLoading,
-        results: resultsSet,
+        results,
         refreshedAt,
         refetch,
         reset,
@@ -206,7 +217,9 @@ const FilterStringAutoComplete: FC<Props> = ({
             setForceRefresh(false);
         }
     }, [forceRefresh, refetch]);
-    const results = useMemo(() => [...resultsSet], [resultsSet]);
+    const filterAutocomplete = isDimension(field)
+        ? field.filterAutocomplete
+        : undefined;
 
     const handleResetSearch = useCallback(() => {
         setTimeout(() => setSearch(() => ''), 0);
@@ -273,11 +286,24 @@ const FilterStringAutoComplete: FC<Props> = ({
         // Mantine does not show value tag if value is not found in data
         // so we need to add it manually here
         // also we are merging status indicator as a first item
-        return uniq([...results, ...values]).map((value) => ({
+        const resultLabels = new Map(
+            results.map(({ value, label }) => [value, label]),
+        );
+
+        const valueData = uniq([
+            ...results.map(({ value }) => value),
+            ...values,
+        ]).map((value) => ({
             value,
-            label: formatDisplayValue(value),
+            label: resultLabels.get(value) ?? formatDisplayValue(value),
         }));
-    }, [results, values]);
+        return showNull
+            ? [
+                  ...valueData,
+                  { value: NULL_VALUE_TOKEN, label: NULL_VALUE_LABEL },
+              ]
+            : valueData;
+    }, [results, values, showNull]);
 
     const isSummaryMode =
         !singleValue && values.length > SUMMARY_MODE_THRESHOLD;
@@ -323,7 +349,10 @@ const FilterStringAutoComplete: FC<Props> = ({
         [disabled, hiddenCount, openManageValues],
     );
 
-    const searchedMaxResults = resultsSet.size >= MAX_AUTOCOMPLETE_RESULTS;
+    const searchedMaxResults = results.length >= MAX_AUTOCOMPLETE_RESULTS;
+    const canRefreshAutocomplete =
+        filterAutocomplete?.fetchFromWarehouse !== false &&
+        !((filterAutocomplete?.values?.length ?? 0) > 0 && search.length === 0);
     // memo override component so list doesn't scroll to the top on each click
     const DropdownComponentOverride = useCallback(
         ({ children, ...props }: { children: ReactNode }) => (
@@ -338,7 +367,8 @@ const FilterStringAutoComplete: FC<Props> = ({
 
                     {children}
                 </ScrollArea>
-                {healthData?.hasCacheAutocompleResults ? (
+                {healthData?.hasCacheAutocompleResults &&
+                canRefreshAutocomplete ? (
                     <RefreshIndicator
                         refreshedAtRef={refreshedAtRef}
                         onRefresh={() => {
@@ -353,6 +383,7 @@ const FilterStringAutoComplete: FC<Props> = ({
             searchedMaxResults,
             search,
             healthData?.hasCacheAutocompleResults,
+            canRefreshAutocomplete,
             reset,
         ],
     );
@@ -526,10 +557,10 @@ const FilterStringAutoComplete: FC<Props> = ({
                             // Override selection state to check against full values array
                             // This fixes the bug where hidden values (beyond display limit) appear
                             // unselected in dropdown even though they're actually selected
-                            const isSelected = isValueSelected(
-                                itemValue,
-                                values,
-                            );
+                            const isSelected =
+                                itemValue === NULL_VALUE_TOKEN
+                                    ? !!includeNull
+                                    : isValueSelected(itemValue, values);
                             const itemClassName = [
                                 className,
                                 isSelected
@@ -568,18 +599,41 @@ const FilterStringAutoComplete: FC<Props> = ({
                                   ]
                                 : data
                         }
-                        value={displayValues}
+                        value={
+                            showNull && includeNull
+                                ? [...displayValues, NULL_VALUE_TOKEN]
+                                : displayValues
+                        }
                         onDropdownOpen={onDropdownOpen}
                         onDropdownClose={() => {
                             handleResetSearch();
                             onDropdownClose?.();
                         }}
                         onChange={(updatedValues) => {
+                            const valuesWithoutNull = updatedValues.filter(
+                                (v) => v !== NULL_VALUE_TOKEN,
+                            );
+
+                            // The "(null)" option toggles includeNull on the rule
+                            // rather than becoming a real value. A single MultiSelect
+                            // change only ever toggles the null token OR edits real
+                            // values, so when the token's presence flips we update the
+                            // flag and stop — calling handleChange too would overwrite
+                            // includeNull from a stale rule and drop the flag.
+                            if (showNull) {
+                                const nextIncludeNull =
+                                    updatedValues.includes(NULL_VALUE_TOKEN);
+                                if (nextIncludeNull !== !!includeNull) {
+                                    onIncludeNullChange?.(nextIncludeNull);
+                                    return;
+                                }
+                            }
+
                             // If token was removed (backspace on truncated list), open modal instead
                             if (
                                 wasTokenRemoved(
                                     displayValues,
-                                    updatedValues,
+                                    valuesWithoutNull,
                                     hiddenCount,
                                 )
                             ) {
@@ -589,7 +643,7 @@ const FilterStringAutoComplete: FC<Props> = ({
 
                             // Merge with hidden values to prevent data loss in truncated mode
                             const finalValues = mergeWithHiddenValues(
-                                updatedValues,
+                                valuesWithoutNull,
                                 displayValues,
                                 values,
                             );

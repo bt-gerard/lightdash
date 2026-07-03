@@ -1,3 +1,4 @@
+import { subject } from '@casl/ability';
 import { CommercialFeatureFlags, FeatureFlags } from '@lightdash/common';
 import { useIsGitProject } from '../../components/Explorer/WriteBackModal/hooks';
 import { useAiOrganizationSettings } from '../../ee/features/aiCopilot/hooks/useAiOrganizationSettings';
@@ -5,6 +6,7 @@ import useApp from '../../providers/App/useApp';
 import { useOrganization } from '../organization/useOrganization';
 import { useActiveProjectUuid } from '../useActiveProject';
 import { useProject } from '../useProject';
+import { useProjects } from '../useProjects';
 import { useServerFeatureFlag } from '../useServerOrClientFeatureFlag';
 import { type SettingsContext } from './types';
 
@@ -75,10 +77,6 @@ export const useSettingsContext = (): SettingsContext => {
         FeatureFlags.EnableDataApps,
     );
 
-    const { data: dataAppExternalAccessFlag } = useServerFeatureFlag(
-        FeatureFlags.EnableDataAppExternalAccess,
-    );
-
     const { data: proLimitsFlag } = useServerFeatureFlag(
         FeatureFlags.ProLimits,
     );
@@ -104,6 +102,32 @@ export const useSettingsContext = (): SettingsContext => {
     } = useProject(activeProjectUuid);
 
     const isGitProject = useIsGitProject(activeProjectUuid ?? '');
+
+    // "Ask AI" settings are visible to org AI admins (all projects) and to
+    // project-scoped AI admins (only the projects they can reach). These are
+    // administration surfaces, so visibility mirrors the backend MANAGE gate
+    // (resolveReadScope): `manage:OrganizationAiAgent` org-wide, else
+    // `manage:AiAgent` over the access-filtered project list. Using `manage`
+    // (not `view`) keeps interactive_viewers — who hold org-wide view:AiAgent —
+    // out, matching what the backend actually authorizes.
+    const { data: projects } = useProjects();
+    const organizationUuid = organization?.organizationUuid;
+    const canManageOrgAiAgent =
+        user?.ability?.can(
+            'manage',
+            subject('OrganizationAiAgent', { organizationUuid }),
+        ) ?? false;
+    const hasAnyAiAgentAccess =
+        canManageOrgAiAgent ||
+        (projects ?? []).some((p) =>
+            user?.ability?.can(
+                'manage',
+                subject('AiAgent', {
+                    organizationUuid,
+                    projectUuid: p.projectUuid,
+                }),
+            ),
+        );
 
     const allowPasswordAuthentication =
         !health?.auth.disablePasswordAuthentication;
@@ -147,10 +171,11 @@ export const useSettingsContext = (): SettingsContext => {
         isServiceAccountsEnabled,
         isAiCopilotEnabledOrTrial,
         shouldShowAiAgentReviews,
+        canManageOrgAiAgent,
+        hasAnyAiAgentAccess,
         isAiOrganizationSettingsLoading:
             aiOrganizationSettingsQuery.isInitialLoading,
         dataAppsFlag,
-        dataAppExternalAccessFlag,
         embeddingEnabled,
         allowPasswordAuthentication,
         hasSocialLogin,

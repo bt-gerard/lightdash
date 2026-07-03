@@ -1,5 +1,6 @@
 import { type ParametersValuesMap, type PivotConfiguration } from '../..';
 import type { QueryExecutionContext } from '../analytics';
+import type { ConditionalFormattingConfig } from '../conditionalFormatting';
 import type { DownloadFileType } from '../downloadFile';
 import type { AndFilterGroup, DashboardFilters, Filters } from '../filter';
 import type { MetricQueryRequest, SortField } from '../metricQuery';
@@ -35,6 +36,12 @@ export type ExecuteAsyncSavedChartRequestParams =
         versionUuid?: string;
         limit?: number | null | undefined;
         pivotResults?: boolean;
+        // ANDed onto the chart's own filters server-side (narrowing only).
+        filters?: Filters;
+        // Filters whose target field is absent from the chart's explore are
+        // dropped silently — a dashboard hosting a data-app tile filters
+        // across explores and one mismatch shouldn't break the linked chart.
+        dashboardFilters?: DashboardFilters;
     };
 
 export type ExecuteAsyncDashboardChartRequestParams =
@@ -126,6 +133,7 @@ export type DownloadAsyncQueryResultsRequestParams = {
     pivotConfig?: PivotConfig;
     exportPivotedData?: boolean;
     attachmentDownloadName?: string;
+    conditionalFormattings?: ConditionalFormattingConfig[];
 };
 
 export type ExecuteAsyncFieldValueSearchRequestParams =

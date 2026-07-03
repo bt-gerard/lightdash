@@ -8,13 +8,13 @@ import {
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import { lightdashConfigMock } from '../../../../config/lightdashConfig.mock';
-import { applyStreamingCapability, getModel } from './index';
+import { applyStreamingCapability, getDefaultModel, getModel } from './index';
 
-jest.mock('ai', () => {
-    const actual = jest.requireActual('ai');
+vi.mock('ai', async () => {
+    const actual = await vi.importActual<typeof import('ai')>('ai');
     return {
         ...actual,
-        wrapLanguageModel: jest.fn(actual.wrapLanguageModel),
+        wrapLanguageModel: vi.fn(actual.wrapLanguageModel),
     };
 });
 
@@ -31,9 +31,41 @@ const copilotConfigWithStreaming = (supportsStreaming: boolean) => ({
     },
 });
 
+describe('getDefaultModel', () => {
+    it('returns the default model when the configured provider is present', () => {
+        expect(getDefaultModel(baseCopilotConfig)).toEqual({
+            name: baseCopilotConfig.providers.openai!.modelName,
+            provider: 'openai',
+        });
+    });
+
+    it('returns null when the configured default provider is not set up', () => {
+        // Reproduces the blank-Settings-page bug: defaultProvider `openai`
+        // with no OPENAI_API_KEY (providers.openai absent) must degrade to
+        // null rather than throw, so /aiAgents/admin/settings stays 2xx.
+        const configWithoutProvider = {
+            ...baseCopilotConfig,
+            defaultProvider: 'openai' as const,
+            providers: {},
+        };
+
+        expect(getDefaultModel(configWithoutProvider)).toBeNull();
+    });
+
+    it('returns null when the default azure provider is not configured', () => {
+        const configWithoutAzure = {
+            ...baseCopilotConfig,
+            defaultProvider: 'azure' as const,
+            providers: {},
+        };
+
+        expect(getDefaultModel(configWithoutAzure)).toBeNull();
+    });
+});
+
 describe('getModel', () => {
     beforeEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
     });
 
     it('does not wrap the model when the provider supports streaming', () => {
@@ -46,9 +78,7 @@ describe('getModel', () => {
         const { model } = getModel(copilotConfigWithStreaming(false));
 
         expect(wrapLanguageModel).toHaveBeenCalledTimes(1);
-        expect(model).toBe(
-            jest.mocked(wrapLanguageModel).mock.results[0].value,
-        );
+        expect(model).toBe(vi.mocked(wrapLanguageModel).mock.results[0].value);
     });
 });
 

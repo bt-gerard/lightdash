@@ -16,7 +16,6 @@ import {
     CalculateSubtotalsFromQuery,
     CalculateTotalFromQuery,
     CompiledDimension,
-    convertCustomFormatToFormatExpression,
     convertFieldRefToFieldId,
     createVirtualView as createVirtualViewObject,
     CreateWarehouseCredentials,
@@ -48,12 +47,14 @@ import {
     getDimensions,
     getDimensionsWithValidParameters,
     getErrorMessage,
+    getFieldFormatOverrideProps,
     getFieldsFromMetricQuery,
     getItemId,
     getItemMap,
     getMetricOverridesWithPopInheritance,
     getMetrics,
     getMetricsWithValidParameters,
+    hasReservedParameterReference,
     isCartesianChartConfig,
     isCustomBinDimension,
     isCustomDimension,
@@ -71,6 +72,7 @@ import {
     normalizeIndexColumns,
     NotFoundError,
     NotSupportedError,
+    OrganizationAccessStatus,
     ParameterError,
     ParseError,
     PivotConfig,
@@ -83,6 +85,7 @@ import {
     S3Error,
     SchedulerFormat,
     SqlChart,
+    TrialExpiredError,
     UnexpectedServerError,
     UserAccessControls,
     WarehouseClient,
@@ -116,6 +119,7 @@ import {
     type SessionUser,
     type SpaceSummaryBase,
     type WarehouseExecuteAsyncQuery,
+    type WarehousePhaseTimings,
     type WarehouseResults,
     type WarehouseSqlBuilder,
 } from '@lightdash/common';
@@ -134,13 +138,14 @@ import type { DbProjectParameter } from '../../database/entities/projectParamete
 import { getDuckdbRuntimeConfig } from '../../ee/services/AsyncQueryService/getDuckdbRuntimeConfig';
 import Logger from '../../logging/logger';
 import { measureTime } from '../../logging/measureTime';
-import { getSchedulerContext } from '../../logging/winston';
+import { getAppContext, getSchedulerContext } from '../../logging/winston';
 import { DownloadAuditModel } from '../../models/DownloadAuditModel';
 import { QueryHistoryModel } from '../../models/QueryHistoryModel/QueryHistoryModel';
 import type { SavedSqlModel } from '../../models/SavedSqlModel';
 import PrometheusMetrics from '../../prometheus/PrometheusMetrics';
 import { compileMetricQuery } from '../../queryCompiler';
 import type { SchedulerClient } from '../../scheduler/SchedulerClient';
+import { traceSpan } from '../../tracing/tracing';
 import { wrapSentryTransaction } from '../../utils';
 import { metricQueryWithLimit as applyMetricQueryLimit } from '../../utils/csvLimitUtils';
 import {
@@ -162,6 +167,7 @@ import type { ICacheService } from '../CacheService/ICacheService';
 import { CreateCacheResult } from '../CacheService/types';
 import { CsvService } from '../CsvService/CsvService';
 import { ExcelService } from '../ExcelService/ExcelService';
+import { OrganizationAccessService } from '../OrganizationAccessService/OrganizationAccessService';
 import { resolveOrganizationExportLimits } from '../OrganizationSettingsService/resolveExportLimits';
 import { PermissionsService } from '../PermissionsService/PermissionsService';
 import { PersistentDownloadFileService } from '../PersistentDownloadFileService/PersistentDownloadFileService';
@@ -274,6 +280,7 @@ type AsyncQueryServiceArguments = ProjectServiceArguments & {
     natsClient: INatsClient;
     permissionsService: PermissionsService;
     persistentDownloadFileService: PersistentDownloadFileService;
+    organizationAccessService: OrganizationAccessService;
     preAggregateStrategy?: PreAggregateStrategy;
 };
 
@@ -362,6 +369,8 @@ export class AsyncQueryService extends ProjectService {
 
     persistentDownloadFileService: PersistentDownloadFileService;
 
+    private readonly organizationAccessService: OrganizationAccessService;
+
     protected readonly preAggregateStrategy: PreAggregateStrategy;
 
     constructor(args: AsyncQueryServiceArguments) {
@@ -378,6 +387,7 @@ export class AsyncQueryService extends ProjectService {
         this.natsClient = args.natsClient;
         this.permissionsService = args.permissionsService;
         this.persistentDownloadFileService = args.persistentDownloadFileService;
+        this.organizationAccessService = args.organizationAccessService;
         this.preAggregateStrategy =
             args.preAggregateStrategy ?? new NoOpPreAggregateStrategy();
     }
@@ -1409,6 +1419,7 @@ export class AsyncQueryService extends ProjectService {
         exportPivotedData = true,
         attachmentDownloadName,
         expirationSecondsOverride,
+        conditionalFormattings,
     }: DownloadAsyncQueryResultsArgs): Promise<DownloadAsyncQueryResultsInternal> {
         assertIsAccountWithOrg(account);
 
@@ -1638,56 +1649,68 @@ export class AsyncQueryService extends ProjectService {
                 );
             case DownloadFileType.XLSX: {
                 // Check if this is a pivot table download
-                const xlsxResult =
+                const isPivotXlsx =
                     downloadPivotConfig &&
                     pivotDetails &&
-                    queryHistory.metricQuery
-                        ? await ExcelService.downloadAsyncPivotTableXlsx({
-                              resultsFileName,
-                              fields,
+                    queryHistory.metricQuery;
+
+                // Conditional formatting fills are only applied to the
+                // (unpivoted) direct export. Pivoted exports remap value
+                // columns and are not yet supported — log rather than fail.
+                if (isPivotXlsx && conditionalFormattings?.length) {
+                    this.logger.warn(
+                        'Conditional formatting is not applied to pivoted XLSX exports',
+                        { queryUuid },
+                    );
+                }
+
+                const xlsxResult = isPivotXlsx
+                    ? await ExcelService.downloadAsyncPivotTableXlsx({
+                          resultsFileName,
+                          fields,
+                          resultsStorageClient,
+                          exportsStorageClient: this.exportsStorageClient,
+                          lightdashConfig: this.lightdashConfig,
+                          csvCellsLimit: (
+                              await resolveOrganizationExportLimits(
+                                  this.organizationSettingsModel,
+                                  this.lightdashConfig.query,
+                                  organizationUuid,
+                              )
+                          ).csvCellsLimit,
+                          pivotDetails,
+                          warehouseRowTotals,
+                          warehouseColumnTotals,
+                          options: {
+                              onlyRaw,
+                              showTableNames,
+                              customLabels,
+                              columnOrder: validColumnOrder,
+                              hiddenFields,
+                              pivotConfig: downloadPivotConfig,
+                              attachmentDownloadName,
+                          },
+                          timezone: displayTimezone ?? undefined,
+                      })
+                    : // Use direct Excel export to bypass PassThrough + Upload hanging issues
+                      await ExcelService.downloadAsyncExcelDirectly(
+                          resultsFileName,
+                          resultFields,
+                          {
                               resultsStorageClient,
                               exportsStorageClient: this.exportsStorageClient,
-                              lightdashConfig: this.lightdashConfig,
-                              csvCellsLimit: (
-                                  await resolveOrganizationExportLimits(
-                                      this.organizationSettingsModel,
-                                      this.lightdashConfig.query,
-                                      organizationUuid,
-                                  )
-                              ).csvCellsLimit,
-                              pivotDetails,
-                              warehouseRowTotals,
-                              warehouseColumnTotals,
-                              options: {
-                                  onlyRaw,
-                                  showTableNames,
-                                  customLabels,
-                                  columnOrder: validColumnOrder,
-                                  hiddenFields,
-                                  pivotConfig: downloadPivotConfig,
-                                  attachmentDownloadName,
-                              },
-                              timezone: displayTimezone ?? undefined,
-                          })
-                        : // Use direct Excel export to bypass PassThrough + Upload hanging issues
-                          await ExcelService.downloadAsyncExcelDirectly(
-                              resultsFileName,
-                              resultFields,
-                              {
-                                  resultsStorageClient,
-                                  exportsStorageClient:
-                                      this.exportsStorageClient,
-                              },
-                              {
-                                  onlyRaw,
-                                  showTableNames,
-                                  customLabels,
-                                  columnOrder: validColumnOrder,
-                                  hiddenFields,
-                                  attachmentDownloadName,
-                              },
-                              displayTimezone ?? undefined,
-                          );
+                          },
+                          {
+                              onlyRaw,
+                              showTableNames,
+                              customLabels,
+                              columnOrder: validColumnOrder,
+                              hiddenFields,
+                              attachmentDownloadName,
+                              conditionalFormattings,
+                          },
+                          displayTimezone ?? undefined,
+                      );
                 const xlsxPersistentUrl =
                     await this.persistentDownloadFileService.createPersistentUrl(
                         {
@@ -2134,7 +2157,7 @@ export class AsyncQueryService extends ProjectService {
             throw new ParameterError(`Invalid data timezone: ${dataTimezone}`);
         }
 
-        const warehouseResults = await Sentry.startSpan(
+        const warehouseResults = await traceSpan(
             {
                 op: 'db.query',
                 name: 'warehouse.executeAsyncQuery',
@@ -2509,6 +2532,7 @@ export class AsyncQueryService extends ProjectService {
             | CreateWarehouseCredentials['type']
             | undefined;
         let warehouseClient: WarehouseClient;
+        let tunnelConnectMs: number | null = null;
 
         const analyticsIdentity = isRegisteredUser
             ? { userId: userUuid }
@@ -2550,6 +2574,7 @@ export class AsyncQueryService extends ProjectService {
                 );
                 warehouseClient = warehouseConnection.warehouseClient;
                 sshTunnel = warehouseConnection.sshTunnel;
+                tunnelConnectMs = warehouseConnection.tunnelConnectMs;
             }
 
             const isTimezoneSupportEnabled =
@@ -2638,10 +2663,11 @@ export class AsyncQueryService extends ProjectService {
                     totalRows,
                     queryMetadata,
                     queryId,
+                    phaseTimings,
                 },
                 pivotDetails,
                 columns,
-            } = await Sentry.startSpan(
+            } = await traceSpan(
                 {
                     op: 'query.execute',
                     name: `query.execute.${executionSource}`,
@@ -2666,10 +2692,21 @@ export class AsyncQueryService extends ProjectService {
                     }),
             );
 
+            const warehousePhaseTimings: WarehousePhaseTimings =
+                tunnelConnectMs !== null
+                    ? { ssh_tunnel: tunnelConnectMs, ...phaseTimings }
+                    : phaseTimings;
+
             this.prometheusMetrics?.observeWarehouseDuration(
                 durationMs,
-                warehouseCredentialsType || 'unknown',
-                queryTags.query_context || 'unknown',
+                warehouseCredentialsType,
+                queryTags.query_context,
+            );
+
+            this.prometheusMetrics?.observeWarehousePhaseDurations(
+                warehousePhaseTimings,
+                warehouseCredentialsType,
+                queryTags.query_context,
             );
 
             this.analytics.track({
@@ -2677,6 +2714,7 @@ export class AsyncQueryService extends ProjectService {
                 event: 'query.ready',
                 properties: {
                     queryId: queryUuid,
+                    organizationId: organizationUuid,
                     projectId: projectUuid,
                     warehouseType: warehouseClient.credentials.type,
                     executionSource,
@@ -2697,7 +2735,7 @@ export class AsyncQueryService extends ProjectService {
             if (stream) {
                 // Wait for the file to be written before marking the query as ready
                 const s3UploadStart = Date.now();
-                const closeResult = await Sentry.startSpan(
+                const closeResult = await traceSpan(
                     {
                         op: 's3.upload',
                         name: 's3.results.upload',
@@ -2789,8 +2827,13 @@ export class AsyncQueryService extends ProjectService {
             const streamMetricsStr = streamMetrics
                 ? ` stream_bytes=${streamMetrics.totalBytesWritten} stream_rows=${streamMetrics.totalRowsWritten} write_calls=${streamMetrics.writeCalls}`
                 : '';
+            const phasesStr = Object.keys(warehousePhaseTimings).length
+                ? ` phases=[${Object.entries(warehousePhaseTimings)
+                      .map(([phase, ms]) => `${phase}=${Math.round(ms)}ms`)
+                      .join(' ')}]`
+                : '';
             this.logger.info(
-                `Query ${queryUuid} completed: source=${executionSource} s3_stream_create=${s3StreamCreatedMs}ms query_exec=${queryExecMs}ms s3_upload_close=${s3UploadCloseMs}ms db_update=${dbUpdateMs}ms total=${totalMs}ms rows=${pivotDetails?.totalRows ?? totalRows}${streamMetricsStr}`,
+                `Query ${queryUuid} completed: source=${executionSource} s3_stream_create=${s3StreamCreatedMs}ms query_exec=${queryExecMs}ms s3_upload_close=${s3UploadCloseMs}ms db_update=${dbUpdateMs}ms total=${totalMs}ms rows=${pivotDetails?.totalRows ?? totalRows}${streamMetricsStr}${phasesStr}`,
             );
 
             // Track successful query in Prometheus
@@ -2837,6 +2880,7 @@ export class AsyncQueryService extends ProjectService {
                 event: 'query.error',
                 properties: {
                     queryId: queryUuid,
+                    organizationId: organizationUuid,
                     projectId: projectUuid,
                     warehouseType: warehouseCredentialsType,
                     executionSource,
@@ -3154,6 +3198,19 @@ export class AsyncQueryService extends ProjectService {
         return tags;
     }
 
+    /**
+     * Reads the originating data app from the request-scoped ExecutionContext
+     * (populated by requestExecutionContextMiddleware from the app attribution
+     * header) so warehouse queries can be tagged back to the app. Mirrors
+     * getSchedulerQueryTags — provenance is carried ambiently, not via query
+     * args. Returns an empty object outside an app-originated request. The id
+     * is self-reported and not authoritative; tracking only.
+     */
+    private static getAppQueryTags(): Partial<RunQueryTags> {
+        const { app_uuid: appUuid } = getAppContext();
+        return appUuid ? { app_uuid: appUuid } : {};
+    }
+
     private static buildQueryTags(query: QueryHistory): RunQueryTags {
         let actorTags: Record<string, string>;
         if (query.createdByActorType === 'jwt') {
@@ -3288,6 +3345,7 @@ export class AsyncQueryService extends ProjectService {
         parameters,
         projectUuid,
         pivotConfiguration,
+        pivotDimensions,
         userAttributeOverrides,
         materializationRole,
         columnTimezone,
@@ -3309,6 +3367,13 @@ export class AsyncQueryService extends ProjectService {
         warehouseSqlBuilder: WarehouseSqlBuilder;
         explore: Explore;
         pivotConfiguration?: PivotConfiguration;
+        /**
+         * Chart's pivotConfig.columns, for chart types that build no
+         * pivotConfiguration (big number, map, sankey) but still need row_total()
+         * to resolve — see BuildQueryProps.pivotDimensions. Defaults to the
+         * metricQuery's own pivotDimensions (the explorer path).
+         */
+        pivotDimensions?: string[];
         columnTimezone?: string;
         sessionTimezone?: string | null;
         /**
@@ -3372,7 +3437,7 @@ export class AsyncQueryService extends ProjectService {
             parameters,
             availableParameterDefinitions,
             pivotConfiguration,
-            pivotDimensions: metricQuery.pivotDimensions,
+            pivotDimensions: pivotDimensions ?? metricQuery.pivotDimensions,
             useTimezoneAwareDateTrunc,
             columnTimezone,
             applyDateZoomToFilters,
@@ -3396,14 +3461,7 @@ export class AsyncQueryService extends ProjectService {
                             key,
                             {
                                 ...value,
-                                // Override the format expression with the metric/dimension query override instead of adding `formatOptions` to the item
-                                // This ensures that legacy `formatOptions` are kept as is and we don't need to change logic over which format takes precedence
-                                format: convertCustomFormatToFormatExpression(
-                                    formatOptions,
-                                ),
-                                // The format expression can't encode the separator, so carry it
-                                // separately for the render paths (getEffectiveSeparator reads it).
-                                separator: formatOptions.separator,
+                                ...getFieldFormatOverrideProps(formatOptions),
                             },
                         ];
                     }
@@ -3432,6 +3490,16 @@ export class AsyncQueryService extends ProjectService {
         };
     }
 
+    private async assertOrganizationNotBlocked(
+        account: Account,
+    ): Promise<void> {
+        const access =
+            await this.organizationAccessService.getOrganizationAccess(account);
+        if (access.status === OrganizationAccessStatus.TRIAL_EXPIRED) {
+            throw new TrialExpiredError();
+        }
+    }
+
     private async executePreparedAsyncQuery(
         // TODO: remove metric query, fields, etc from args once they are no longer needed in the database
         args: ExecuteAsyncMetricQueryArgs & {
@@ -3453,6 +3521,7 @@ export class AsyncQueryService extends ProjectService {
         requestParameters: ExecuteAsyncQueryRequestParams,
         organizationUuid: string,
     ): Promise<ExecuteAsyncQueryReturn> {
+        await this.assertOrganizationNotBlocked(args.account);
         return wrapSentryTransaction(
             'ProjectService.executeAsyncQuery',
             {},
@@ -4124,6 +4193,7 @@ export class AsyncQueryService extends ProjectService {
         const queryTags: RunQueryTags = {
             ...this.getUserQueryTags(account),
             ...AsyncQueryService.getSchedulerQueryTags(),
+            ...AsyncQueryService.getAppQueryTags(),
             organization_uuid: organizationUuid,
             project_uuid: projectUuid,
             explore_name: inputMetricQuery.exploreName,
@@ -4559,6 +4629,7 @@ export class AsyncQueryService extends ProjectService {
         parameters,
         pivotResults,
         filterOverrides,
+        dashboardFilters,
     }: ExecuteAsyncSavedChartQueryArgs): Promise<ApiExecuteAsyncMetricQueryResults> {
         // Check user is in organization
         assertIsAccountWithOrg(account);
@@ -4666,6 +4737,10 @@ export class AsyncQueryService extends ProjectService {
             chartUuid,
             versionUuid,
             limit,
+            parameters,
+            pivotResults,
+            filters: filterOverrides,
+            dashboardFilters,
         };
 
         const { maxLimit, csvCellsLimit } =
@@ -4675,7 +4750,7 @@ export class AsyncQueryService extends ProjectService {
                 savedChartOrganizationUuid,
             );
 
-        const metricQueryWithLimit = applyMetricQueryLimit(
+        const limitedMetricQuery = applyMetricQueryLimit(
             metricQuery,
             limit,
             csvCellsLimit,
@@ -4699,6 +4774,32 @@ export class AsyncQueryService extends ProjectService {
                 savedChartTableName,
                 savedChartOrganizationUuid,
             );
+
+        // Dashboard filters (from a data-app tile) are merged once the explore
+        // is known so filters targeting fields outside it are dropped silently
+        // — mirrors executeAsyncMetricQuery; see ExecuteAsyncSavedChartRequestParams.
+        let metricQueryWithLimit = limitedMetricQuery;
+        if (dashboardFilters) {
+            const availableFieldIds = getAvailableFilterFieldIds(explore);
+            metricQueryWithLimit = addDashboardFiltersToMetricQuery(
+                limitedMetricQuery,
+                {
+                    dimensions: getDashboardFilterRulesForTables(
+                        availableFieldIds,
+                        dashboardFilters.dimensions,
+                    ),
+                    metrics: getDashboardFilterRulesForTables(
+                        availableFieldIds,
+                        dashboardFilters.metrics,
+                    ),
+                    tableCalculations: getDashboardFilterRulesForTables(
+                        availableFieldIds,
+                        dashboardFilters.tableCalculations,
+                    ),
+                },
+                explore,
+            );
+        }
 
         const warehouseCredentials = await this.getWarehouseCredentials({
             projectUuid,
@@ -4756,6 +4857,7 @@ export class AsyncQueryService extends ProjectService {
             parameters: combinedParameters,
             projectUuid,
             pivotConfiguration,
+            pivotDimensions: savedChart.pivotConfig?.columns,
             columnTimezone: getColumnTimezone(warehouseCredentials),
             preloadedUserAccessControls,
         });
@@ -5216,6 +5318,7 @@ export class AsyncQueryService extends ProjectService {
             parameters: combinedParameters,
             projectUuid,
             pivotConfiguration,
+            pivotDimensions: savedChart.pivotConfig?.columns,
             columnTimezone: getColumnTimezone(warehouseCredentials),
             sessionTimezone,
             preloadedUserAccessControls: userAccessControls,
@@ -5303,7 +5406,12 @@ export class AsyncQueryService extends ProjectService {
             fields: fieldsWithOverrides,
             parameterReferences,
             usedParametersValues: usedParameters,
-            dateZoomApplied,
+            // In effect when a date dimension was overridden, or a grain is selected and
+            // the chart references a reserved date-zoom parameter.
+            dateZoomApplied:
+                dateZoomApplied ||
+                (!!dateZoom?.granularity &&
+                    hasReservedParameterReference(parameterReferences)),
             resolvedTimezone: displayTimezone,
         };
     }

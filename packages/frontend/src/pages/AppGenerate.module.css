@@ -20,16 +20,132 @@
     min-width: 300px;
 }
 
+/* Compose stage: the chat panel becomes a centered card on the muted
+   backdrop, then morphs into the split sidebar (see .chatPanel's
+   view-transition-name) on first submit. */
+.composeLayout {
+    height: calc(100vh - 50px);
+    overflow: visible;
+    display: flex;
+    justify-content: center;
+    padding: var(--mantine-spacing-md);
+
+    @mixin light {
+        background-color: var(--mantine-color-ldGray-0);
+    }
+    @mixin dark {
+        background-color: var(--mantine-color-dark-8);
+    }
+}
+
+/* The compose Panel fills the group; center the (height-capped) card
+   inside it so it doesn't stretch to the full viewport height. */
+.chatPanelOuterCompose {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+:global(body:has(#preview-banner)) .composeLayout,
+:global(body:has(#impersonation-banner)) .composeLayout {
+    height: calc(100vh - 50px - 35px);
+}
+
 .chatPanel {
     display: flex;
     flex-direction: column;
     height: 100%;
+    view-transition-name: app-composer;
 
     @mixin light {
         background-color: var(--mantine-color-white);
     }
     @mixin dark {
         background-color: var(--mantine-color-dark-7);
+    }
+}
+
+/* Cute springy expand when the centered composer morphs into the split
+   sidebar (and the preview panel slides in). */
+:global(::view-transition-group(app-composer)) {
+    animation-duration: 460ms;
+    animation-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+:global(::view-transition-old(app-composer)),
+:global(::view-transition-new(app-composer)) {
+    animation-duration: 460ms;
+    animation-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.composeHeading {
+    text-align: center;
+    align-items: center;
+    padding: var(--mantine-spacing-xl) var(--mantine-spacing-xl) 0;
+}
+
+.composeTitle {
+    letter-spacing: -0.02em;
+}
+
+.startingFromChip {
+    align-self: center;
+    max-width: 220px;
+}
+
+.chatPanelCompose {
+    position: relative;
+    justify-content: flex-start;
+    max-width: 760px;
+    width: 100%;
+    margin: 0 auto;
+    /* Hug the content (no stray whitespace between the fanout and the prompt)
+       but cap on tall viewports and scroll — never clip — when the prompt +
+       fanout can't both fit. */
+    height: auto;
+    max-height: min(760px, calc(100vh - 84px));
+    border-radius: var(--mantine-radius-lg);
+    border: 1px solid;
+    overflow: hidden auto;
+    /* Reserve room for the window-chrome dots / back button row. */
+    padding-top: 4px;
+
+    @mixin light {
+        border-color: var(--mantine-color-ldGray-2);
+        box-shadow:
+            0 1px 2px alpha(var(--mantine-color-black), 0.04),
+            0 12px 32px -12px alpha(var(--mantine-color-black), 0.12);
+    }
+    @mixin dark {
+        border-color: var(--mantine-color-dark-4);
+        box-shadow:
+            0 1px 2px alpha(var(--mantine-color-black), 0.2),
+            0 16px 40px -12px alpha(var(--mantine-color-black), 0.5);
+    }
+}
+
+/* Three traffic-light dots, echoing the data-app (window) icon. */
+.chatPanelCompose::before {
+    content: '';
+    position: absolute;
+    top: 18px;
+    left: 22px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    z-index: 1;
+
+    @mixin light {
+        background-color: var(--mantine-color-ldGray-3);
+        box-shadow:
+            14px 0 0 var(--mantine-color-ldGray-3),
+            28px 0 0 var(--mantine-color-ldGray-3);
+    }
+    @mixin dark {
+        background-color: var(--mantine-color-dark-3);
+        box-shadow:
+            14px 0 0 var(--mantine-color-dark-3),
+            28px 0 0 var(--mantine-color-dark-3);
     }
 }
 
@@ -43,6 +159,11 @@
     gap: var(--mantine-spacing-lg);
 }
 
+.chatPanelCompose .chatMessages {
+    flex: 0 0 auto;
+    padding: 0;
+}
+
 .emptyChat {
     flex: 1;
     display: flex;
@@ -53,6 +174,10 @@
     padding: var(--mantine-spacing-xl);
     padding-top: 50px;
     text-align: center;
+}
+
+.chatPanelCompose .emptyChat {
+    display: none;
 }
 
 .userMessage {
@@ -92,24 +217,24 @@
     line-height: 1.5;
 }
 
-.markdown {
-    background-color: transparent !important;
-    font-size: var(--mantine-font-size-sm) !important;
-    line-height: 1.5 !important;
-    font-family: inherit !important;
-}
-
-.markdownDimmed,
-.markdownDimmed * {
+/* Dimmed "building…" status line — the AiMarkdown wrapper already handles
+ * layout/typography; we only override the colour to read as muted progress. */
+.statusMarkdown,
+.statusMarkdown * {
     color: var(--mantine-color-dimmed) !important;
 }
 
-.markdownInline p {
-    margin: 0 !important;
+/* Align the "continue building" hint with the status text above it, which is
+ * rendered via AiMarkdown and carries the shared 7px markdown padding-left. */
+.buildingHint {
+    padding-left: 7px;
 }
 
 .chatInputArea {
-    flex-shrink: 0;
+    flex: 0 1 auto;
+    min-height: 0;
+    max-height: 46%;
+    overflow-y: auto;
     padding: var(--mantine-spacing-sm) var(--mantine-spacing-sm) 48px;
     border-top: 1px solid;
 
@@ -119,6 +244,21 @@
     @mixin dark {
         border-color: var(--mantine-color-ldDark-4);
     }
+}
+
+/* Compose screen: heading + input both take their natural height and sit
+   snug together; the card hugs them and scrolls as a whole if they overflow.
+   The input keeps its toolbar fully visible (no internal max-height clip). */
+.chatPanelCompose .composeHeading {
+    flex: 0 0 auto;
+}
+
+.chatPanelCompose .chatInputArea {
+    flex: 0 0 auto;
+    max-height: none;
+    overflow: visible;
+    border-top: 0;
+    padding-top: var(--mantine-spacing-sm);
 }
 
 .inputWrapper {
@@ -246,32 +386,6 @@
     @mixin dark {
         background-color: var(--mantine-color-dark-8);
     }
-}
-
-.previewHeader {
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    gap: var(--mantine-spacing-sm);
-    padding: var(--mantine-spacing-md);
-    border-bottom: 1px solid;
-
-    @mixin light {
-        background-color: var(--mantine-color-white);
-        border-color: var(--mantine-color-ldGray-2);
-    }
-    @mixin dark {
-        background-color: var(--mantine-color-dark-7);
-        border-color: var(--mantine-color-ldDark-4);
-    }
-}
-
-.previewHeaderInfo {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-    flex: 1;
 }
 
 .previewContent {

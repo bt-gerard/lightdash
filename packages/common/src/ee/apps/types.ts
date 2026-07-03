@@ -1,5 +1,10 @@
+import { z } from 'zod';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 import { type ApiSuccess, type ApiSuccessEmpty } from '../../types/api/success';
-import { type KnexPaginateArgs } from '../../types/knex-paginate';
+import {
+    type KnexPaginateArgs,
+    type KnexPaginatedData,
+} from '../../types/knex-paginate';
 import { type MetricQuery } from '../../types/metricQuery';
 
 /**
@@ -27,6 +32,17 @@ export type AppVersionStatus =
 export const isAppVersionInProgress = (status: AppVersionStatus): boolean =>
     !(APP_VERSION_TERMINAL_STATUSES as readonly string[]).includes(status);
 
+/**
+ * Data apps are created with an empty name and only get an auto-generated
+ * title after their first version builds successfully. If that build never
+ * completes the name stays blank. Everywhere an app name is shown to the user,
+ * fall back to a stable, identifiable placeholder instead of rendering nothing
+ * — the uuid suffix keeps two unnamed apps distinguishable. Use this as the
+ * single source of truth so the convention stays consistent across the UI.
+ */
+export const getAppDisplayName = (name: string, appUuid: string): string =>
+    name.trim().length > 0 ? name : `Untitled app ${appUuid.slice(0, 8)}`;
+
 export type ApiGenerateAppResponse = ApiSuccess<{
     appUuid: string;
     version: number;
@@ -36,11 +52,15 @@ export type ApiAppImageUploadResponse = ApiSuccess<{
     imageId: string;
 }>;
 
+/** Starter template for a single-tile renderer that emits a typed viz schema. */
+export const DATA_APP_VIZ_TEMPLATE = 'data_app_viz' as const;
+
 export const DATA_APP_TEMPLATES = [
     'dashboard',
     'slideshow',
     'pdf',
     'custom',
+    DATA_APP_VIZ_TEMPLATE,
 ] as const;
 export type DataAppTemplate = (typeof DATA_APP_TEMPLATES)[number];
 
@@ -63,6 +83,10 @@ export const DEFAULT_DATA_APP_CLAUDE_MODEL: DataAppClaudeModel = 'sonnet';
 export type AppChartReference = {
     uuid: string;
     includeSampleData: boolean;
+    /** When true the app runs this chart live by UUID (linked) instead of
+     *  copying its metric query inline. Optional for backwards compatibility —
+     *  omitted (older clients) is treated as false (copy) on the server. */
+    linkLive?: boolean;
 };
 
 /**
@@ -79,7 +103,7 @@ export type AppDashboardReference = {
  * An external connection attached to a generation request. Linked to the app
  * (under `alias`) server-side at creation — before the catalog stage — so the
  * generated app can call it via `client.externalFetch(alias, …)`. Validated
- * (must belong to the app's project) and gated on the external-access flag.
+ * (must belong to the app's project) before linking.
  */
 export type AppExternalConnectionReference = {
     externalConnectionUuid: string;
@@ -177,6 +201,15 @@ export type AppVersionChartResource = {
     chartUuid: string;
     chartName: string;
     chartKind: string | null;
+    /** Whether this chart was attached as a live link — persists the linked
+     *  chip indicator across reloads. Optional for backwards compatibility. */
+    linkLive?: boolean;
+};
+
+export type AppVersionExternalConnectionResource = {
+    externalConnectionUuid: string;
+    name: string;
+    alias: string;
 };
 
 export type AppVersionDesignSnapshot = {
@@ -188,6 +221,7 @@ export type AppVersionDesignSnapshot = {
 export type AppVersionResources = {
     images: AppVersionImageResource[];
     charts: AppVersionChartResource[];
+    externalConnections?: AppVersionExternalConnectionResource[];
     dashboardName: string | null;
     // Pre-build Q&A captured at the time of generation. Persisted alongside
     // the prompt so the chat history can render the clarifications as their
@@ -204,10 +238,19 @@ export type AppVersionResources = {
     // history reflects which theme was active even if it was later renamed
     // or deleted.
     design?: AppVersionDesignSnapshot | null;
+    // The viz declaration (fields + configOptions) for a data_app_viz version,
+    // sourced from app_versions.viz_schema. Null/absent for non-viz versions or
+    // versions whose generation emitted no valid schema. Optional for rows
+    // predating this field.
+    vizSchema?: DataAppVizSchema | null;
 };
 
 export type ApiAppImageUrlResponse = ApiSuccess<{
     imageUrl: string;
+}>;
+
+export type ApiAppThumbnailUrlResponse = ApiSuccess<{
+    thumbnailUrl: string;
 }>;
 
 export type ApiAppVersionSummary = {
@@ -215,6 +258,10 @@ export type ApiAppVersionSummary = {
     prompt: string;
     status: AppVersionStatus;
     statusMessage: string | null;
+    // Detailed failure reason (e.g. the build's stderr) when `status` is
+    // `error`; null otherwise. `statusMessage` carries the short user-facing
+    // line (e.g. "Build failed"); this carries the why.
+    error: string | null;
     createdAt: Date;
     // When the version last transitioned (e.g. into `ready` or `error`).
     // The chat UI shows this as the assistant-reply timestamp so it reflects
@@ -237,7 +284,8 @@ export type ApiGetAppResponse = ApiSuccess<{
     description: string;
     createdByUserUuid: string;
     spaceUuid: string | null;
-    // null when the user picked "Custom" or for apps that pre-date template persistence
+    spaceName: string | null;
+    // The stored template flavor; null for "Custom" or apps predating template persistence.
     template: Exclude<DataAppTemplate, 'custom'> | null;
     pinnedListUuid: string | null;
     pinnedListOrder: number | null;
@@ -346,6 +394,11 @@ export type ChartReference = {
     exploreName: string;
     metricQuery: MetricQuery;
     sampleData: ChartSampleData | null; // null when the user did not opt in
+    /** Saved chart UUID — surfaced into the sandbox so a linked chart can be
+     *  run live via savedChart(uuid). */
+    chartUuid: string;
+    /** true = run live by UUID; false = inline the metricQuery (copy). */
+    linked: boolean;
 };
 
 export type ApiMyAppsResponse = ApiSuccess<{
@@ -355,3 +408,213 @@ export type ApiMyAppsResponse = ApiSuccess<{
         totalResults: number;
     };
 }>;
+
+// Data app viz declaration: explicit TS types (for the OpenAPI spec) plus a zod
+// schema (runtime validation of the generated declaration), kept in sync by the
+// compile-time assertion below.
+
+// Binds a host query column: dimension (grouping), metric (measure), series (splits/colours).
+export type DataAppVizFieldType = 'dimension' | 'metric' | 'series';
+export type DataAppVizField = {
+    name: string;
+    label: string;
+    type: DataAppVizFieldType;
+    required: boolean;
+};
+
+export type DataAppVizConfigOptionType =
+    | 'boolean'
+    | 'select'
+    | 'number'
+    | 'text'
+    | 'color'
+    | 'palette';
+
+// A whole-viz config option rendered as a form control; `group` is an optional tab label.
+export type DataAppVizConfigOption =
+    | {
+          type: 'boolean';
+          name: string;
+          label: string;
+          group?: string;
+          default: boolean;
+      }
+    | {
+          type: 'select';
+          name: string;
+          label: string;
+          group?: string;
+          choices: { value: string; label: string }[];
+          default: string;
+      }
+    | {
+          type: 'number';
+          name: string;
+          label: string;
+          group?: string;
+          default: number;
+          min?: number;
+          max?: number;
+      }
+    | {
+          type: 'text';
+          name: string;
+          label: string;
+          group?: string;
+          default: string;
+      }
+    | {
+          type: 'color';
+          name: string;
+          label: string;
+          group?: string;
+          default: string;
+      }
+    | {
+          type: 'palette';
+          name: string;
+          label: string;
+          group?: string;
+          default: string[];
+      };
+
+/** A persisted config value; its shape is set by the option's declared `type`. */
+export type DataAppVizOptionValue = boolean | number | string | string[];
+
+/** The full declaration a data app viz emits: data-binding fields + config form. */
+export type DataAppVizSchema = {
+    fields: DataAppVizField[];
+    configOptions: DataAppVizConfigOption[];
+};
+
+const uniqueNames = <T extends { name: string }>(arr: T[]): boolean =>
+    new Set(arr.map((a) => a.name)).size === arr.length;
+
+const optionBase = {
+    name: z.string().min(1),
+    label: z.string(),
+    group: z.string().optional(),
+};
+
+// Runtime validator for the untrusted generated declaration. Also the source
+// for the JSON Schema embedded in the generation prompt.
+export const dataAppVizSchema = z.object({
+    fields: z
+        .array(
+            z.object({
+                name: z.string().min(1),
+                label: z.string(),
+                type: z.enum(['dimension', 'metric', 'series']),
+                required: z.boolean(),
+            }),
+        )
+        .refine(uniqueNames, 'duplicate field name'),
+    configOptions: z
+        .array(
+            z.discriminatedUnion('type', [
+                z.object({
+                    ...optionBase,
+                    type: z.literal('boolean'),
+                    default: z.boolean(),
+                }),
+                z.object({
+                    ...optionBase,
+                    type: z.literal('select'),
+                    choices: z
+                        .array(
+                            z.object({ value: z.string(), label: z.string() }),
+                        )
+                        .min(1),
+                    default: z.string(),
+                }),
+                z.object({
+                    ...optionBase,
+                    type: z.literal('number'),
+                    default: z.number(),
+                    min: z.number().optional(),
+                    max: z.number().optional(),
+                }),
+                z.object({
+                    ...optionBase,
+                    type: z.literal('text'),
+                    default: z.string(),
+                }),
+                z.object({
+                    ...optionBase,
+                    type: z.literal('color'),
+                    default: z.string(),
+                }),
+                z.object({
+                    ...optionBase,
+                    type: z.literal('palette'),
+                    default: z.array(z.string()),
+                }),
+            ]),
+        )
+        .default([])
+        .refine(uniqueNames, 'duplicate option name'),
+});
+
+// Compile-time guard: the zod schema's output type must match the explicit
+// type exposed through the API. If either side drifts, this line fails to type.
+type AssertMutuallyAssignable<A, B> = [A] extends [B]
+    ? [B] extends [A]
+        ? true
+        : never
+    : never;
+const dataAppVizSchemaMatchesApiType: AssertMutuallyAssignable<
+    z.infer<typeof dataAppVizSchema>,
+    DataAppVizSchema
+> = true;
+void dataAppVizSchemaMatchesApiType;
+
+// JSON Schema form of `dataAppVizSchema` for the generator CLI's `--json-schema`
+// flag. Refinements (e.g. unique names) don't survive the conversion and stay
+// enforced by the runtime `safeParse`.
+export const dataAppVizJsonSchema = zodToJsonSchema(dataAppVizSchema);
+
+/** Effective option values = stored value ?? declared default (derive, never seed). */
+export const getEffectiveOptionValues = (
+    configOptions: DataAppVizConfigOption[],
+    optionValues: Record<string, DataAppVizOptionValue>,
+): Record<string, DataAppVizOptionValue> =>
+    Object.fromEntries(
+        configOptions.map((o) => [o.name, optionValues[o.name] ?? o.default]),
+    );
+
+// A reusable, by-reference data app viz: a single-tile data app that declares a
+// schema. Consumers store the `dataAppVizUuid` plus their own mapping, never a
+// copy. `schema` is null until a version generates one.
+export type DataAppViz = {
+    dataAppVizUuid: string;
+    name: string;
+    description: string;
+    projectUuid: string;
+    spaceUuid: string | null;
+    schema: DataAppVizSchema | null;
+    createdAt: Date;
+    createdByUserUuid: string;
+};
+
+export type ApiListDataAppVizsResponse = ApiSuccess<
+    KnexPaginatedData<DataAppViz[]>
+>;
+export type ApiGetDataAppVizResponse = ApiSuccess<DataAppViz>;
+
+// postMessage type the host uses to push render context into the sandboxed
+// iframe over the existing app SDK bridge (no new transport).
+export const APP_SDK_DATA_APP_VIZ_CONTEXT_MESSAGE =
+    'lightdash:sdk:data-app-viz-context';
+
+// postMessage type the iframe posts on mount (via the SDK's useVizContext) to
+// ask the host to push the current context — the renderer may mount after the
+// host's first push, so this handshake replaces blind timed re-sends.
+export const APP_SDK_VIZ_CONTEXT_REQUEST_MESSAGE =
+    'lightdash:sdk:viz-context-request';
+
+// Host-owned render context pushed into a data app viz: field name → bound query
+// field id, plus the host-fetched result rows the renderer reads.
+export type DataAppVizContext = {
+    fieldMapping: Record<string, string>;
+    rows: Record<string, unknown>[];
+};

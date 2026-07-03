@@ -28,6 +28,8 @@ import {
     formatValueWithExpression,
     getCustomFormatFromLegacy,
     getEffectiveSeparator,
+    getFieldFormatOverrideProps,
+    getFormatExpressionLocale,
     getFormatterTimezone,
     isCalendarValueItem,
     isItemTimezoneAffected,
@@ -243,6 +245,14 @@ describe('Formatting', () => {
         test(`when it is ${Format.ID.toUpperCase()} getCustomFormatFromLegacy should return the correct CustomFormat options`, () => {
             expect(getCustomFormatFromLegacy({ format: Format.ID })).toEqual({
                 type: CustomFormatType.ID,
+            });
+        });
+
+        test(`when it is ${Format.SI.toUpperCase()} getCustomFormatFromLegacy should return the correct CustomFormat options`, () => {
+            expect(getCustomFormatFromLegacy({ format: Format.SI })).toEqual({
+                type: CustomFormatType.NUMBER,
+                compact: Compact.AUTO,
+                round: undefined,
             });
         });
     });
@@ -689,10 +699,17 @@ describe('Formatting', () => {
         });
 
         describe('when applying compact', () => {
-            const K = Compact.THOUSANDS;
-            const M = Compact.MILLIONS;
-            const B = Compact.BILLIONS;
-            const T = Compact.TRILLIONS;
+            const {
+                AUTO,
+                THOUSANDS: K,
+                MILLIONS: M,
+                BILLIONS: B,
+                TRILLIONS: T,
+            } = Compact;
+            const autoConfig = {
+                type: CustomFormatType.NUMBER,
+                compact: AUTO,
+            };
 
             const thousandsConfig = {
                 type: CustomFormatType.NUMBER,
@@ -721,6 +738,41 @@ describe('Formatting', () => {
                 expect(applyCustomFormat(5000000000, trillionsConfig)).toEqual(
                     '0.005T',
                 );
+            });
+
+            test('it should dynamically pick the compact style', () => {
+                expect(applyCustomFormat(999, autoConfig)).toEqual('999');
+                expect(applyCustomFormat(1000, autoConfig)).toEqual('1K');
+                expect(applyCustomFormat(1200, autoConfig)).toEqual('1.2K');
+                expect(applyCustomFormat(1200000, autoConfig)).toEqual('1.2M');
+                expect(applyCustomFormat(-1200000, autoConfig)).toEqual(
+                    '-1.2M',
+                );
+            });
+
+            test('it should apply dynamic compact with round, separators, prefix and suffix', () => {
+                expect(
+                    applyCustomFormat(1200, { ...autoConfig, round: 0 }),
+                ).toEqual('1K');
+                expect(
+                    applyCustomFormat(1234567890123456, {
+                        ...autoConfig,
+                        separator: NumberSeparator.COMMA_PERIOD,
+                        prefix: '~',
+                        suffix: ' total',
+                    }),
+                ).toEqual('~1,234.568T total');
+            });
+
+            test('it should apply dynamic compact with currency', () => {
+                expect(
+                    applyCustomFormat(1200, {
+                        type: CustomFormatType.CURRENCY,
+                        compact: AUTO,
+                        currency: 'USD',
+                        round: 1,
+                    }),
+                ).toEqual('$1.2K');
             });
 
             test('when applying round it should return the right style', () => {
@@ -2589,6 +2641,23 @@ describe('Formatting', () => {
                 );
             });
         });
+
+        test('should not convert dynamic auto compact to a static format expression', () => {
+            expect(
+                convertCustomFormatToFormatExpression({
+                    type: CustomFormatType.NUMBER,
+                    compact: Compact.AUTO,
+                }),
+            ).toBeNull();
+
+            expect(
+                convertCustomFormatToFormatExpression({
+                    type: CustomFormatType.CURRENCY,
+                    currency: Format.USD,
+                    compact: Compact.AUTO,
+                }),
+            ).toBeNull();
+        });
     });
 
     describe('applyDefaultFormatting', () => {
@@ -3372,6 +3441,110 @@ describe('Formatting', () => {
                 expect(getEffectiveSeparator(metric)).toBeUndefined();
                 expect(getEffectiveSeparator(undefined)).toBeUndefined();
             });
+        });
+
+        describe('getFormatExpressionLocale', () => {
+            // Render paths that call formatValueWithExpression directly (e.g.
+            // chart series formatters) rely on this to localise ECMA-376
+            // expressions the same way formatItemValue does.
+            test('derives a numfmt locale from a non-default separator', () => {
+                const locale = getFormatExpressionLocale({
+                    ...metric,
+                    separator: NumberSeparator.PERIOD_COMMA,
+                });
+                expect(locale).toBeDefined();
+                // The derived locale must actually flip the separators on an
+                // ECMA-376 currency expression (the bug was passing undefined,
+                // which silently rendered US separators on charts).
+                expect(
+                    formatValueWithExpression('[$€]#,##0.00', 1234.56, locale),
+                ).toEqual('€1.234,56');
+            });
+
+            test('returns undefined for the default/US separator', () => {
+                expect(
+                    getFormatExpressionLocale({
+                        ...metric,
+                        separator: NumberSeparator.COMMA_PERIOD,
+                    }),
+                ).toBeUndefined();
+                expect(getFormatExpressionLocale(metric)).toBeUndefined();
+                expect(getFormatExpressionLocale(undefined)).toBeUndefined();
+            });
+        });
+    });
+
+    describe('getFieldFormatOverrideProps', () => {
+        const numericDimension: Dimension = {
+            ...dimension,
+            type: DimensionType.NUMBER,
+        };
+
+        test('encodes a non-dynamic override as a format expression, no formatOptions', () => {
+            const props = getFieldFormatOverrideProps({
+                type: CustomFormatType.NUMBER,
+                compact: Compact.THOUSANDS,
+            });
+            expect(props.format).toEqual('#,##0.###,"K"');
+            expect(props.formatOptions).toBeUndefined();
+        });
+
+        test('preserves structured formatOptions for dynamic AUTO compact (no expression form)', () => {
+            const formatOptions: CustomFormat = {
+                type: CustomFormatType.NUMBER,
+                compact: Compact.AUTO,
+            };
+            // AUTO has no ECMA-376 representation, so the expression must be
+            // cleared and the structured options carried through instead.
+            expect(
+                convertCustomFormatToFormatExpression(formatOptions),
+            ).toBeNull();
+            const props = getFieldFormatOverrideProps(formatOptions);
+            expect(props.format).toBeUndefined();
+            expect(props.formatOptions).toEqual(formatOptions);
+        });
+
+        test('preserves structured formatOptions for dynamic AUTO compact on CURRENCY too', () => {
+            const formatOptions: CustomFormat = {
+                type: CustomFormatType.CURRENCY,
+                currency: 'USD',
+                compact: Compact.AUTO,
+            };
+            expect(
+                convertCustomFormatToFormatExpression(formatOptions),
+            ).toBeNull();
+            const props = getFieldFormatOverrideProps(formatOptions);
+            expect(props.format).toBeUndefined();
+            expect(props.formatOptions).toEqual(formatOptions);
+        });
+
+        test('AUTO override on a numeric dimension compacts the value (the reported bug)', () => {
+            const field = {
+                ...numericDimension,
+                ...getFieldFormatOverrideProps({
+                    type: CustomFormatType.NUMBER,
+                    compact: Compact.AUTO,
+                }),
+            };
+            expect(formatItemValue(field, 929_000_000)).toEqual('929M');
+            expect(formatItemValue(field, 1_500)).toEqual('1.5K');
+        });
+
+        test('AUTO override clears a legacy field format expression so it cannot shadow the structured options', () => {
+            // legacy YAML expression that would otherwise win in formatItemValue
+            const fieldWithLegacyFormat = {
+                ...numericDimension,
+                format: '#,##0',
+            };
+            const field = {
+                ...fieldWithLegacyFormat,
+                ...getFieldFormatOverrideProps({
+                    type: CustomFormatType.NUMBER,
+                    compact: Compact.AUTO,
+                }),
+            };
+            // Without clearing the legacy expression this renders '929,000,000'.
+            expect(formatItemValue(field, 929_000_000)).toEqual('929M');
         });
     });
 });

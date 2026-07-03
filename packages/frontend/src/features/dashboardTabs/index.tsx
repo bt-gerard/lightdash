@@ -1,5 +1,6 @@
 import { DragDropContext, Droppable } from '@hello-pangea/dnd';
 import {
+    copyDateZoomTileTargets,
     FeatureFlags,
     type DashboardTab,
     type DashboardTile,
@@ -208,6 +209,7 @@ type DashboardTabsProps = {
     parameters: {
         [k: string]: LightdashProjectParameter;
     };
+    shadowedReservedNames: string[];
     isParameterLoading: boolean;
     missingRequiredParameters: string[];
     pinnedParameters: string[];
@@ -234,6 +236,7 @@ const DashboardTabs: FC<DashboardTabsProps> = ({
     hasTilesThatSupportFilters,
     parameterValues,
     parameters,
+    shadowedReservedNames,
     isParameterLoading,
     missingRequiredParameters,
     pinnedParameters,
@@ -327,6 +330,8 @@ const DashboardTabs: FC<DashboardTabsProps> = ({
     const setHaveFiltersChanged = useDashboardContext(
         (c) => c.setHaveFiltersChanged,
     );
+    const dateZoomConfig = useDashboardContext((c) => c.dateZoomConfig);
+    const setDateZoomConfig = useDashboardContext((c) => c.setDateZoomConfig);
     const requiredDashboardFilters = useDashboardContext(
         (c) => c.requiredDashboardFilters,
     );
@@ -877,6 +882,22 @@ const DashboardTabs: FC<DashboardTabsProps> = ({
                     dimensions: updatedFilters,
                 });
                 setHaveFiltersChanged(true);
+
+                // Mirror the filter remap for date-zoom controls. The tab map is
+                // Map<oldUuid, newUuid>, so old=from and new=to.
+                const dateZoomMapping = [...tileUuidMapping].map(
+                    ([fromTileUuid, toTileUuid]) => ({
+                        fromTileUuid,
+                        toTileUuid,
+                    }),
+                );
+                const nextDateZoomConfig = copyDateZoomTileTargets(
+                    dateZoomConfig,
+                    dateZoomMapping,
+                );
+                if (nextDateZoomConfig !== dateZoomConfig) {
+                    setDateZoomConfig(nextDateZoomConfig);
+                }
             }
         }
         setDuplicatingTab(false);
@@ -1048,6 +1069,9 @@ const DashboardTabs: FC<DashboardTabsProps> = ({
                                                     }
                                                     parameters={
                                                         activeTabParameters
+                                                    }
+                                                    shadowedReservedNames={
+                                                        shadowedReservedNames
                                                     }
                                                     parameterValues={
                                                         parameterValues

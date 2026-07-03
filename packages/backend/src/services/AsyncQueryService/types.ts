@@ -6,6 +6,7 @@ import {
     PivotConfiguration,
     type AndFilterGroup,
     type CacheMetadata,
+    type ConditionalFormattingConfig,
     type DashboardFilters,
     type DateZoom,
     type DownloadAsyncQueryResultsPayload,
@@ -56,6 +57,7 @@ export type DownloadAsyncQueryResultsArgs = Omit<
     exportPivotedData?: boolean;
     attachmentDownloadName?: string;
     expirationSecondsOverride?: number;
+    conditionalFormattings?: ConditionalFormattingConfig[];
 };
 
 export type ScheduleDownloadAsyncQueryResultsArgs = Omit<
@@ -87,6 +89,9 @@ export type ExecuteAsyncSavedChartQueryArgs = CommonAsyncQueryArgs & {
     limit?: number | null | undefined;
     pivotResults?: boolean;
     filterOverrides?: Filters;
+    // Silent-drop semantics for fields outside the chart's explore — unlike
+    // filterOverrides, which fails the run on unknown fields.
+    dashboardFilters?: DashboardFilters;
 };
 
 export type ExecuteAsyncDashboardChartQueryArgs = CommonAsyncQueryArgs & {

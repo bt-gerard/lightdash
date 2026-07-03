@@ -295,6 +295,8 @@ export class QueryController extends BaseController {
                 limit: body.limit,
                 parameters: body.parameters,
                 pivotResults: body.pivotResults,
+                filterOverrides: body.filters,
+                dashboardFilters: body.dashboardFilters,
             });
 
         return {
@@ -583,6 +585,7 @@ export class QueryController extends BaseController {
             pivotConfig: body.pivotConfig,
             exportPivotedData: body.exportPivotedData,
             attachmentDownloadName: body.attachmentDownloadName,
+            conditionalFormattings: body.conditionalFormattings,
         });
 
         return {
@@ -623,6 +626,7 @@ export class QueryController extends BaseController {
                 pivotConfig: body.pivotConfig,
                 exportPivotedData: body.exportPivotedData,
                 attachmentDownloadName: body.attachmentDownloadName,
+                conditionalFormattings: body.conditionalFormattings,
             });
 
         return {

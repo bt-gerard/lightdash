@@ -70,6 +70,10 @@ const NavBar = memo(({ isFixed = true }: NavBarProps) => {
     const { data: project } = useProject(activeProjectUuid);
 
     const isCurrentProjectPreview = project?.type === ProjectType.PREVIEW;
+    const upstreamProjectUuid = isCurrentProjectPreview
+        ? project?.upstreamProjectUuid
+        : undefined;
+    const { data: upstreamProject } = useProject(upstreamProjectUuid);
     const { isImpersonating } = useImpersonation();
     const { data: organizationAccess } = useOrganizationAccess();
 
@@ -78,7 +82,10 @@ const NavBar = memo(({ isFixed = true }: NavBarProps) => {
     const showTrialWarning =
         !isImpersonating &&
         !isCurrentProjectPreview &&
-        organizationAccess?.status === OrganizationAccessStatus.TRIAL_WARNING;
+        (organizationAccess?.status ===
+            OrganizationAccessStatus.TRIAL_WARNING ||
+            organizationAccess?.status ===
+                OrganizationAccessStatus.TRIAL_EXPIRED);
 
     const hasBanner =
         isImpersonating || isCurrentProjectPreview || showTrialWarning;
@@ -101,7 +108,17 @@ const NavBar = memo(({ isFixed = true }: NavBarProps) => {
                 {isImpersonating ? (
                     <ImpersonationBanner />
                 ) : isCurrentProjectPreview ? (
-                    <PreviewBanner expiresAt={project?.expiresAt ?? null} />
+                    <PreviewBanner
+                        expiresAt={project?.expiresAt ?? null}
+                        upstreamProject={
+                            upstreamProject
+                                ? {
+                                      projectUuid: upstreamProject.projectUuid,
+                                      name: upstreamProject.name,
+                                  }
+                                : null
+                        }
+                    />
                 ) : (
                     organizationAccess && (
                         <TrialWarningBanner access={organizationAccess} />

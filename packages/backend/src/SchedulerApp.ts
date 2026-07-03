@@ -4,6 +4,8 @@ import { EventEmitter } from 'events';
 import express from 'express';
 import http from 'http';
 import knex, { Knex } from 'knex';
+import { BufferedEventStreamWriter } from './analytics/eventStream/BufferedEventStreamWriter';
+import { createEventStreamWriter } from './analytics/eventStream/createEventStreamWriter';
 import { LightdashAnalytics } from './analytics/LightdashAnalytics';
 import { registerOAuthRefreshStrategies } from './auth/registerOAuthRefreshStrategies';
 import {
@@ -14,7 +16,10 @@ import { setGithubRateLimitObserver } from './clients/github/Github';
 import { LightdashConfig } from './config/parseConfig';
 import Logger from './logging/logger';
 import { ModelProviderMap, ModelRepository } from './models/ModelRepository';
-import { initOtelHttpMetrics } from './prometheus/otelHttpMetrics';
+import {
+    initOtelHttpMetrics,
+    shouldSelfRegisterHttpInstrumentation,
+} from './prometheus/otelHttpMetrics';
 import PrometheusMetrics from './prometheus/PrometheusMetrics';
 import { SchedulerWorker } from './scheduler/SchedulerWorker';
 import schedulerWorkerEventEmitter, {
@@ -31,6 +36,11 @@ import {
     ServiceProviderMap,
     ServiceRepository,
 } from './services/ServiceRepository';
+import {
+    initOtelTracing,
+    otelTracingEnabled,
+    shutdownOtelTracing,
+} from './tracing/tracing';
 import { UtilProviderMap, UtilRepository } from './utils/UtilRepository';
 import { VERSION } from './version';
 
@@ -112,6 +122,8 @@ export default class SchedulerApp {
 
     private readonly prometheusMetrics: PrometheusMetrics;
 
+    private readonly eventStreamWriter: BufferedEventStreamWriter | null;
+
     private readonly models: ModelRepository;
 
     private readonly database: Knex;
@@ -168,6 +180,10 @@ export default class SchedulerApp {
         this.prometheusMetrics = new PrometheusMetrics(
             this.lightdashConfig.prometheus,
         );
+        this.eventStreamWriter = createEventStreamWriter(
+            this.lightdashConfig,
+            this.prometheusMetrics,
+        );
         this.serviceRepository = new ServiceRepository({
             serviceProviders: args.serviceProviders,
             context: new OperationContext({
@@ -207,7 +223,12 @@ export default class SchedulerApp {
     }
 
     private async initSentry() {
-        initOtelHttpMetrics(this.lightdashConfig.prometheus);
+        initOtelHttpMetrics(this.lightdashConfig.prometheus, {
+            registerHttpInstrumentation: shouldSelfRegisterHttpInstrumentation({
+                hasSentryDsn: !!this.lightdashConfig.sentry.backend.dsn,
+                isOtelTracingEnabled: otelTracingEnabled(),
+            }),
+        });
         Sentry.init({
             release: VERSION,
             dsn: this.lightdashConfig.sentry.backend.dsn,
@@ -215,9 +236,12 @@ export default class SchedulerApp {
                 this.environment === 'development'
                     ? 'development'
                     : this.lightdashConfig.mode,
+            skipOpenTelemetrySetup: otelTracingEnabled(),
+            registerEsmLoaderHooks: !otelTracingEnabled(),
             integrations: [],
             ignoreErrors: IGNORE_ERRORS,
         });
+        initOtelTracing();
     }
 
     private async initWorker() {
@@ -274,8 +298,13 @@ export default class SchedulerApp {
                 Logger.info('Shutting down gracefully');
             },
             onSignal: async () => {
+                if (this.eventStreamWriter) {
+                    Logger.info('Flushing usage event stream writer');
+                    await this.eventStreamWriter.close();
+                }
                 Logger.info('Stopping Prometheus metrics');
                 await this.prometheusMetrics.stop();
+                await shutdownOtelTracing();
                 if (worker && worker.runner) {
                     Logger.info('Stopping scheduler worker');
                     await worker?.runner?.stop();
@@ -293,5 +322,9 @@ export default class SchedulerApp {
         });
 
         server.listen(this.port);
+    }
+
+    public getEventStreamWriter() {
+        return this.eventStreamWriter;
     }
 }

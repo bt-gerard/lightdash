@@ -206,6 +206,28 @@ export type DashboardDAO = Omit<
     'inheritsFromOrgOrProject' | 'access'
 >;
 
+export type DateZoomTileTarget = {
+    controlUuid: string;
+    // Null for param-only tiles: they reference `${ld.parameters.date_zoom}` in
+    // custom SQL but plot no re-grainable date dimension, so there is no field to
+    // re-grain — only the control's grain feeds the reserved parameter.
+    fieldId: string | null;
+    tableName: string | null;
+};
+
+export type DateZoomControl = {
+    uuid: string;
+    name: string;
+    granularity: DateGranularity | string;
+    // Hidden from viewers; grain still applies to its tiles.
+    hidden?: boolean;
+};
+
+export type DateZoomConfig = {
+    controls: DateZoomControl[];
+    tileTargets: Record<string, DateZoomTileTarget>;
+};
+
 export type DashboardConfig = {
     isDateZoomDisabled: boolean;
     isAddFilterDisabled?: boolean;
@@ -213,6 +235,7 @@ export type DashboardConfig = {
     parameterOrder?: string[];
     dateZoomGranularities?: (DateGranularity | string)[];
     defaultDateZoomGranularity?: DateGranularity | string;
+    dateZoomConfig?: DateZoomConfig;
 };
 
 export type Dashboard = {

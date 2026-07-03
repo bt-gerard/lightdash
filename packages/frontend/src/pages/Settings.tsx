@@ -1,4 +1,5 @@
 import { subject } from '@casl/ability';
+import { ProjectType } from '@lightdash/common';
 import {
     Anchor,
     ActionIcon,
@@ -20,6 +21,7 @@ import {
     matchPath,
     Navigate,
     useLocation,
+    useParams,
     useRoutes,
     type RouteObject,
 } from 'react-router';
@@ -74,6 +76,7 @@ import { AiThreadsSettingsPage } from '../ee/features/aiCopilot/components/Admin
 import ScimAccessTokensPanel from '../ee/features/scim/components/ScimAccessTokensPanel';
 import { ServiceAccountsPage } from '../ee/features/serviceAccounts';
 import { CustomRoleCreate } from '../ee/pages/customRoles/CustomRoleCreate';
+import { CustomRoleDuplicate } from '../ee/pages/customRoles/CustomRoleDuplicate';
 import { CustomRoleEdit } from '../ee/pages/customRoles/CustomRoleEdit';
 import { CustomRoles } from '../ee/pages/customRoles/CustomRoles';
 import DesignListPage from '../features/organizationDesigns/components/DesignListPage';
@@ -85,6 +88,27 @@ import { PageName } from '../types/Events';
 import classes from './Settings.module.css';
 
 const SETTINGS_SIDEBAR_COLLAPSED_STORAGE_KEY = 'settings:sidebar-collapsed';
+
+const AiReviewsToIssuesRedirect = ({
+    itemRoute = false,
+}: {
+    itemRoute?: boolean;
+}) => {
+    const { fingerprint } = useParams<{ fingerprint: string }>();
+    const location = useLocation();
+
+    const pathname =
+        itemRoute && fingerprint
+            ? `/generalSettings/ai/issues/${encodeURIComponent(fingerprint)}`
+            : '/generalSettings/ai/issues';
+
+    return (
+        <Navigate
+            to={`${pathname}${location.search}${location.hash}`}
+            replace
+        />
+    );
+};
 
 const Settings: FC = () => {
     const context = useSettingsContext();
@@ -122,6 +146,8 @@ const Settings: FC = () => {
         dataAppsFlag,
         isAiCopilotEnabledOrTrial,
         shouldShowAiAgentReviews,
+        canManageOrgAiAgent,
+        hasAnyAiAgentAccess,
         isAiOrganizationSettingsLoading,
         showImpersonationPanel,
         isLeaveOrganizationEnabled,
@@ -232,7 +258,12 @@ const Settings: FC = () => {
                         <SettingsGridCard>
                             <Title order={4}>My apps</Title>
                         </SettingsGridCard>
-                        <MyAppsPanel />
+                        <MyAppsPanel
+                            key={String(project?.type === ProjectType.PREVIEW)}
+                            includePreviewAppsByDefault={
+                                project?.type === ProjectType.PREVIEW
+                            }
+                        />
                     </Stack>
                 ),
             });
@@ -537,23 +568,27 @@ const Settings: FC = () => {
             });
         }
 
-        if (
-            isAiCopilotEnabledOrTrial &&
-            user?.ability.can(
-                'manage',
-                subject('AiAgent', {
-                    organizationUuid: organization?.organizationUuid,
-                }),
-            )
-        ) {
+        if (isAiCopilotEnabledOrTrial && hasAnyAiAgentAccess) {
             allowedRoutes.push({
                 path: '/ai',
-                element: <Navigate to="/generalSettings/ai/general" replace />,
+                element: (
+                    <Navigate
+                        to={
+                            canManageOrgAiAgent
+                                ? '/generalSettings/ai/general'
+                                : '/generalSettings/ai/threads'
+                        }
+                        replace
+                    />
+                ),
             });
-            allowedRoutes.push({
-                path: '/ai/general',
-                element: <AiGeneralSettingsPage />,
-            });
+            // General is org-wide config (router, org settings) — org admins only.
+            if (canManageOrgAiAgent) {
+                allowedRoutes.push({
+                    path: '/ai/general',
+                    element: <AiGeneralSettingsPage />,
+                });
+            }
             allowedRoutes.push({
                 path: '/ai/threads',
                 element: (
@@ -572,7 +607,7 @@ const Settings: FC = () => {
             });
             if (shouldShowAiAgentReviews) {
                 allowedRoutes.push({
-                    path: '/ai/reviews',
+                    path: '/ai/issues',
                     element: (
                         <AiSettingsProviders>
                             <AiReviewsSettingsPage />
@@ -580,12 +615,20 @@ const Settings: FC = () => {
                     ),
                 });
                 allowedRoutes.push({
-                    path: '/ai/reviews/:fingerprint',
+                    path: '/ai/issues/:fingerprint',
                     element: (
                         <AiSettingsProviders>
                             <ReviewRemediationWorkspace />
                         </AiSettingsProviders>
                     ),
+                });
+                allowedRoutes.push({
+                    path: '/ai/reviews',
+                    element: <AiReviewsToIssuesRedirect />,
+                });
+                allowedRoutes.push({
+                    path: '/ai/reviews/:fingerprint',
+                    element: <AiReviewsToIssuesRedirect itemRoute />,
                 });
             }
         }
@@ -601,6 +644,10 @@ const Settings: FC = () => {
             allowedRoutes.push({
                 path: '/customRoles/create',
                 element: <CustomRoleCreate />,
+            });
+            allowedRoutes.push({
+                path: '/customRoles/duplicate',
+                element: <CustomRoleDuplicate />,
             });
             allowedRoutes.push({
                 path: '/customRoles/:roleId',
@@ -629,6 +676,8 @@ const Settings: FC = () => {
         isLeaveOrganizationEnabled,
         isAiCopilotEnabledOrTrial,
         shouldShowAiAgentReviews,
+        canManageOrgAiAgent,
+        hasAnyAiAgentAccess,
     ]);
     const routeElements = useRoutes(routes);
 
@@ -728,9 +777,25 @@ const Settings: FC = () => {
             !matchPath(
                 { path: '/generalSettings/ai/reviews/:fingerprint' },
                 location.pathname,
+            ) &&
+            !matchPath(
+                { path: '/generalSettings/ai/issues' },
+                location.pathname,
+            ) &&
+            !matchPath(
+                { path: '/generalSettings/ai/issues/:fingerprint' },
+                location.pathname,
             )
         );
     }, [location.pathname]);
+
+    // Only block on AI org settings while actually navigating to an AI route, so
+    // its dynamic routes (e.g. /ai/reviews) register before the catch-all redirect
+    // fires on a hard refresh. Scoping it here means a failure of that query no
+    // longer blanks the entire Settings surface — every non-AI route still renders.
+    const isAwaitingAiSettingsRoute =
+        isAiOrganizationSettingsLoading &&
+        Boolean(matchPath('/generalSettings/ai/*', location.pathname));
 
     if (
         isHealthLoading ||
@@ -738,9 +803,7 @@ const Settings: FC = () => {
         isOrganizationLoading ||
         isActiveProjectUuidLoading ||
         isProjectLoading ||
-        // Wait for AI org settings so the /ai/reviews route is registered before
-        // routing — otherwise a hard refresh there falls through to the default.
-        isAiOrganizationSettingsLoading
+        isAwaitingAiSettingsRoute
     ) {
         return <PageSpinner />;
     }

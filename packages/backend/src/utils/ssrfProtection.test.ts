@@ -1,11 +1,11 @@
 import { lookup } from 'node:dns/promises';
 import { validatePublicHttpUrl } from './ssrfProtection';
 
-jest.mock('node:dns/promises', () => ({
-    lookup: jest.fn(),
+vi.mock('node:dns/promises', () => ({
+    lookup: vi.fn(),
 }));
 
-const mockedLookup = lookup as unknown as jest.MockedFunction<
+const mockedLookup = lookup as unknown as import('vitest').MockedFunction<
     () => Promise<{ address: string; family: number }[]>
 >;
 
@@ -49,6 +49,18 @@ describe('validatePublicHttpUrl', () => {
                 allowedProtocols: ['http:', 'https:'],
             }),
         ).rejects.toThrow(privateUrlError);
+    });
+
+    it('accepts private IP targets when explicitly allowed', async () => {
+        await expect(
+            validatePublicHttpUrl('http://127.0.0.1:3000/mcp', {
+                allowedProtocols: ['http:', 'https:'],
+                allowPrivateAddresses: true,
+            }),
+        ).resolves.toMatchObject({
+            hostname: '127.0.0.1',
+            protocol: 'http:',
+        });
     });
 
     it('rejects IPv4-mapped IPv6 private targets', async () => {

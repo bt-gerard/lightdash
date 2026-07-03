@@ -196,6 +196,10 @@ import {
     PinnedSpaceTableName,
 } from '../database/entities/pinnedList';
 import {
+    ProjectDbtSourcesTable,
+    ProjectDbtSourcesTableName,
+} from '../database/entities/projectDbtSources';
+import {
     ProjectGroupAccessTable,
     ProjectGroupAccessTableName,
 } from '../database/entities/projectGroupAccess';
@@ -302,6 +306,10 @@ import {
     UserAttributesTable,
     UserAttributeTable,
 } from '../database/entities/userAttributes';
+import {
+    UserAvatarsTable,
+    UserAvatarsTableName,
+} from '../database/entities/userAvatars';
 import {
     UserFavoritesTable,
     UserFavoritesTableName,
@@ -416,6 +424,12 @@ import {
     AiEvalTableName,
 } from '../ee/database/entities/aiEvals';
 import {
+    AiReviewNotificationLogTable,
+    AiReviewNotificationLogTableName,
+    AiReviewNotificationSettingsTable,
+    AiReviewNotificationSettingsTableName,
+} from '../ee/database/entities/aiReviewNotifications';
+import {
     AiRouterDecisionTable,
     AiRouterDecisionTableName,
     AiRouterTable,
@@ -460,6 +474,10 @@ import {
     ProjectCiStatusTableName,
 } from '../ee/database/entities/projectCiStatus';
 import {
+    SchedulerAiAugmentationTable,
+    SchedulerAiAugmentationTableName,
+} from '../ee/database/entities/schedulerAiAugmentation';
+import {
     ServiceAccountsTableName,
     ServiceAccountTable,
 } from '../ee/database/entities/serviceAccounts';
@@ -473,6 +491,7 @@ declare module 'knex/types/tables' {
         [InviteLinkTableName]: InviteLinkTable;
         [OrganizationTableName]: OrganizationTable;
         [UserTableName]: UserTable;
+        [UserAvatarsTableName]: UserAvatarsTable;
         [EmailTableName]: EmailTable;
         [FeatureFlagsTableName]: FeatureFlagsTable;
         [FeatureFlagOverridesTableName]: FeatureFlagOverridesTable;
@@ -481,6 +500,7 @@ declare module 'knex/types/tables' {
         [UserWarehouseCredentialsTableName]: UserWarehouseCredentialsTable;
         [ProjectUserWarehouseCredentialPreferenceTableName]: ProjectUserWarehouseCredentialPreferenceTable;
         [ProjectTableName]: ProjectTable;
+        [ProjectDbtSourcesTableName]: ProjectDbtSourcesTable;
         [SavedChartsTableName]: SavedChartTable;
         [SavedChartVersionsTableName]: SavedChartVersionsTable;
         [SavedChartVersionFieldsTableName]: SavedChartVersionFieldsTable;
@@ -591,6 +611,8 @@ declare module 'knex/types/tables' {
         [AiSqlApprovalTableName]: AiSqlApprovalTable;
         [DashboardTabsTableName]: DashboardTabsTable;
         [NotificationsTableName]: NotificationsTable;
+        [AiReviewNotificationLogTableName]: AiReviewNotificationLogTable;
+        [AiReviewNotificationSettingsTableName]: AiReviewNotificationSettingsTable;
         [DashboardSummariesTableName]: DashboardSummariesTable;
         [CatalogTableName]: CatalogTable;
         [SlackChannelProjectMappingsTableName]: SlackChannelProjectMappingsTable;
@@ -635,5 +657,6 @@ declare module 'knex/types/tables' {
         [AppExternalConnectionsTableName]: AppExternalConnectionsTable;
         [ExternalConnectionRateCountersTableName]: ExternalConnectionRateCountersTable;
         [ExternalConnectionSamplesTableName]: ExternalConnectionSamplesTable;
+        [SchedulerAiAugmentationTableName]: SchedulerAiAugmentationTable;
     }
 }

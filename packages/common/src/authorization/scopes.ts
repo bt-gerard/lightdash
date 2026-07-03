@@ -313,11 +313,12 @@ const scopes: Scope[] = [
     {
         name: 'promote:SavedChart@space',
         description:
-            'Promote saved charts to spaces where the member has editor access',
+            'Promote saved charts to spaces where the member has editor or admin access',
         isEnterprise: false,
         group: ScopeGroup.CONTENT,
         getConditions: (context) => [
             addAccessCondition(context, SpaceMemberRole.EDITOR),
+            addAccessCondition(context, SpaceMemberRole.ADMIN),
         ],
     },
     {
@@ -330,11 +331,12 @@ const scopes: Scope[] = [
     {
         name: 'promote:Dashboard@space',
         description:
-            'Promote dashboards to spaces where the member has editor access',
+            'Promote dashboards to spaces where the member has editor or admin access',
         isEnterprise: false,
         group: ScopeGroup.CONTENT,
         getConditions: (context) => [
             addAccessCondition(context, SpaceMemberRole.EDITOR),
+            addAccessCondition(context, SpaceMemberRole.ADMIN),
         ],
     },
 
@@ -582,14 +584,14 @@ const scopes: Scope[] = [
         name: 'view:ContentAsCode',
         description: 'Download content as code',
         isEnterprise: true,
-        group: ScopeGroup.ORGANIZATION_MANAGEMENT,
+        group: ScopeGroup.CONTENT,
         getConditions: addDefaultUuidCondition,
     },
     {
         name: 'manage:ContentAsCode',
         description: 'Download and upload content as code',
         isEnterprise: true,
-        group: ScopeGroup.ORGANIZATION_MANAGEMENT,
+        group: ScopeGroup.CONTENT,
         getConditions: addDefaultUuidCondition,
     },
     {
@@ -597,7 +599,7 @@ const scopes: Scope[] = [
         description:
             'Upload content as code to preview projects created by the user',
         isEnterprise: true,
-        group: ScopeGroup.ORGANIZATION_MANAGEMENT,
+        group: ScopeGroup.CONTENT,
         getConditions: ownPreviewProjectConditions,
     },
     {
@@ -755,15 +757,31 @@ const scopes: Scope[] = [
     // AI Agent
     {
         name: 'view:AiAgent',
-        description: 'View AI agent features',
+        description: 'View AI agents in a project',
         isEnterprise: true,
         group: ScopeGroup.AI,
         getConditions: addDefaultUuidCondition,
     },
     {
         name: 'manage:AiAgent',
-        description: 'Configure AI agent settings',
+        description: 'Create and manage AI agents in a project',
         isEnterprise: true,
+        group: ScopeGroup.AI,
+        getConditions: addDefaultUuidCondition,
+    },
+    {
+        name: 'view:OrganizationAiAgent',
+        description: 'View organization AI settings',
+        isEnterprise: true,
+        level: 'organization',
+        group: ScopeGroup.AI,
+        getConditions: addDefaultUuidCondition,
+    },
+    {
+        name: 'manage:OrganizationAiAgent',
+        description: 'Configure organization AI settings',
+        isEnterprise: true,
+        level: 'organization',
         group: ScopeGroup.AI,
         getConditions: addDefaultUuidCondition,
     },
@@ -883,7 +901,16 @@ const scopes: Scope[] = [
     },
 
     // External Connections — project-scoped allowlisted outbound HTTP endpoints
-    // that data apps reach through the secure fetch proxy. Admin-only.
+    // that data apps reach through the secure fetch proxy. Managing (create/
+    // edit/delete) is admin-only; viewing is available to app builders so they
+    // can select an existing connection to link in the data app builder.
+    {
+        name: 'view:ExternalConnection',
+        description: 'View external API connections to link them in data apps',
+        isEnterprise: true,
+        group: ScopeGroup.AI,
+        getConditions: addDefaultUuidCondition,
+    },
     {
         name: 'manage:ExternalConnection',
         description:

@@ -1,29 +1,23 @@
-import { subject } from '@casl/ability';
 import { FeatureFlags } from '@lightdash/common';
-import { ActionIcon, Box, Loader, Menu, Stack, Text } from '@mantine-8/core';
-import {
-    IconAppsOff,
-    IconDatabase,
-    IconDots,
-    IconPencil,
-    IconRefresh,
-    IconSend,
-} from '@tabler/icons-react';
-import { useCallback, useEffect, useState } from 'react';
+import { Box, Loader, Menu, Stack, Text } from '@mantine-8/core';
+import { IconAppsOff, IconCode } from '@tabler/icons-react';
+import { useCallback, useState } from 'react';
 import { Navigate, useNavigate, useParams } from 'react-router';
 import MantineIcon from '../components/common/MantineIcon';
 import SuboptimalState from '../components/common/SuboptimalState/SuboptimalState';
 import ForbiddenPanel from '../components/ForbiddenPanel';
 import AppIframePreview from '../features/apps/AppIframePreview';
+import AppInspectorPanel from '../features/apps/AppInspectorPanel';
+import AppHeader from '../features/apps/components/AppHeader';
+import AppHeaderActions from '../features/apps/components/AppHeaderActions';
+import AppSpaceChip from '../features/apps/components/AppSpaceChip';
 import { useAppPreviewToken } from '../features/apps/hooks/useAppPreviewToken';
+import { useCanEditDataApp } from '../features/apps/hooks/useCanEditDataApp';
 import { useGetApp } from '../features/apps/hooks/useGetApp';
 import { useTrackedAppQueries } from '../features/apps/hooks/useTrackedAppQueries';
+import { useTrackedExternalRequests } from '../features/apps/hooks/useTrackedExternalRequests';
 import { usePreviewOrigin } from '../features/apps/previewOrigin';
-import QueryInspector from '../features/apps/QueryInspector';
-import { AppSchedulersModal } from '../features/scheduler/components/SchedulerModals';
 import { useServerFeatureFlag } from '../hooks/useServerOrClientFeatureFlag';
-import { useSpaceSummaries } from '../hooks/useSpaces';
-import useApp from '../providers/App/useApp';
 import classes from './AppPreviewTest.module.css';
 
 export default function AppPreviewTest() {
@@ -41,10 +35,6 @@ export default function AppPreviewTest() {
     const explicitVersion = versionParam ? Number(versionParam) : undefined;
 
     const dataAppsFlag = useServerFeatureFlag(FeatureFlags.EnableDataApps);
-    const scheduledDeliveriesFlag = useServerFeatureFlag(
-        FeatureFlags.DataAppsScheduledDeliveries,
-    );
-    const { user } = useApp();
 
     // Always fetch app to get creator info + latest ready version when needed.
     // The backend enforces space-aware view permissions and will 403 if the
@@ -55,23 +45,16 @@ export default function AppPreviewTest() {
         (v) => v.status === 'ready',
     )?.version;
 
+    const appName = appQuery.data?.pages[0]?.name ?? '';
+    const appDescription = appQuery.data?.pages[0]?.description ?? null;
     const appSpaceUuid = appQuery.data?.pages[0]?.spaceUuid ?? null;
+    const appSpaceName = appQuery.data?.pages[0]?.spaceName ?? null;
     const appCreatedByUserUuid =
         appQuery.data?.pages[0]?.createdByUserUuid ?? null;
-    const { data: spaces = [] } = useSpaceSummaries(projectUuid, true, {});
-    const userSpaceAccess = appSpaceUuid
-        ? spaces.find((s) => s.uuid === appSpaceUuid)?.userAccess
-        : undefined;
-    const canEditApp =
-        user.data?.ability?.can(
-            'manage',
-            subject('DataApp', {
-                organizationUuid: user.data?.organizationUuid,
-                projectUuid,
-                access: userSpaceAccess ? [userSpaceAccess] : [],
-                createdByUserUuid: appCreatedByUserUuid,
-            }),
-        ) === true;
+    const canEditApp = useCanEditDataApp(projectUuid, {
+        spaceUuid: appSpaceUuid,
+        createdByUserUuid: appCreatedByUserUuid,
+    });
 
     const version = explicitVersion ?? latestReadyVersion;
 
@@ -81,15 +64,29 @@ export default function AppPreviewTest() {
         error: tokenError,
     } = useAppPreviewToken(projectUuid, appUuid, version);
 
-    const [menuOpened, setMenuOpened] = useState(false);
-    const [schedulerModalOpen, setSchedulerModalOpen] = useState(false);
-    const [queriesPanelHidden, setQueriesPanelHidden] = useState(true);
+    const [networkPanelHidden, setNetworkPanelHidden] = useState(true);
+
+    // Data-lineage ("Inspect data"): click a value to reveal the query behind
+    // it; hover a query row to highlight where it renders.
+    const [lineageEnabled, setLineageEnabled] = useState(false);
+    const [lineageAvailable, setLineageAvailable] = useState(false);
+    const [hoveredQueryUuid, setHoveredQueryUuid] = useState<string | null>(
+        null,
+    );
+    const [focusedQueryUuid, setFocusedQueryUuid] = useState<string | null>(
+        null,
+    );
 
     // Query tracking from the preview iframe. The panel is opt-in (hidden by
     // default in preview because most viewers aren't technical), but we wire
     // up the SDK bridge callback unconditionally so queries that run before
     // the user opens the panel are still captured.
     const { queries, handleQueryEvent, clearQueries } = useTrackedAppQueries();
+    const {
+        externalRequests,
+        handleExternalRequestEvent,
+        clearExternalRequests,
+    } = useTrackedExternalRequests();
 
     // Manual refresh: bumping the counter changes the iframe URL, forcing a
     // reload so the app's metric queries re-fire. `invalidateCache` latches on
@@ -101,19 +98,28 @@ export default function AppPreviewTest() {
         setRefreshKey((k) => k + 1);
         setInvalidateCache(true);
         clearQueries();
-    }, [clearQueries]);
+        clearExternalRequests();
+    }, [clearQueries, clearExternalRequests]);
 
-    // Close menu when the iframe receives focus (i.e. user clicked on it)
-    const handleBlur = useCallback(() => {
-        if (menuOpened) {
-            setMenuOpened(false);
-        }
-    }, [menuOpened]);
-
-    useEffect(() => {
-        window.addEventListener('blur', handleBlur);
-        return () => window.removeEventListener('blur', handleBlur);
-    }, [handleBlur]);
+    const handleToggleLineage = useCallback(() => {
+        setLineageEnabled((v) => !v);
+        setFocusedQueryUuid(null);
+    }, []);
+    const handleLineageSelected = useCallback(
+        (event: { queryUuid: string }) => {
+            setNetworkPanelHidden(false);
+            // Selection persists (row highlight + in-app element outline);
+            // re-clicking the selected element deselects it.
+            setFocusedQueryUuid((prev) =>
+                prev === event.queryUuid ? null : event.queryUuid,
+            );
+        },
+        [],
+    );
+    const handleLineageCancelled = useCallback(() => {
+        setLineageEnabled(false);
+        setFocusedQueryUuid(null);
+    }, []);
 
     const previewOrigin = usePreviewOrigin();
 
@@ -198,89 +204,106 @@ export default function AppPreviewTest() {
 
     return (
         <Box className={classes.previewContainer}>
-            <Box className={classes.menuOverlay}>
-                <Menu
-                    position="bottom-end"
-                    withinPortal
-                    opened={menuOpened}
-                    onChange={setMenuOpened}
-                >
-                    <Menu.Target>
-                        <ActionIcon
-                            variant="filled"
-                            color="gray"
-                            size="lg"
-                            radius="xl"
-                        >
-                            <MantineIcon icon={IconDots} size={18} />
-                        </ActionIcon>
-                    </Menu.Target>
-                    <Menu.Dropdown>
-                        {canEditApp && (
-                            <Menu.Item
-                                leftSection={<IconPencil size={14} />}
-                                onClick={() =>
-                                    navigate(
-                                        `/projects/${projectUuid}/apps/${appUuid}`,
-                                    )
-                                }
-                            >
-                                Continue building
-                            </Menu.Item>
-                        )}
-                        <Menu.Item
-                            leftSection={<MantineIcon icon={IconRefresh} />}
-                            onClick={handleRefresh}
-                        >
-                            Refresh
-                        </Menu.Item>
-                        {canEditApp &&
-                            scheduledDeliveriesFlag.data?.enabled && (
-                                <Menu.Item
-                                    leftSection={<IconSend size={14} />}
-                                    onClick={() => setSchedulerModalOpen(true)}
-                                >
-                                    Schedule delivery
-                                </Menu.Item>
-                            )}
-                        <Menu.Item
-                            leftSection={<IconDatabase size={14} />}
-                            onClick={() => setQueriesPanelHidden(false)}
-                        >
-                            View queries
-                        </Menu.Item>
-                    </Menu.Dropdown>
-                </Menu>
-            </Box>
-            <AppIframePreview
-                src={previewUrl}
-                expectedPreviewOrigin={previewOrigin}
-                projectUuid={projectUuid}
+            <AppHeader
                 appUuid={appUuid}
-                identityKey={`${appUuid}:${version}`}
-                invalidateCache={invalidateCache}
-                onQueryEvent={handleQueryEvent}
-                capabilities={{ gsheetExport: true }}
+                name={appName}
+                description={appDescription}
+                spaceChip={
+                    <AppSpaceChip
+                        projectUuid={projectUuid}
+                        spaceName={appSpaceName}
+                        app={{
+                            uuid: appUuid,
+                            name: appName,
+                            description: appDescription ?? undefined,
+                            spaceUuid: appSpaceUuid,
+                            createdByUserUuid: appCreatedByUserUuid,
+                            latestVersionNumber: latestReadyVersion ?? null,
+                            latestVersionStatus: latestReadyVersion
+                                ? 'ready'
+                                : null,
+                        }}
+                    />
+                }
+                rightSection={
+                    <AppHeaderActions
+                        projectUuid={projectUuid}
+                        appUuid={appUuid}
+                        appName={appName}
+                        appDescription={appDescription}
+                        appSpaceUuid={appSpaceUuid}
+                        appCreatedByUserUuid={appCreatedByUserUuid}
+                        latestVersionNumber={latestReadyVersion ?? null}
+                        latestVersionStatus={
+                            latestReadyVersion ? 'ready' : null
+                        }
+                        onRefresh={handleRefresh}
+                        refreshDisabled={false}
+                        onViewNetwork={() => setNetworkPanelHidden(false)}
+                        onDeleted={() => {
+                            void navigate(`/projects/${projectUuid}/home`);
+                        }}
+                        navItem={
+                            canEditApp ? (
+                                <Menu.Item
+                                    leftSection={
+                                        <MantineIcon
+                                            icon={IconCode}
+                                            size={14}
+                                        />
+                                    }
+                                    onClick={() =>
+                                        navigate(
+                                            `/projects/${projectUuid}/apps/${appUuid}`,
+                                        )
+                                    }
+                                >
+                                    Continue building
+                                </Menu.Item>
+                            ) : null
+                        }
+                    />
+                }
             />
-            {!queriesPanelHidden && (
-                <QueryInspector
-                    queries={queries}
-                    projectUuid={projectUuid}
-                    onClear={clearQueries}
-                    defaultCollapsed={false}
-                    hideWhenEmpty={false}
-                    onDismiss={() => setQueriesPanelHidden(true)}
-                />
-            )}
-            {schedulerModalOpen && (
-                <AppSchedulersModal
+            <Box className={classes.previewBody}>
+                <AppIframePreview
+                    src={previewUrl}
+                    expectedPreviewOrigin={previewOrigin}
                     projectUuid={projectUuid}
                     appUuid={appUuid}
-                    name={appQuery.data?.pages[0]?.name ?? 'Data app'}
-                    isOpen
-                    onClose={() => setSchedulerModalOpen(false)}
+                    identityKey={`${appUuid}:${version}`}
+                    invalidateCache={invalidateCache}
+                    onQueryEvent={handleQueryEvent}
+                    onExternalRequestEvent={handleExternalRequestEvent}
+                    capabilities={{ gsheetExport: true }}
+                    lineageEnabled={lineageEnabled}
+                    onLineageAvailabilityChange={setLineageAvailable}
+                    onLineageSelected={handleLineageSelected}
+                    lineageHighlightQueryUuid={
+                        // Hover overrides; falls back to the persistent
+                        // click-selection.
+                        hoveredQueryUuid ?? focusedQueryUuid
+                    }
+                    onLineageCancelled={handleLineageCancelled}
                 />
-            )}
+                {!networkPanelHidden && (
+                    <AppInspectorPanel
+                        queries={queries}
+                        projectUuid={projectUuid}
+                        onClearQueries={clearQueries}
+                        externalRequests={externalRequests}
+                        onClearExternalRequests={clearExternalRequests}
+                        defaultCollapsed={false}
+                        hideWhenEmpty={false}
+                        onDismiss={() => setNetworkPanelHidden(true)}
+                        onHoverQuery={setHoveredQueryUuid}
+                        focusedQueryUuid={focusedQueryUuid}
+                        lineageEnabled={lineageEnabled}
+                        lineageAvailable={lineageAvailable}
+                        onToggleLineage={handleToggleLineage}
+                    />
+                )}
+            </Box>
         </Box>
     );
 }

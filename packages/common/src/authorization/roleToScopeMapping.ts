@@ -64,12 +64,14 @@ const BASE_ROLE_SCOPES = {
 
         // Enterprise scopes
         'view:AiAgent',
+        'view:OrganizationAiAgent',
         'view:AiAgentDocument',
         'create:AiAgentThread',
         'view:DataApp', // Project-wide + space-access view (parity with manage:Explore)
         'create:DataApp', // Personal apps (not yet in a space)
         'view:DataApp@self', // Own personal apps
         'manage:DataApp@self', // Own personal apps
+        'view:ExternalConnection', // Select/link connections in the app builder (manage stays admin-only)
     ],
 
     [ProjectMemberRole.EDITOR]: [
@@ -144,8 +146,10 @@ const BASE_ROLE_SCOPES = {
         // `manage:ContentAsCode` and keep self-preview write.
         'manage:ContentAsCode@self',
         'manage:AiAgent',
+        'manage:OrganizationAiAgent',
         'manage:AiAgentDocument',
         'manage:AiAgentThread@self', // User's own threads
+        'manage:ContentVerification',
     ],
 
     [ProjectMemberRole.ADMIN]: [
@@ -163,7 +167,6 @@ const BASE_ROLE_SCOPES = {
         'view:AiAgentThread', // All threads in project
         'manage:AiAgentThread', // All threads in project
         'manage:ScheduledDeliveries',
-        'manage:ContentVerification',
 
         // Organization-management scopes. These are no-ops at project
         // assignment (CASL conditions match `organizationUuid`-keyed
@@ -251,10 +254,12 @@ export const getNonEnterpriseScopesForRole = (
         'view:SpotlightTableConfig',
         'manage:SpotlightTableConfig',
         'view:AiAgent',
+        'view:OrganizationAiAgent',
         'view:AiAgentDocument',
         'view:AiAgentThread',
         'create:AiAgentThread',
         'manage:AiAgent',
+        'manage:OrganizationAiAgent',
         'manage:AiAgentDocument',
         'manage:AiAgentThread',
         'view:ContentAsCode',
@@ -266,6 +271,7 @@ export const getNonEnterpriseScopesForRole = (
         'create:DataApp',
         'view:DataApp@self',
         'manage:DataApp@self',
+        'view:ExternalConnection',
         'manage:ExternalConnection',
         'view:OrganizationDesign',
         'manage:OrganizationDesign',

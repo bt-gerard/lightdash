@@ -33,6 +33,7 @@ import type {
     ApiAiGenerateTableCalculationResponse,
     ApiAiGetDashboardSummaryResponse,
     ApiAiOrganizationSettingsResponse,
+    ApiAiReviewNotificationSettingsResponse,
     ApiAiRouterDecisionCommitResponse,
     ApiAiRouterDecisionListResponse,
     ApiAiRouterInstructionResponse,
@@ -40,11 +41,15 @@ import type {
     ApiAiRouterRouteResponse,
     ApiAppendInstructionResponse,
     ApiAppImageUploadResponse,
+    ApiAppThumbnailUrlResponse,
     ApiCloneAiAgentThreadShareResponse,
     ApiCreateEvaluationResponse,
     ApiGenerateAppResponse,
+    ApiGetAppCodeResponse,
     ApiGetAppResponse,
+    ApiGetDataAppVizResponse,
     ApiGetUserAgentPreferencesResponse,
+    ApiListDataAppVizsResponse,
     ApiManagedAgentActionResponse,
     ApiManagedAgentRunResponse,
     ApiManagedAgentRunsListResponse,
@@ -240,6 +245,7 @@ import {
     type ApiSchedulersResponse,
     type ApiUserSchedulersSummaryResponse,
     type GsheetExportProgress,
+    type SchedulerAiAugmentation,
     type SchedulerAndTargets,
     type SchedulerJobStatus,
 } from './scheduler';
@@ -268,6 +274,7 @@ import {
     type LoginOptions,
     type UserAllowedOrganization,
 } from './user';
+import { type UserAvatarColorValue } from './userAvatars';
 import { type UserWarehouseCredentials } from './userWarehouseCredentials';
 import {
     type ApiChartValidationResponse,
@@ -551,6 +558,9 @@ export type HealthState = {
         analyticsProjectUuid?: string;
         analyticsDashboardUuid?: string;
         isAmbientAiEnabled: boolean;
+    };
+    echarts6: {
+        enabled: boolean;
     };
     funnelBuilder: {
         enabled: boolean;
@@ -891,6 +901,13 @@ export type UpdateUserArgs = {
     /* IANA timezone (e.g. 'America/New_York') used as the user's per-viewer
        default. Null clears the preference and falls back to the project. */
     timezone: string | null;
+    /* Explicit gradient placeholder override; null falls back to the deterministic gradient. */
+    avatarGradient: UserAvatarColorValue | null;
+};
+
+export type ApiUserAvatarResponse = {
+    status: 'ok';
+    results: { avatarUrl: string };
 };
 
 export type PasswordResetLink = {
@@ -985,6 +1002,7 @@ type ApiResults =
     | UserActivity
     | SchedulerAndTargets
     | SchedulerAndTargets[]
+    | SchedulerAiAugmentation
     | FieldValueSearchResult
     | ApiDownloadCsv
     | AllowedEmailDomains
@@ -1037,6 +1055,7 @@ type ApiResults =
     | ApiCreateComment['results']
     | ApiGetComments['results']
     | ApiDeleteComment
+    | ApiUserAvatarResponse['results']
     | ApiSuccessEmpty
     | ApiCreateProjectResults
     | ApiDeployExploresResults
@@ -1126,6 +1145,7 @@ type ApiResults =
     | ApiGetChangeResponse['results']
     | ApiAiOrganizationSettingsResponse['results']
     | ApiUpdateAiOrganizationSettingsResponse['results']
+    | ApiAiReviewNotificationSettingsResponse['results']
     | ApiAiRouterResponse['results']
     | ApiAiRouterRouteResponse['results']
     | ApiAiRouterInstructionResponse['results']
@@ -1151,12 +1171,16 @@ type ApiResults =
     | OAuthClientSummary
     | CreateOAuthClientResponse
     | ApiGenerateAppResponse['results']
+    | ApiGetAppCodeResponse['results']
     | ApiGetAppResponse['results']
+    | ApiListDataAppVizsResponse['results']
+    | ApiGetDataAppVizResponse['results']
     | ApiMyAppsResponse['results']
     | ApiPromoteAppResponse['results']
     | ApiPromoteAppDiffResponse['results']
     | ApiPreviewTokenResponse['results']
     | ApiAppImageUploadResponse['results']
+    | ApiAppThumbnailUrlResponse['results']
     | ApiOrganizationDesignResponse['results']
     | ApiOrganizationDesignsResponse['results']
     | ApiOrganizationDesignFileResponse['results']

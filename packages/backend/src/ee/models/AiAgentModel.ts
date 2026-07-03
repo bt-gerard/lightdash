@@ -25,6 +25,7 @@ import {
     AiAgentUser,
     AiAgentUserPreferences,
     AiArtifact,
+    AiClonedThreadCreatedFrom,
     AiEvalRunResultAssessment,
     AiMcpCredentialScope,
     AiMcpServer,
@@ -39,6 +40,7 @@ import {
     AiResultType,
     AiThread,
     AiThreadCompaction,
+    AiThreadCreatedFrom,
     AiWebAppPrompt,
     AlreadyExistsError,
     ApiAppendEvaluationRequest,
@@ -128,6 +130,8 @@ import {
     type AiSqlApprovalDecision,
 } from '../database/entities/ai';
 import {
+    AI_AGENT_MCP_SERVER_TOOL_PERMISSION_MODE_ALWAYS_ALLOW,
+    AI_AGENT_MCP_SERVER_TOOL_PERMISSION_MODE_ALWAYS_DENY,
     AiAgentGroupAccessTableName,
     AiAgentInstructionVersionsTableName,
     AiAgentIntegrationTableName,
@@ -182,10 +186,10 @@ type Dependencies = {
     encryptionUtil: EncryptionUtil;
 };
 
-export const AI_AGENT_MCP_SERVER_TOOL_PERMISSION_MODE_ALWAYS_ALLOW: DbAiAgentMcpServerToolPermissionMode =
-    'always_allow';
-export const AI_AGENT_MCP_SERVER_TOOL_PERMISSION_MODE_ALWAYS_DENY: DbAiAgentMcpServerToolPermissionMode =
-    'always_deny';
+export {
+    AI_AGENT_MCP_SERVER_TOOL_PERMISSION_MODE_ALWAYS_ALLOW,
+    AI_AGENT_MCP_SERVER_TOOL_PERMISSION_MODE_ALWAYS_DENY,
+};
 
 export type AiAgentMcpServerToolPermissionSetting = AiMcpServerTool & {
     agentUuid: string;
@@ -444,7 +448,9 @@ export class AiAgentModel {
                 enableDataAccess: `${AiAgentTableName}.enable_data_access`,
                 enableSelfImprovement: `${AiAgentTableName}.enable_self_improvement`,
                 enableContentTools: `${AiAgentTableName}.enable_content_tools`,
+                enableUserContext: `${AiAgentTableName}.enable_user_context`,
                 adminOnly: `${AiAgentTableName}.admin_only`,
+                modelConfig: `${AiAgentTableName}.model_config`,
                 version: `${AiAgentTableName}.version`,
                 groupAccess: this.database.raw(`
                     COALESCE(
@@ -580,7 +586,9 @@ export class AiAgentModel {
                 enableDataAccess: `${AiAgentTableName}.enable_data_access`,
                 enableSelfImprovement: `${AiAgentTableName}.enable_self_improvement`,
                 enableContentTools: `${AiAgentTableName}.enable_content_tools`,
+                enableUserContext: `${AiAgentTableName}.enable_user_context`,
                 adminOnly: `${AiAgentTableName}.admin_only`,
+                modelConfig: `${AiAgentTableName}.model_config`,
                 version: `${AiAgentTableName}.version`,
                 groupAccess: this.database.raw(`
                     COALESCE(
@@ -1739,7 +1747,9 @@ export class AiAgentModel {
             | 'enableDataAccess'
             | 'enableSelfImprovement'
             | 'enableContentTools'
+            | 'enableUserContext'
             | 'adminOnly'
+            | 'modelConfig'
             | 'version'
             | 'mcpServerUuids'
         > & {
@@ -1767,7 +1777,9 @@ export class AiAgentModel {
                     enable_data_access: args.enableDataAccess,
                     enable_self_improvement: args.enableSelfImprovement,
                     enable_content_tools: args.enableContentTools ?? false,
+                    enable_user_context: args.enableUserContext ?? false,
                     admin_only: args.adminOnly ?? false,
+                    model_config: args.modelConfig ?? null,
                     version: args.version,
                     is_system: args.isSystem ?? false,
                 })
@@ -1869,7 +1881,9 @@ export class AiAgentModel {
                 enableDataAccess: agent.enable_data_access,
                 enableSelfImprovement: agent.enable_self_improvement,
                 enableContentTools: agent.enable_content_tools,
+                enableUserContext: agent.enable_user_context,
                 adminOnly: agent.admin_only,
+                modelConfig: agent.model_config,
                 version: agent.version,
             };
         });
@@ -1922,6 +1936,8 @@ export class AiAgentModel {
                 enableDataAccess: true,
                 enableSelfImprovement: false,
                 enableContentTools: false,
+                enableUserContext: false,
+                modelConfig: null,
                 version: 1,
                 mcpServerUuids: [],
                 isSystem: true,
@@ -1982,8 +1998,14 @@ export class AiAgentModel {
                     ...(args.enableContentTools !== undefined
                         ? { enable_content_tools: args.enableContentTools }
                         : {}),
+                    ...(args.enableUserContext !== undefined
+                        ? { enable_user_context: args.enableUserContext }
+                        : {}),
                     ...(args.adminOnly !== undefined
                         ? { admin_only: args.adminOnly }
+                        : {}),
+                    ...(args.modelConfig !== undefined
+                        ? { model_config: args.modelConfig }
                         : {}),
                     ...(args.version !== undefined
                         ? { version: args.version }
@@ -2152,7 +2174,9 @@ export class AiAgentModel {
                 enableDataAccess: agent.enable_data_access,
                 enableSelfImprovement: agent.enable_self_improvement,
                 enableContentTools: agent.enable_content_tools,
+                enableUserContext: agent.enable_user_context,
                 adminOnly: agent.admin_only,
+                modelConfig: agent.model_config,
                 version: agent.version,
             };
         });
@@ -2723,7 +2747,7 @@ export class AiAgentModel {
         projectUuid: string;
         userUuid: string;
         agentUuids?: string[];
-        createdFrom?: ('web_app' | 'slack' | 'evals')[];
+        createdFrom?: AiThreadCreatedFrom[];
         search?: string;
         paginateArgs?: KnexPaginateArgs;
     }): Promise<
@@ -4334,6 +4358,7 @@ export class AiAgentModel {
                     ai_thread_uuid: data.threadUuid,
                     created_by_user_uuid: data.createdByUserUuid,
                     prompt: data.prompt,
+                    model_config: data.modelConfig,
                 })
                 .returning('ai_prompt_uuid');
 
@@ -5890,6 +5915,25 @@ export class AiAgentModel {
             .ignore()
             .returning('tool_call_id');
         return inserted.length > 0;
+    }
+
+    /**
+     * Marks a thread as SQL auto-approved ("Approve & don't ask again").
+     * First write wins so the original approval timestamp is preserved.
+     */
+    async setThreadSqlAutoApproved(threadUuid: string): Promise<void> {
+        await this.database(AiThreadTableName)
+            .where({ ai_thread_uuid: threadUuid })
+            .whereNull('sql_auto_approved_at')
+            .update({ sql_auto_approved_at: new Date() });
+    }
+
+    async isThreadSqlAutoApproved(threadUuid: string): Promise<boolean> {
+        const row = await this.database(AiThreadTableName)
+            .where({ ai_thread_uuid: threadUuid })
+            .select('sql_auto_approved_at')
+            .first();
+        return row?.sql_auto_approved_at != null;
     }
 
     /**
@@ -7685,7 +7729,7 @@ export class AiAgentModel {
         sourceThreadUuid: string;
         sourcePromptUuid: string;
         targetUserUuid: string;
-        createdFrom?: 'web_app' | 'evals';
+        createdFrom?: AiClonedThreadCreatedFrom;
         includeSelectedPromptResponse?: boolean;
         shareSourceThreadShareUuid?: string;
         copyTitle?: boolean;

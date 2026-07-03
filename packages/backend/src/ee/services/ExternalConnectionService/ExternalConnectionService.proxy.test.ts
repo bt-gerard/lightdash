@@ -4,14 +4,13 @@ import {
     type ExternalConnection,
     type SessionUser,
 } from '@lightdash/common';
-import { FeatureFlagModel } from '../../../models/FeatureFlagModel/FeatureFlagModel';
 import { SecureFetchError } from '../../../utils/secureFetch/secureFetch';
 import * as secureFetchModule from '../../../utils/secureFetch/secureFetch';
 import { ExternalConnectionService } from './ExternalConnectionService';
 
-jest.mock('../../../utils/secureFetch/secureFetch');
+vi.mock('../../../utils/secureFetch/secureFetch');
 
-const mockSecureFetch = jest.mocked(secureFetchModule.secureFetch);
+const mockSecureFetch = vi.mocked(secureFetchModule.secureFetch);
 
 const baseConnection = (
     overrides: Partial<ExternalConnection> = {},
@@ -22,6 +21,7 @@ const baseConnection = (
     name: 'Weather API',
     type: 'none',
     origin: 'https://api.example.com',
+    instructions: null,
     allowedPathPrefixes: ['/v1/'],
     allowedMethods: ['GET', 'POST'],
     allowedContentTypes: ['application/json'],
@@ -31,6 +31,7 @@ const baseConnection = (
     rateLimitPerMinute: null,
     apiKeyName: null,
     apiKeyLocation: null,
+    oauthScopes: null,
     hasSecret: false,
     createdByUserUuid: 'user-1',
     updatedByUserUuid: 'user-1',
@@ -58,41 +59,40 @@ function buildService(opts: {
     secret?: string | null;
     canView?: boolean;
     rateCount?: number;
-    flagEnabled?: boolean;
+    googleToken?: string;
 }) {
-    const featureFlagModel = {
-        get: jest.fn().mockResolvedValue({
-            id: 'enable-data-app-external-access',
-            enabled: opts.flagEnabled ?? true,
-        }),
-    } as unknown as FeatureFlagModel;
     const externalConnectionModel = {
-        resolveAppAlias: jest.fn().mockResolvedValue(opts.connection),
-        getDecryptedSecret: jest.fn().mockResolvedValue(opts.secret ?? null),
-        incrementRateCounter: jest.fn().mockResolvedValue(opts.rateCount ?? 1),
+        resolveAppAlias: vi.fn().mockResolvedValue(opts.connection),
+        getDecryptedSecret: vi.fn().mockResolvedValue(opts.secret ?? null),
+        incrementRateCounter: vi.fn().mockResolvedValue(opts.rateCount ?? 1),
+    };
+    const googleTokenProvider = {
+        getAccessToken: vi
+            .fn()
+            .mockResolvedValue(opts.googleToken ?? 'test-access-token'),
     };
     const appModel = {
-        getApp: jest.fn().mockResolvedValue(baseApp()),
+        getApp: vi.fn().mockResolvedValue(baseApp()),
     };
     const projectModel = {
-        getSummary: jest.fn().mockResolvedValue({ organizationUuid: 'org-1' }),
+        getSummary: vi.fn().mockResolvedValue({ organizationUuid: 'org-1' }),
     };
     const spacePermissionService = {
-        getSpaceAccessContext: jest.fn().mockResolvedValue({}),
+        getSpaceAccessContext: vi.fn().mockResolvedValue({}),
     };
-    const analytics = { track: jest.fn() };
+    const analytics = { track: vi.fn() };
 
     const service = new ExternalConnectionService({
         externalConnectionModel,
-        featureFlagModel,
         appModel,
         projectModel,
         spacePermissionService,
         analytics,
+        googleTokenProvider,
     } as never);
 
     // Force the CASL view decision deterministically.
-    jest.spyOn(
+    vi.spyOn(
         service as unknown as { createAuditedAbility: () => unknown },
         'createAuditedAbility',
     ).mockReturnValue({
@@ -102,10 +102,10 @@ function buildService(opts: {
 
     return {
         service,
-        featureFlagModel,
         externalConnectionModel,
         appModel,
         analytics,
+        googleTokenProvider,
     };
 }
 
@@ -261,6 +261,27 @@ describe('ExternalConnectionService.proxyFetch', () => {
         expect(opts.headers!['Content-Type']).toBe('application/json');
     });
 
+    it.each(['PUT', 'PATCH', 'DELETE'] as const)(
+        'happy %s: forwards the method and serializes the body when allowed',
+        async (method) => {
+            const { service } = buildService({
+                connection: baseConnection({
+                    allowedMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+                }),
+            });
+            await service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                method,
+                path: '/v1/echo',
+                body: { hello: 'world' },
+            });
+            const [, opts] = mockSecureFetch.mock.calls[0];
+            expect(opts.method).toBe(method);
+            expect(opts.body).toBe('{"hello":"world"}');
+            expect(opts.headers!['Content-Type']).toBe('application/json');
+        },
+    );
+
     it('POST over requestMaxBytes is rejected', async () => {
         const { service } = buildService({
             connection: baseConnection({ requestMaxBytes: 5 }),
@@ -349,6 +370,67 @@ describe('ExternalConnectionService.proxyFetch', () => {
             }),
             secret: null,
         });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/x',
+            }),
+        ).rejects.toBeInstanceOf(ParameterError);
+        expect(mockSecureFetch).not.toHaveBeenCalled();
+    });
+
+    const KEYFILE_SECRET =
+        '{"type":"service_account","client_email":"a@b.iam.gserviceaccount.com","private_key":"k"}';
+
+    it('mints and injects a Google service account access token as a bearer token', async () => {
+        const { service, googleTokenProvider } = buildService({
+            connection: baseConnection({
+                type: 'google_service_account',
+                oauthScopes: ['https://www.googleapis.com/auth/bigquery'],
+            }),
+            secret: KEYFILE_SECRET,
+            googleToken: 'minted-access-token',
+        });
+        await service.proxyFetch(user, 'proj-1', 'app-1', {
+            connectionAlias: 'weather',
+            path: '/v1/x',
+        });
+        expect(googleTokenProvider.getAccessToken).toHaveBeenCalledWith(
+            KEYFILE_SECRET,
+            ['https://www.googleapis.com/auth/bigquery'],
+        );
+        const [, opts] = mockSecureFetch.mock.calls[0];
+        expect(opts.headers!.Authorization).toBe('Bearer minted-access-token');
+    });
+
+    it('fails closed when a google_service_account connection has no stored secret', async () => {
+        const { service } = buildService({
+            connection: baseConnection({
+                type: 'google_service_account',
+                oauthScopes: ['https://www.googleapis.com/auth/bigquery'],
+            }),
+            secret: null,
+        });
+        await expect(
+            service.proxyFetch(user, 'proj-1', 'app-1', {
+                connectionAlias: 'weather',
+                path: '/v1/x',
+            }),
+        ).rejects.toBeInstanceOf(ParameterError);
+        expect(mockSecureFetch).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when Google token minting fails', async () => {
+        const { service, googleTokenProvider } = buildService({
+            connection: baseConnection({
+                type: 'google_service_account',
+                oauthScopes: ['https://www.googleapis.com/auth/bigquery'],
+            }),
+            secret: KEYFILE_SECRET,
+        });
+        googleTokenProvider.getAccessToken.mockRejectedValueOnce(
+            new Error('token endpoint unreachable'),
+        );
         await expect(
             service.proxyFetch(user, 'proj-1', 'app-1', {
                 connectionAlias: 'weather',
@@ -534,23 +616,5 @@ describe('ExternalConnectionService.proxyFetch', () => {
         const tracked = JSON.stringify(analytics.track.mock.calls);
         expect(tracked).not.toContain('tok_secret');
         expect(tracked).not.toContain('do-not-log');
-    });
-
-    it('rejects with ForbiddenError when the feature flag is disabled', async () => {
-        const { service, externalConnectionModel } = buildService({
-            connection: baseConnection(),
-            flagEnabled: false,
-        });
-        await expect(
-            service.proxyFetch(user, 'proj-1', 'app-1', {
-                connectionAlias: 'weather',
-                path: '/v1/x',
-            }),
-        ).rejects.toBeInstanceOf(ForbiddenError);
-        expect(mockSecureFetch).not.toHaveBeenCalled();
-        expect(externalConnectionModel.resolveAppAlias).not.toHaveBeenCalled();
-        expect(
-            externalConnectionModel.getDecryptedSecret,
-        ).not.toHaveBeenCalled();
     });
 });

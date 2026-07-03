@@ -1,5 +1,11 @@
 import { subject } from '@casl/ability';
 import {
+    copyDateZoomTileTargets,
+    getShadowedReservedNames,
+    isEmptyDateZoomConfig,
+    normalizeDateZoomConfig,
+    pruneDateZoomConfig,
+    removeDateZoomTileTargets,
     ContentType,
     DateGranularity,
     type UpdateDashboard,
@@ -82,6 +88,8 @@ const Dashboard: FC = () => {
     const setDashboardFilters = useDashboardContext(
         (c) => c.setDashboardFilters,
     );
+    const dateZoomConfig = useDashboardContext((c) => c.dateZoomConfig);
+    const setDateZoomConfig = useDashboardContext((c) => c.setDateZoomConfig);
     const resetDashboardFilters = useDashboardContext(
         (c) => c.resetDashboardFilters,
     );
@@ -174,6 +182,12 @@ const Dashboard: FC = () => {
     const setHasDefaultDateZoomGranularityChanged = useDashboardContext(
         (c) => c.setHasDefaultDateZoomGranularityChanged,
     );
+    const hasDateZoomConfigChanged = useDashboardContext(
+        (c) => c.hasDateZoomConfigChanged,
+    );
+    const setHasDateZoomConfigChanged = useDashboardContext(
+        (c) => c.setHasDateZoomConfigChanged,
+    );
 
     const parameterDefinitions = useDashboardContext(
         (c) => c.parameterDefinitions,
@@ -190,6 +204,11 @@ const Dashboard: FC = () => {
             ),
         );
     }, [parameterDefinitions, parameterReferences]);
+
+    const shadowedReservedNames = useMemo(
+        () => getShadowedReservedNames(Object.keys(referencedParameters)),
+        [referencedParameters],
+    );
 
     const {
         enabled: isFullScreenFeatureEnabled,
@@ -337,6 +356,7 @@ const Dashboard: FC = () => {
             setHavePinnedParametersChanged(false);
             setHaveDateZoomGranularitiesChanged(false);
             setHasDefaultDateZoomGranularityChanged(false);
+            setHasDateZoomConfigChanged(false);
             setDashboardTemporaryFilters({
                 dimensions: [],
                 metrics: [],
@@ -367,6 +387,7 @@ const Dashboard: FC = () => {
         setHavePinnedParametersChanged,
         setHaveDateZoomGranularitiesChanged,
         setHasDefaultDateZoomGranularityChanged,
+        setHasDateZoomConfigChanged,
         dashboardTabs,
         activeTab,
     ]);
@@ -488,6 +509,22 @@ const Dashboard: FC = () => {
                     return { ...prev, dimensions: updatedDimensions };
                 });
                 setHaveFiltersChanged(true);
+
+                // Mirror the filter remap for date-zoom controls: copy each
+                // source tile's target onto its duplicate.
+                const mapping = Object.entries(tileUuidMapping).map(
+                    ([toTileUuid, fromTileUuid]) => ({
+                        fromTileUuid,
+                        toTileUuid,
+                    }),
+                );
+                const nextDateZoomConfig = copyDateZoomTileTargets(
+                    dateZoomConfig,
+                    mapping,
+                );
+                if (nextDateZoomConfig !== dateZoomConfig) {
+                    setDateZoomConfig(nextDateZoomConfig);
+                }
             }
         },
         [
@@ -499,6 +536,8 @@ const Dashboard: FC = () => {
             setHaveTabsChanged,
             setDashboardFilters,
             setHaveFiltersChanged,
+            dateZoomConfig,
+            setDateZoomConfig,
         ],
     );
 
@@ -511,8 +550,24 @@ const Dashboard: FC = () => {
             );
 
             setHaveTilesChanged(true);
+
+            // Drop the deleted tile's date-zoom target and prune any control
+            // left with no charts, so deleting the last attached tile doesn't
+            // leave a dangling control behind.
+            const nextDateZoomConfig = removeDateZoomTileTargets(
+                dateZoomConfig,
+                [tile.uuid],
+            );
+            if (nextDateZoomConfig !== dateZoomConfig) {
+                setDateZoomConfig(nextDateZoomConfig);
+            }
         },
-        [setDashboardTiles, setHaveTilesChanged],
+        [
+            setDashboardTiles,
+            setHaveTilesChanged,
+            dateZoomConfig,
+            setDateZoomConfig,
+        ],
     );
 
     const handleBatchDeleteTiles = (
@@ -524,6 +579,14 @@ const Dashboard: FC = () => {
             ),
         );
         setHaveTilesChanged(true);
+
+        const nextDateZoomConfig = removeDateZoomTileTargets(
+            dateZoomConfig,
+            tilesToDelete.map((tile) => tile.uuid),
+        );
+        if (nextDateZoomConfig !== dateZoomConfig) {
+            setDateZoomConfig(nextDateZoomConfig);
+        }
     };
 
     const handleEditTiles = useCallback(
@@ -562,6 +625,8 @@ const Dashboard: FC = () => {
             dashboard.config?.defaultDateZoomGranularity,
         );
         setHasDefaultDateZoomGranularityChanged(false);
+        setDateZoomConfig(normalizeDateZoomConfig(dashboard.config));
+        setHasDateZoomConfigChanged(false);
 
         if (dashboardTabs.length > 0) {
             void navigate(
@@ -594,6 +659,8 @@ const Dashboard: FC = () => {
         setHaveDateZoomGranularitiesChanged,
         setDefaultDateZoomGranularity,
         setHasDefaultDateZoomGranularityChanged,
+        setDateZoomConfig,
+        setHasDateZoomConfigChanged,
         setHasParameterOrderChanged,
     ]);
 
@@ -706,8 +773,13 @@ const Dashboard: FC = () => {
             }),
         ) === true;
 
-    const shouldShowVerificationSaveOptions =
-        !!dashboard?.verification && canManageContentVerification;
+    const isOwnVerification =
+        dashboard?.verification?.verifiedBy.userUuid === user.data?.userUuid;
+
+    const canPreserveVerification =
+        canManageContentVerification || isOwnVerification;
+
+    const shouldShowVerificationSaveOptions = !!dashboard?.verification;
 
     const handleSaveDashboard = (preserveVerification?: boolean) => {
         const dimensionFilters = [
@@ -725,6 +797,15 @@ const Dashboard: FC = () => {
             }
             return filter;
         });
+
+        // Prune empty controls + dangling targets on save; omit the field
+        // entirely when no controls remain so untouched dashboards don't churn.
+        const prunedDateZoomConfig = pruneDateZoomConfig(dateZoomConfig);
+        const savedDateZoomConfig = hasDateZoomConfigChanged
+            ? isEmptyDateZoomConfig(prunedDateZoomConfig)
+                ? undefined
+                : prunedDateZoomConfig
+            : dashboard.config?.dateZoomConfig;
 
         const dashboardUpdate: UpdateDashboard = {
             tiles: dashboardTiles,
@@ -754,6 +835,7 @@ const Dashboard: FC = () => {
                 defaultDateZoomGranularity: hasDefaultDateZoomGranularityChanged
                     ? defaultDateZoomGranularity
                     : dashboard.config?.defaultDateZoomGranularity,
+                dateZoomConfig: savedDateZoomConfig,
             },
             parameters: dashboardParameters,
             ...(preserveVerification !== undefined
@@ -789,7 +871,8 @@ const Dashboard: FC = () => {
             havePinnedParametersChanged ||
             hasParameterOrderChanged ||
             haveDateZoomGranularitiesChanged ||
-            hasDefaultDateZoomGranularityChanged,
+            hasDefaultDateZoomGranularityChanged ||
+            hasDateZoomConfigChanged,
         onAddTiles: handleAddTiles,
         onSaveDashboard: () => {
             if (shouldShowVerificationSaveOptions) {
@@ -818,6 +901,7 @@ const Dashboard: FC = () => {
                     onClose={() => {
                         blocker.reset();
                     }}
+                    role="alertdialog"
                     title="Unsaved changes"
                     icon={IconAlertCircle}
                     cancelLabel="Stay"
@@ -845,30 +929,63 @@ const Dashboard: FC = () => {
                 onClose={saveVerificationModalHandlers.close}
                 title="Save verified dashboard"
             >
-                <Text mb="md">Keep this dashboard verified after saving?</Text>
-                <Group justify="flex-end">
-                    <Button
-                        variant="default"
-                        loading={isSaving}
-                        onClick={() => {
-                            saveVerificationModalHandlers.close();
-                            handleSaveDashboard(false);
-                        }}
-                    >
-                        Save
-                    </Button>
-                    <Button
-                        color="green.7"
-                        leftSection={<IconCircleCheckFilled size={16} />}
-                        loading={isSaving}
-                        onClick={() => {
-                            saveVerificationModalHandlers.close();
-                            handleSaveDashboard(true);
-                        }}
-                    >
-                        Save & verify
-                    </Button>
-                </Group>
+                {canPreserveVerification ? (
+                    <>
+                        <Text mb="md">
+                            Keep this dashboard verified after saving?
+                        </Text>
+                        <Group justify="flex-end">
+                            <Button
+                                variant="default"
+                                loading={isSaving}
+                                onClick={() => {
+                                    saveVerificationModalHandlers.close();
+                                    handleSaveDashboard(false);
+                                }}
+                            >
+                                Save
+                            </Button>
+                            <Button
+                                color="green.7"
+                                leftSection={
+                                    <IconCircleCheckFilled size={16} />
+                                }
+                                loading={isSaving}
+                                onClick={() => {
+                                    saveVerificationModalHandlers.close();
+                                    handleSaveDashboard(true);
+                                }}
+                            >
+                                Save & verify
+                            </Button>
+                        </Group>
+                    </>
+                ) : (
+                    <>
+                        <Text mb="md">
+                            This dashboard is verified. Saving your changes will
+                            remove its verified status until someone verifies it
+                            again.
+                        </Text>
+                        <Group justify="flex-end">
+                            <Button
+                                variant="default"
+                                onClick={saveVerificationModalHandlers.close}
+                            >
+                                Cancel
+                            </Button>
+                            <Button
+                                loading={isSaving}
+                                onClick={() => {
+                                    saveVerificationModalHandlers.close();
+                                    handleSaveDashboard(false);
+                                }}
+                            >
+                                Save anyway
+                            </Button>
+                        </Group>
+                    </>
+                )}
             </MantineModal>
 
             <Page
@@ -885,6 +1002,7 @@ const Dashboard: FC = () => {
                         hasTilesThatSupportFilters={hasTilesThatSupportFilters}
                         // parameters
                         parameters={referencedParameters}
+                        shadowedReservedNames={shadowedReservedNames}
                         parameterValues={parameterValues}
                         onParameterChange={handleParameterChange}
                         onParameterClearAll={clearAllParameters}

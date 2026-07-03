@@ -7,13 +7,18 @@ import {
     CatalogType,
     ContentType,
     Explore,
+    FeatureFlags,
     filterExploreByTags,
+    filterStaticFilterAutocompleteValues,
+    findFieldByIdInExplore,
     ForbiddenError,
     getContentAsCodePathFromLtreePath,
+    getErrorMessage,
     getItemMap,
     getLtreePathFromContentAsCodePath,
     getValidAiQueryLimit,
     isDashboardChartTileType,
+    isDimension,
     isExploreError,
     isGitProjectType,
     JobStatusType,
@@ -23,11 +28,13 @@ import {
     QueryHistoryStatus,
     RequestMethod,
     SessionUser,
+    shouldUseStaticFilterAutocomplete,
     TimeoutError,
     UserAttributeValueMap,
     WarehouseQueryError,
     type ChartAsCode,
     type DashboardAsCode,
+    type FieldValueSearchResult,
 } from '@lightdash/common';
 import * as JsonPatch from 'fast-json-patch';
 import Logger from '../../../logging/logger';
@@ -72,10 +79,12 @@ import {
     FindContentSpaceMetadata,
     FindExploresFn,
     FindFieldFn,
+    FindFieldsFn,
     GetDashboardChartsFn,
     GetExploreFn,
     GetProjectInfoFn,
     GetSavedChartFn,
+    GetVerifiedFieldUsageFn,
     ListContentFn,
     ListExploresFn,
     ListKnowledgeDocumentsFn,
@@ -97,6 +106,7 @@ import {
     expandMetricsWithPopAdditionalMetrics,
     populateCustomMetricsSQL,
 } from '../ai/utils/populateCustomMetricsSQL';
+import { getExploreRequiredFilters } from '../ai/utils/requiredFilters';
 import { PreviewDeploySetupService } from '../PreviewDeploySetupService/PreviewDeploySetupService';
 
 type AgentListContentResult = Awaited<ReturnType<ListContentFn>>;
@@ -125,11 +135,41 @@ export type AiAgentToolsRuntimeContext = {
     agentUuid?: string;
 };
 
+export type McpRuntimeSuccess<TData> = {
+    status: 'success';
+    data: TData;
+};
+
+export type McpRuntimeError = {
+    status: 'error';
+    error: unknown;
+};
+
+export type McpRuntimeResult<TData> =
+    | McpRuntimeSuccess<TData>
+    | McpRuntimeError;
+
+export const unwrapMcpRuntimeResult = <TData>(
+    result: McpRuntimeResult<TData>,
+): TData => {
+    if (result.status === 'error') {
+        throw result.error;
+    }
+    return result.data;
+};
+
+type FindExploresRuntimeResult = Awaited<ReturnType<FindExploresFn>>;
+
+type FindFieldsRuntimeResult = Awaited<ReturnType<FindFieldsFn>>;
+
+type GetExploreRuntimeResult = Awaited<ReturnType<GetExploreFn>>;
+
 export type AiAgentToolsRuntime = {
     listExplores: ListExploresFn;
     getExplore: GetExploreFn;
     findExplores: FindExploresFn;
-    findFields: FindFieldFn;
+    getVerifiedFieldUsage: GetVerifiedFieldUsageFn;
+    findFields: FindFieldsFn;
     findContent: FindContentFn;
     searchFieldValues: SearchFieldValuesFn;
     searchSemanticLayer: SearchSemanticLayerFn;
@@ -157,6 +197,21 @@ export type AiAgentToolsRuntime = {
     listProjects: ListProjectsFn;
     getProjectInfo: GetProjectInfoFn;
     loadSkill: LoadAgentSkillFn;
+};
+
+export type McpAiAgentToolsRuntime = Omit<
+    AiAgentToolsRuntime,
+    'getExplore' | 'findExplores' | 'findFields'
+> & {
+    getExplore: (
+        args: Parameters<GetExploreFn>[0],
+    ) => Promise<McpRuntimeResult<GetExploreRuntimeResult>>;
+    findExplores: (
+        args: Parameters<FindExploresFn>[0],
+    ) => Promise<McpRuntimeResult<FindExploresRuntimeResult>>;
+    findFields: (
+        args: Parameters<FindFieldsFn>[0],
+    ) => Promise<McpRuntimeResult<FindFieldsRuntimeResult>>;
 };
 
 type BuiltInSkillsClient = Pick<
@@ -418,11 +473,20 @@ export class AiAgentToolsService extends BaseService {
         return explore;
     }
 
-    createRuntime(context: AiAgentToolsRuntimeContext): AiAgentToolsRuntime {
-        return {
+    createRuntime(
+        context: AiAgentToolsRuntimeContext & { source: 'mcp' },
+    ): McpAiAgentToolsRuntime;
+    createRuntime(
+        context: AiAgentToolsRuntimeContext & { source: 'ai_agent' },
+    ): AiAgentToolsRuntime;
+    createRuntime(
+        context: AiAgentToolsRuntimeContext,
+    ): AiAgentToolsRuntime | McpAiAgentToolsRuntime {
+        const runtime: AiAgentToolsRuntime = {
             listExplores: () => this.listExplores(context),
             getExplore: (args) => this.getExploreForRuntime(context, args),
             findExplores: (args) => this.findExplores(context, args),
+            getVerifiedFieldUsage: () => this.getVerifiedFieldUsage(context),
             findFields: (args) => this.findFields(context, args),
             findContent: (args) => this.findContent(context, args),
             searchFieldValues: (args) => this.searchFieldValues(context, args),
@@ -461,6 +525,54 @@ export class AiAgentToolsService extends BaseService {
             getProjectInfo: () => this.getProjectInfo(context),
             loadSkill: (name) => this.loadAgentSkill(name),
         };
+
+        return context.source === 'mcp'
+            ? this.withMcpRuntimeResults(runtime)
+            : runtime;
+    }
+
+    private withMcpRuntimeResults(
+        runtime: AiAgentToolsRuntime,
+    ): McpAiAgentToolsRuntime {
+        return {
+            ...runtime,
+            getExplore: this.withMcpRuntimeResult(
+                'get_explore',
+                runtime.getExplore,
+            ),
+            findExplores: this.withMcpRuntimeResult(
+                'find_explores',
+                runtime.findExplores,
+            ),
+            findFields: this.withMcpRuntimeResult(
+                'find_fields',
+                runtime.findFields,
+            ),
+        };
+    }
+
+    private withMcpRuntimeResult<TArgs extends unknown[], TData>(
+        toolName: string,
+        run: (...args: TArgs) => Promise<TData>,
+    ) {
+        return (...args: TArgs) =>
+            this.runMcpRuntimeTool(toolName, () => run(...args));
+    }
+
+    private async runMcpRuntimeTool<TData>(
+        toolName: string,
+        getData: () => Promise<TData>,
+    ): Promise<McpRuntimeResult<TData>> {
+        try {
+            return { status: 'success', data: await getData() };
+        } catch (error) {
+            const message = getErrorMessage(error);
+            this.logger.error(
+                `[AiAgentToolsService] Error in MCP ${toolName}: ${message}`,
+                { error },
+            );
+            return { status: 'error', error };
+        }
     }
 
     private listExplores(
@@ -498,6 +610,9 @@ export class AiAgentToolsService extends BaseService {
                 const userAttributes =
                     await this.getRuntimeUserAttributes(context);
                 const filteredExplores = await this.listExplores(context);
+                const filteredExploresByName = new Map(
+                    filteredExplores.map((explore) => [explore.name, explore]),
+                );
 
                 const tableSearchResults =
                     await this.catalogService.searchCatalog({
@@ -518,14 +633,23 @@ export class AiAgentToolsService extends BaseService {
 
                 const exploreSearchResults = tableSearchResults.data
                     .filter((item) => item.type === CatalogType.Table)
-                    .map((table) => ({
-                        name: table.name,
-                        label: table.label,
-                        description: table.description,
-                        aiHints: table.aiHints ?? undefined,
-                        searchRank: table.searchRank,
-                        joinedTables: table.joinedTables ?? undefined,
-                    }));
+                    .map((table) => {
+                        const requiredFilters = getExploreRequiredFilters(
+                            filteredExploresByName.get(table.name),
+                        );
+
+                        return {
+                            name: table.name,
+                            label: table.label,
+                            description: table.description,
+                            aiHints: table.aiHints ?? undefined,
+                            searchRank: table.searchRank,
+                            joinedTables: table.joinedTables ?? undefined,
+                            ...(requiredFilters.length > 0
+                                ? { requiredFilters }
+                                : {}),
+                        };
+                    });
 
                 const fieldSearchResults =
                     await this.catalogService.searchCatalog({
@@ -575,10 +699,45 @@ export class AiAgentToolsService extends BaseService {
 
     private findFields(
         context: AiAgentToolsRuntimeContext,
+        args: Parameters<FindFieldsFn>[0],
+    ): ReturnType<FindFieldsFn> {
+        return wrapSentryTransaction(
+            `${AiAgentToolsService.transactionPrefix(context)}.findFields`,
+            args,
+            async () =>
+                Promise.all(
+                    args.fieldSearchQueries.map(async (fieldSearchQuery) => {
+                        try {
+                            const result = await this.findField(context, {
+                                table: args.table,
+                                fieldSearchQuery,
+                                page: args.page,
+                                pageSize: args.pageSize,
+                                explore: args.explore,
+                            });
+                            return {
+                                status: 'success',
+                                searchQuery: fieldSearchQuery.label,
+                                ...result,
+                            };
+                        } catch (error) {
+                            return {
+                                status: 'error',
+                                searchQuery: fieldSearchQuery.label,
+                                error: getErrorMessage(error),
+                            };
+                        }
+                    }),
+                ),
+        );
+    }
+
+    private findField(
+        context: AiAgentToolsRuntimeContext,
         args: Parameters<FindFieldFn>[0],
     ): ReturnType<FindFieldFn> {
         return wrapSentryTransaction(
-            `${AiAgentToolsService.transactionPrefix(context)}.findFields`,
+            `${AiAgentToolsService.transactionPrefix(context)}.findField`,
             args,
             async () => {
                 const { data: catalogItems, pagination } =
@@ -1706,11 +1865,69 @@ export class AiAgentToolsService extends BaseService {
                     );
                 }
 
+                const query = args.query ?? '';
+                const isEmptyQuery = query.trim() === '';
+
+                // Serve curated filter_autocomplete values before the warehouse guard.
+                const curatedResult = await this.getStaticFieldValues(
+                    context,
+                    args,
+                    query,
+                );
+                if (curatedResult) {
+                    Logger.info(
+                        `[ai-field-values] served ${curatedResult.results.length} ` +
+                            `curated values source=${context.source} ` +
+                            `table=${args.table} fieldId=${args.fieldId}`,
+                    );
+                    return context.source === 'mcp'
+                        ? curatedResult
+                        : curatedResult.results;
+                }
+
+                // Live PostHog toggle; default off => byte-identical to today.
+                const { enabled: guardEnabled } =
+                    await this.featureFlagService.get({
+                        user: context.user,
+                        featureFlagId: FeatureFlags.AiFieldValueSearchGuard,
+                    });
+
+                // Observability. Deliberately does NOT log the query text or any
+                // returned values (they can contain user data) — only the field
+                // identifier, the request shape and timing.
+                Logger.info(
+                    `[ai-field-values] search source=${context.source} ` +
+                        `table=${args.table} fieldId=${args.fieldId} ` +
+                        `isEmptyQuery=${isEmptyQuery} queryLen=${query.length} ` +
+                        `guard=${guardEnabled}`,
+                );
+
+                // An empty query compiles to `LIKE '%%'` — "distinct the whole
+                // column" — the worst case on a high-cardinality field. With the
+                // guard on, refuse it up front (0s) with a message the agent can
+                // act on, instead of paying for a full-column scan first.
+                if (guardEnabled && isEmptyQuery) {
+                    Logger.warn(
+                        `[ai-field-values] guard blocked empty-query scan ` +
+                            `source=${context.source} table=${args.table} ` +
+                            `fieldId=${args.fieldId}`,
+                    );
+                    throw new Error(
+                        'Listing all values for this field is disabled because ' +
+                            'it requires a full-column scan that is too slow on ' +
+                            'large tables. Search for a specific value instead ' +
+                            '(e.g. part of a name, status or code), or filter by ' +
+                            'an exact value you already know.',
+                    );
+                }
+
                 const dimensionFilters = args.filters?.dimensions;
                 const andFilters =
                     dimensionFilters && 'and' in dimensionFilters
                         ? dimensionFilters
                         : undefined;
+
+                const startedAt = Date.now();
                 const results =
                     await this.projectService.searchFieldUniqueValues(
                         context.user,
@@ -1727,9 +1944,60 @@ export class AiAgentToolsService extends BaseService {
                             ? QueryExecutionContext.MCP_SEARCH_FIELD_VALUES
                             : undefined,
                     );
-                return context.source === 'mcp' ? results : results.results;
+                const output =
+                    context.source === 'mcp' ? results : results.results;
+                Logger.info(
+                    `[ai-field-values] done source=${context.source} ` +
+                        `fieldId=${args.fieldId} elapsedMs=${
+                            Date.now() - startedAt
+                        } resultCount=${
+                            Array.isArray(output) ? output.length : 'n/a'
+                        }`,
+                );
+                return output;
             },
         );
+    }
+
+    /**
+     * Serve a dimension's curated `filter_autocomplete` values without touching
+     * the warehouse, mirroring the Explore filter UI (`useFieldValues`). Returns
+     * undefined when the field isn't curated (or can't be resolved) so the
+     * caller falls back to the warehouse lookup.
+     */
+    private async getStaticFieldValues(
+        context: AiAgentToolsRuntimeContext,
+        args: Parameters<SearchFieldValuesFn>[0],
+        query: string,
+    ): Promise<FieldValueSearchResult<string> | undefined> {
+        let explore: Explore;
+        try {
+            explore = await this.getExploreForRuntime(context, {
+                table: args.table,
+            });
+        } catch (e) {
+            Logger.warn(
+                `[ai-field-values] could not resolve explore "${args.table}" for curated values: ${getErrorMessage(e)}`,
+            );
+            return undefined;
+        }
+        const field = findFieldByIdInExplore(explore, args.fieldId);
+        if (!field || !isDimension(field)) return undefined;
+        if (
+            !shouldUseStaticFilterAutocomplete(field.filterAutocomplete, query)
+        ) {
+            return undefined;
+        }
+        const results = filterStaticFilterAutocompleteValues(
+            field.filterAutocomplete?.values ?? [],
+            query,
+        ).slice(0, 100);
+        return {
+            search: query,
+            results,
+            cached: false,
+            refreshedAt: new Date(),
+        };
     }
 
     private listKnowledgeDocuments(

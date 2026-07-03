@@ -12,6 +12,8 @@ import {
     WeekDay,
     type WarehouseExecuteAsyncQuery,
     type WarehouseExecuteAsyncQueryArgs,
+    type WarehousePhaseTimings,
+    type WarehouseQueryPhase,
 } from '@lightdash/common';
 import { type WarehouseClient } from '../types';
 
@@ -29,6 +31,10 @@ export default abstract class WarehouseBaseClient<
 
     getAdapterType(): SupportedDbtAdapter {
         return this.sqlBuilder.getAdapterType();
+    }
+
+    supportsCteMaterialization(): boolean {
+        return this.sqlBuilder.supportsCteMaterialization();
     }
 
     getStringQuoteChar(): string {
@@ -75,6 +81,10 @@ export default abstract class WarehouseBaseClient<
             queryParams?: Record<string, AnyType>;
             tags?: Record<string, string>;
             timezone?: string;
+            onPhaseTiming?: (
+                phase: WarehouseQueryPhase,
+                durationMs: number,
+            ) => void;
         },
     ): Promise<void>;
 
@@ -93,6 +103,7 @@ export default abstract class WarehouseBaseClient<
     ): Promise<WarehouseExecuteAsyncQuery> {
         let rowCount = 0;
 
+        const phaseTimings: WarehousePhaseTimings = {};
         const startTime = performance.now();
         await this.streamQuery(
             sql,
@@ -105,6 +116,10 @@ export default abstract class WarehouseBaseClient<
                 queryParams,
                 tags,
                 timezone,
+                onPhaseTiming: (phase, durationMs) => {
+                    phaseTimings[phase] =
+                        (phaseTimings[phase] ?? 0) + durationMs;
+                },
             },
         );
 
@@ -114,6 +129,7 @@ export default abstract class WarehouseBaseClient<
             queryMetadata: null,
             durationMs: performance.now() - startTime,
             totalRows: rowCount,
+            phaseTimings,
         };
     }
 

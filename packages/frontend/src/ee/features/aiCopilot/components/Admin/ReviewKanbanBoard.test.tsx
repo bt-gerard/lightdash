@@ -25,6 +25,10 @@ vi.mock('../../hooks/useAiAgentAdmin', () => ({
         mutate: vi.fn(),
         isLoading: false,
     }),
+    useUpdateAiAgentReviewItemPriority: () => ({
+        mutate: vi.fn(),
+        isLoading: false,
+    }),
 }));
 
 vi.mock('../../../../../hooks/useProjectUsersWithRolesV2', () => ({
@@ -98,5 +102,35 @@ describe('ReviewKanbanBoard', () => {
         ).toBeInTheDocument();
         // resolved item → done lane; getIssueTitle falls back to item.title
         expect(screen.getByText('All done')).toBeInTheDocument();
+    });
+
+    it('injects inert, anchored example cards while the tour is open', () => {
+        const { container } = renderWithProviders(
+            <ReviewKanbanBoard
+                onReviewItemSelect={vi.fn()}
+                showOnboardingExamples
+            />,
+        );
+
+        // Example cards replace the real data and carry the board anchors.
+        expect(container.querySelector('[data-tour="reviews-card"]')).not.toBe(
+            null,
+        );
+        expect(container.querySelector('[data-tour="reviews-pr"]')).not.toBe(
+            null,
+        );
+        expect(
+            container.querySelector('[data-tour="reviews-workspace"]'),
+        ).not.toBe(null);
+        expect(
+            container.querySelector('[data-tour="reviews-in-progress"]'),
+        ).not.toBe(null);
+
+        // Example items are clearly labelled and their Start action is disabled.
+        expect(screen.getAllByText('Example').length).toBeGreaterThan(0);
+        const startButton = container.querySelector(
+            '[data-tour="reviews-pr"]',
+        ) as HTMLButtonElement | null;
+        expect(startButton?.disabled).toBe(true);
     });
 });

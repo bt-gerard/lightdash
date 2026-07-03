@@ -14,15 +14,16 @@ import {
     RequestMethod,
     SupportedDbtVersions,
     WarehouseTypes,
+    type AiWritebackDbtSourceOption,
     type AiWritebackRunResult,
     type AiWritebackStep,
+    type DbtProjectConfig,
     type GitRepo,
     type MergePullRequestResult,
     type PullRequestWritebackAction,
     type SessionUser,
 } from '@lightdash/common';
 import * as Sentry from '@sentry/node';
-import { ALL_TRAFFIC, CommandExitError, Sandbox, TimeoutError } from 'e2b';
 import type {
     AiWritebackFailureStage,
     LightdashAnalytics,
@@ -38,6 +39,7 @@ import type { LightdashConfig } from '../../../config/parseConfig';
 import type { FeatureFlagModel } from '../../../models/FeatureFlagModel/FeatureFlagModel';
 import type { GithubAppInstallationsModel } from '../../../models/GithubAppInstallations/GithubAppInstallationsModel';
 import type { GitlabAppInstallationsModel } from '../../../models/GitlabAppInstallations/GitlabAppInstallationsModel';
+import type { ProjectDbtSourcesModel } from '../../../models/ProjectDbtSourcesModel';
 import type { ProjectModel } from '../../../models/ProjectModel/ProjectModel';
 import type { PullRequestsModel } from '../../../models/PullRequestsModel';
 import type PrometheusMetrics from '../../../prometheus/PrometheusMetrics';
@@ -47,8 +49,21 @@ import type { GithubAppService } from '../../../services/GithubAppService/Github
 import type { ProjectService } from '../../../services/ProjectService/ProjectService';
 import type {
     AiWritebackThreadModel,
-    AiWritebackThreadWithPrUrl,
+    ResumableWritebackThread,
 } from '../../models/AiWritebackThreadModel';
+import type { SandboxRegistryModel } from '../../models/SandboxRegistryModel';
+import {
+    createSandboxManager,
+    S3SnapshotStore,
+    SandboxCommandError,
+    SandboxExpiredError,
+    SandboxManager,
+    SandboxTimeoutError,
+    type AzureSandboxesConfig,
+    type PersistentWorkspace,
+    type SandboxHandle,
+    type SandboxSpec,
+} from '../SandboxRuntime';
 import {
     ALLOWED_TOOLS,
     CLAUDE_MODEL,
@@ -86,6 +101,7 @@ import type {
     AdoptedPullRequest,
     AiWritebackRunArgs,
     AiWritebackSource,
+    AiWritebackUsage,
     AppliedChanges,
     CloneTarget,
     GitInstallation,
@@ -113,6 +129,14 @@ import {
 
 export type { AiWritebackRunArgs, AiWritebackSource } from './types';
 
+// What to snapshot between turns: the whole cloned repo at CWD (working tree +
+// .git feature branch + the agent's .claude session dir), minus re-derivable
+// deps. Resume restores this tarball, so no re-clone is needed.
+const WRITEBACK_WORKSPACE: PersistentWorkspace = {
+    include: [CWD],
+    exclude: ['node_modules'],
+};
+
 // Maps the applied-changes outcome to the PR action surfaced to the user: a
 // fresh PR is 'opened', a resumed thread or adopted pasted-link PR is
 // 'updated', and no PR touched is null.
@@ -125,15 +149,41 @@ const getPrAction = (
     return applied.prCreated ? 'opened' : 'updated';
 };
 
+/**
+ * Outcome of `prepareTurn`: either a turn ready to run, or — when the project
+ * has several dbt sources and the prompt didn't name one — a request for the
+ * caller to choose which source to target.
+ */
+type PreparedTurn =
+    | { kind: 'run'; turn: TurnContext }
+    | {
+          kind: 'select';
+          projectName: string;
+          options: AiWritebackDbtSourceOption[];
+      };
+
+/** A dbt source a writeback run can target, with its decrypted connection. */
+type DbtTargetCandidate = {
+    /** `project_dbt_sources` row uuid for an additional source; null for primary. */
+    sourceUuid: string | null;
+    /** Client-facing id: the project uuid for primary, the row uuid otherwise. */
+    optionUuid: string;
+    name: string;
+    isPrimary: boolean;
+    connection: DbtProjectConfig;
+};
+
 type AiWritebackServiceDeps = {
     lightdashConfig: LightdashConfig;
     analytics: LightdashAnalytics;
     projectModel: ProjectModel;
+    projectDbtSourcesModel: ProjectDbtSourcesModel;
     featureFlagModel: FeatureFlagModel;
     githubAppInstallationsModel: GithubAppInstallationsModel;
     githubAppService: GithubAppService;
     gitlabAppInstallationsModel: GitlabAppInstallationsModel;
     aiWritebackThreadModel: AiWritebackThreadModel;
+    sandboxRegistryModel: SandboxRegistryModel;
     pullRequestsModel: PullRequestsModel;
     prometheusMetrics?: PrometheusMetrics;
     ciService: CiService;
@@ -220,9 +270,13 @@ export class AiWritebackService extends BaseService {
 
     private readonly projectModel: ProjectModel;
 
+    private readonly projectDbtSourcesModel: ProjectDbtSourcesModel;
+
     private readonly featureFlagModel: FeatureFlagModel;
 
     private readonly aiWritebackThreadModel: AiWritebackThreadModel;
+
+    private readonly sandboxRegistryModel: SandboxRegistryModel;
 
     private readonly pullRequestsModel: PullRequestsModel;
 
@@ -238,15 +292,20 @@ export class AiWritebackService extends BaseService {
 
     private readonly projectService: ProjectService;
 
+    /** Memoized sandbox provider (e2b | docker), selected by SANDBOX_PROVIDER. */
+    private sandboxManager: SandboxManager | undefined;
+
     constructor({
         lightdashConfig,
         analytics,
         projectModel,
+        projectDbtSourcesModel,
         featureFlagModel,
         githubAppInstallationsModel,
         githubAppService,
         gitlabAppInstallationsModel,
         aiWritebackThreadModel,
+        sandboxRegistryModel,
         pullRequestsModel,
         prometheusMetrics,
         ciService,
@@ -256,8 +315,10 @@ export class AiWritebackService extends BaseService {
         this.lightdashConfig = lightdashConfig;
         this.analytics = analytics;
         this.projectModel = projectModel;
+        this.projectDbtSourcesModel = projectDbtSourcesModel;
         this.featureFlagModel = featureFlagModel;
         this.aiWritebackThreadModel = aiWritebackThreadModel;
+        this.sandboxRegistryModel = sandboxRegistryModel;
         this.pullRequestsModel = pullRequestsModel;
         this.prometheusMetrics = prometheusMetrics;
         this.githubAppService = githubAppService;
@@ -892,14 +953,118 @@ export class AiWritebackService extends BaseService {
         }
     }
 
-    private getE2bApiKey(): string {
-        const key = this.lightdashConfig.appRuntime.e2bApiKey;
-        if (!key) {
+    /**
+     * The sandbox manager over the provider selected by `SANDBOX_PROVIDER`
+     * (e2b | docker). Memoized — the feature talks only to the manager for
+     * lifecycle and to the returned {@link SandboxHandle} for the data plane.
+     * See docs/sandbox-runtime.md.
+     */
+    private getSandboxManager(): SandboxManager {
+        if (!this.sandboxManager) {
+            const { sandboxProvider } = this.lightdashConfig.appRuntime;
+            this.sandboxManager = createSandboxManager({
+                provider: sandboxProvider,
+                e2bApiKey: this.lightdashConfig.appRuntime.e2bApiKey,
+                dockerImage:
+                    this.lightdashConfig.appRuntime
+                        .sandboxAiWritebackDockerImage,
+                lambdaMicroVm: this.lightdashConfig.appRuntime.lambdaMicroVm,
+                azureSandboxes:
+                    sandboxProvider === 'azure-sandboxes'
+                        ? this.getAzureSandboxesConfig()
+                        : null,
+                // Object-store snapshots are only for the Docker backend (no
+                // native pause); native-pause providers (E2B, Lambda, Azure
+                // Sandboxes) never touch S3, so don't construct a client.
+                snapshotStore:
+                    sandboxProvider === 'docker'
+                        ? new S3SnapshotStore({
+                              lightdashConfig: this.lightdashConfig,
+                          })
+                        : null,
+                registryModel: this.sandboxRegistryModel,
+                logger: this.logger,
+            });
+        }
+        return this.sandboxManager;
+    }
+
+    private buildSandboxSpec(): SandboxSpec {
+        return {
+            templateRef: this.getSandboxTemplateRef(),
+            timeoutMs: SANDBOX_TIMEOUT_MS,
+            egress: {
+                allow: ['api.anthropic.com', 'github.com', 'gitlab.com'],
+            },
+        };
+    }
+
+    /**
+     * Resolve the template/image ref the active provider launches from. E2B
+     * composes the writeback `name:tag`; Docker uses the writeback-specific
+     * local image (separate from the data-app image — different toolchain).
+     */
+    private getSandboxTemplateRef(): string {
+        const { sandboxProvider } = this.lightdashConfig.appRuntime;
+        if (sandboxProvider === 'docker') {
+            return this.lightdashConfig.appRuntime
+                .sandboxAiWritebackDockerImage;
+        }
+        if (sandboxProvider === 'lambda-microvm') {
+            const imageArn =
+                this.lightdashConfig.appRuntime
+                    .lambdaMicroVmAiWritebackImageArn;
+            if (!imageArn) {
+                throw new MissingConfigError(
+                    'Lambda MicroVM AI writeback image ARN is not configured (LAMBDA_MICROVM_AI_WRITEBACK_IMAGE_ARN)',
+                );
+            }
+            return imageArn;
+        }
+        if (sandboxProvider === 'azure-sandboxes') {
+            const diskImage =
+                this.lightdashConfig.appRuntime
+                    .azureSandboxesAiWritebackDiskImage;
+            if (!diskImage) {
+                throw new MissingConfigError(
+                    'Azure AI writeback sandbox disk image is not configured (AZURE_SANDBOXES_AI_WRITEBACK_DISK_IMAGE)',
+                );
+            }
+            return diskImage;
+        }
+        return resolveSandboxTemplateRef({
+            name: this.lightdashConfig.appRuntime.e2bAiWritebackTemplateName,
+            tag: this.lightdashConfig.appRuntime.e2bAiWritebackTemplateTag,
+        });
+    }
+
+    /** Assemble the `azure-sandboxes` provider config for the AI writeback
+     * pipeline (the writeback sandbox group + shared subscription/region settings). */
+    private getAzureSandboxesConfig(): AzureSandboxesConfig {
+        const {
+            azureSandboxes,
+            azureSandboxesAiWritebackGroup,
+            sandboxIdleTimeoutMs,
+        } = this.lightdashConfig.appRuntime;
+        if (
+            !azureSandboxes.subscriptionId ||
+            !azureSandboxes.resourceGroup ||
+            !azureSandboxesAiWritebackGroup
+        ) {
             throw new MissingConfigError(
-                'E2B API key is not configured (E2B_API_KEY)',
+                'Azure Sandboxes is not configured (AZURE_SANDBOXES_SUBSCRIPTION_ID / AZURE_SANDBOXES_RESOURCE_GROUP / AZURE_SANDBOXES_AI_WRITEBACK_GROUP)',
             );
         }
-        return key;
+        return {
+            subscriptionId: azureSandboxes.subscriptionId,
+            resourceGroup: azureSandboxes.resourceGroup,
+            region: azureSandboxes.region,
+            sandboxGroup: azureSandboxesAiWritebackGroup,
+            apiVersion: azureSandboxes.apiVersion,
+            tokenScope: azureSandboxes.tokenScope,
+            resourceTier: azureSandboxes.resourceTier,
+            autoSuspendIdleSeconds: Math.floor(sandboxIdleTimeoutMs / 1000),
+        };
     }
 
     private getAnthropicApiKey(): string {
@@ -917,57 +1082,67 @@ export class AiWritebackService extends BaseService {
     }
 
     private async createSandbox(
+        organizationUuid: string,
         projectUuid: string,
-    ): Promise<{ sandbox: Sandbox; durationMs: number }> {
+    ): Promise<{
+        sandboxUuid: string;
+        sandbox: SandboxHandle;
+        durationMs: number;
+    }> {
         const start = performance.now();
-        const { e2bAiWritebackTemplateName, e2bAiWritebackTemplateTag } =
-            this.lightdashConfig.appRuntime;
-        const templateRef = resolveSandboxTemplateRef({
-            name: e2bAiWritebackTemplateName,
-            tag: e2bAiWritebackTemplateTag,
-        });
-        const sandbox = await Sandbox.create(templateRef, {
-            timeoutMs: SANDBOX_TIMEOUT_MS,
-            apiKey: this.getE2bApiKey(),
-            lifecycle: { onTimeout: 'pause' },
-            network: {
-                allowOut: ['api.anthropic.com', 'github.com', 'gitlab.com'],
-                denyOut: [ALL_TRAFFIC],
-            },
+        const spec = this.buildSandboxSpec();
+        const { sandboxUuid, handle } = await this.getSandboxManager().acquire({
+            spec,
+            organizationUuid,
+            projectUuid,
+            workspace: WRITEBACK_WORKSPACE,
         });
         const durationMs = AiWritebackService.elapsed(start);
         this.logger.info('AI writeback sandbox created', {
             event: 'ai_writeback.sandbox.created',
-            sandboxId: sandbox.sandboxId,
+            sandboxId: handle.sandboxId,
+            sandboxUuid,
             projectUuid,
-            template: templateRef,
+            template: spec.templateRef,
             durationMs,
         });
         this.prometheusMetrics?.observeAiWritebackSandboxCreateDuration(
             durationMs,
         );
-        return { sandbox, durationMs };
+        return { sandboxUuid, sandbox: handle, durationMs };
     }
 
-    private async pauseSandbox(
-        sandbox: Sandbox,
+    /**
+     * End-of-turn suspend: snapshot the workspace and (on object-store
+     * backends) destroy the container. Best-effort — a pause failure is logged
+     * but never fails the run.
+     */
+    private async suspendSandbox(
+        sandboxUuid: string,
+        sandbox: SandboxHandle,
         projectUuid: string,
     ): Promise<void> {
         try {
             const start = performance.now();
-            await sandbox.pause();
+            await this.getSandboxManager().suspend({
+                sandboxUuid,
+                handle: sandbox,
+                workspace: WRITEBACK_WORKSPACE,
+            });
             const durationMs = AiWritebackService.elapsed(start);
-            this.logger.info('AI writeback sandbox paused', {
+            this.logger.info('AI writeback sandbox suspended', {
                 event: 'ai_writeback.sandbox.lifecycle',
                 action: 'paused',
                 sandboxId: sandbox.sandboxId,
+                sandboxUuid,
                 projectUuid,
                 durationMs,
             });
         } catch (error) {
-            this.logger.warn('AI writeback failed to pause sandbox', {
+            this.logger.warn('AI writeback failed to suspend sandbox', {
                 event: 'ai_writeback.sandbox.pause_failed',
                 sandboxId: sandbox.sandboxId,
+                sandboxUuid,
                 projectUuid,
                 errorMessage: getErrorMessage(error),
             });
@@ -975,19 +1150,20 @@ export class AiWritebackService extends BaseService {
     }
 
     private async resumeSandbox(
-        sandboxId: string,
+        sandboxUuid: string,
         projectUuid: string,
-    ): Promise<{ sandbox: Sandbox; durationMs: number }> {
+    ): Promise<{ sandbox: SandboxHandle; durationMs: number }> {
         const start = performance.now();
-        const sandbox = await Sandbox.connect(sandboxId, {
-            apiKey: this.getE2bApiKey(),
-            timeoutMs: SANDBOX_TIMEOUT_MS,
+        const sandbox = await this.getSandboxManager().resume({
+            sandboxUuid,
+            spec: this.buildSandboxSpec(),
         });
         const durationMs = AiWritebackService.elapsed(start);
         this.logger.info('AI writeback sandbox resumed', {
             event: 'ai_writeback.sandbox.lifecycle',
             action: 'resumed',
             sandboxId: sandbox.sandboxId,
+            sandboxUuid,
             projectUuid,
             durationMs,
         });
@@ -999,7 +1175,7 @@ export class AiWritebackService extends BaseService {
 
     /** Read a file the agent may or may not have written; null if absent. */
     private static async readFileOrNull(
-        sandbox: Sandbox,
+        sandbox: SandboxHandle,
         path: string,
     ): Promise<string | null> {
         try {
@@ -1021,7 +1197,7 @@ export class AiWritebackService extends BaseService {
      * the stray file was scrubbed; default = agent wrote nothing usable).
      */
     private async resolvePrMetadata(
-        sandbox: Sandbox,
+        sandbox: SandboxHandle,
         tmpPath: string,
         fallback: string,
     ): Promise<string> {
@@ -1072,6 +1248,7 @@ export class AiWritebackService extends BaseService {
             prUrl,
             aiThreadUuid,
             source,
+            dbtSourceUuid,
             onProgress,
         } = args;
         const runStartedAt = performance.now();
@@ -1103,12 +1280,32 @@ export class AiWritebackService extends BaseService {
             reportProgress(text);
         };
 
-        const turn = await this.prepareTurn({
+        const prepared = await this.prepareTurn({
             user,
             projectUuid,
+            prompt,
             aiThreadUuid,
             source,
+            dbtSourceUuid,
         });
+
+        // The project has more than one dbt source and the prompt didn't pin a
+        // single one down. Ask the caller to choose before spending a sandbox —
+        // no clone, no PR. The caller re-runs with the chosen `dbtSourceUuid`.
+        if (prepared.kind === 'select') {
+            this.logger.info('AI writeback needs a dbt source selection', {
+                event: 'ai_writeback.run.needs_selection',
+                source,
+                projectUuid,
+                aiThreadUuid: aiThreadUuid ?? null,
+                optionCount: prepared.options.length,
+            });
+            return AiWritebackService.buildDbtSourceSelectionResult(
+                prepared.projectName,
+                prepared.options,
+            );
+        }
+        const { turn } = prepared;
 
         this.logger.info('AI writeback run started', {
             event: 'ai_writeback.run.started',
@@ -1152,9 +1349,10 @@ export class AiWritebackService extends BaseService {
             }
         };
 
-        let sandbox: Sandbox | undefined;
+        let sandbox: SandboxHandle | undefined;
+        let sandboxUuid: string | undefined;
         // Default to preserving a resumed sandbox through failures — its
-        // sandbox_id is referenced by an ai_writeback_thread row and killing
+        // sandbox_uuid is referenced by an ai_writeback_thread row and killing
         // it would poison the row for every future turn. Fresh turns have no
         // such row, so the default kill is fine.
         let pauseOnExit = turn.isResume;
@@ -1173,7 +1371,8 @@ export class AiWritebackService extends BaseService {
                       })
                     : null;
 
-            sandbox = await this.acquireSandbox({
+            ({ sandbox, sandboxUuid } = await this.acquireSandbox({
+                organizationUuid: turn.organizationUuid,
                 projectUuid,
                 cloneTarget: turn.provider.getCloneTarget(
                     turn.gitConnection,
@@ -1182,7 +1381,7 @@ export class AiWritebackService extends BaseService {
                 existingRow: turn.existingRow,
                 adoptBranch: adoptedPr?.headRef ?? null,
                 setStage,
-            });
+            }));
 
             setStage('agent');
             const repoContext = await this.gatherRepoContext(
@@ -1260,6 +1459,7 @@ export class AiWritebackService extends BaseService {
                     exitCode: agent.exitCode,
                     hasChanges,
                     prCreated: false,
+                    usage: agent.usage,
                 });
                 const crashPrUrl =
                     turn.existingRow?.pr_url ?? adoptedPr?.prUrl ?? null;
@@ -1277,11 +1477,13 @@ export class AiWritebackService extends BaseService {
                     projectName: turn.projectName,
                     repository,
                     steps: stepLog,
+                    dbtSourceUuid: turn.projectDbtSourceUuid,
                 };
             }
 
             const applied = await this.applyAgentChanges({
                 sandbox,
+                sandboxUuid,
                 installation,
                 hasChanges,
                 adoptedPr,
@@ -1300,6 +1502,7 @@ export class AiWritebackService extends BaseService {
                 exitCode: agent.exitCode,
                 hasChanges,
                 prCreated: applied.prCreated,
+                usage: agent.usage,
             });
 
             this.logger.info('AI writeback run completed', {
@@ -1332,6 +1535,7 @@ export class AiWritebackService extends BaseService {
                 projectName: turn.projectName,
                 repository,
                 steps: stepLog,
+                dbtSourceUuid: turn.projectDbtSourceUuid,
             };
         } catch (error) {
             this.logger.error('AI writeback run failed', {
@@ -1363,28 +1567,39 @@ export class AiWritebackService extends BaseService {
             tracker.failed(failureStage, error);
             throw error;
         } finally {
-            if (sandbox) {
-                await this.releaseSandbox(sandbox, pauseOnExit, projectUuid);
+            if (sandbox && sandboxUuid) {
+                await this.releaseSandbox(
+                    sandboxUuid,
+                    sandbox,
+                    pauseOnExit,
+                    projectUuid,
+                );
             }
         }
     }
 
     /**
      * Pre-flight: enforce source-specific rollout gates, the
-     * `manage:SourceCode` permission, and resolve everything from the request
-     * that doesn't require a sandbox.
+     * `manage:SourceCode` permission, decide which dbt source the run targets,
+     * and resolve everything from the request that doesn't require a sandbox.
+     * Returns `kind: 'select'` instead when the project has several dbt sources
+     * and the prompt doesn't pin one down — the caller asks the user to choose.
      */
     private async prepareTurn({
         user,
         projectUuid,
+        prompt,
         aiThreadUuid,
         source,
+        dbtSourceUuid,
     }: {
         user: SessionUser;
         projectUuid: string;
+        prompt: string;
         aiThreadUuid: string | undefined;
         source: AiWritebackSource;
-    }): Promise<TurnContext> {
+        dbtSourceUuid: string | undefined;
+    }): Promise<PreparedTurn> {
         await this.assertEnabled(user, source);
 
         const project = await this.projectModel.get(projectUuid);
@@ -1407,15 +1622,48 @@ export class AiWritebackService extends BaseService {
             throw new ForbiddenError('User is not part of an organization');
         }
 
-        // Resolve the git host once; the rest of the run stays host-agnostic.
-        const provider = this.getGitProvider(project.dbtConnection.type);
-        const gitConnection = provider.resolveConnection(project.dbtConnection);
-
         // Resume only when both the caller supplied a thread uuid AND we
         // have a stored sandbox for it. Otherwise we start fresh.
-        const existingRow = aiThreadUuid
+        const storedRow = aiThreadUuid
             ? await this.aiWritebackThreadModel.findByAiThreadUuid(aiThreadUuid)
             : null;
+        // A null `sandbox_uuid` means an old pod inserted this row mid-rollout
+        // (it set the legacy `sandbox_id` column the new code no longer reads),
+        // so there's no resumable registry sandbox. Clear the stale row and
+        // start fresh rather than carry an unresumable pointer.
+        if (storedRow && storedRow.sandbox_uuid === null) {
+            await this.aiWritebackThreadModel.deleteByAiThreadUuid(
+                storedRow.ai_thread_uuid,
+            );
+        }
+        const existingRow =
+            storedRow && storedRow.sandbox_uuid !== null
+                ? { ...storedRow, sandbox_uuid: storedRow.sandbox_uuid }
+                : null;
+
+        // Decide which dbt source to target before resolving the git host: a
+        // resumed thread stays bound to its source, otherwise we honour an
+        // explicit choice, infer from the prompt, or ask the caller to pick.
+        const target = await this.resolveDbtTarget({
+            projectUuid,
+            project,
+            prompt,
+            dbtSourceUuid,
+            existingRow,
+        });
+        if (target.kind === 'select') {
+            return {
+                kind: 'select',
+                projectName: project.name,
+                options: target.options,
+            };
+        }
+        const { candidate } = target;
+
+        // Resolve the git host from the chosen source; the rest stays
+        // host-agnostic.
+        const provider = this.getGitProvider(candidate.connection.type);
+        const gitConnection = provider.resolveConnection(candidate.connection);
 
         // A thread is bound to its first PR. If that PR has since been merged or
         // closed (from the chat card or directly on the host), editing it again
@@ -1449,14 +1697,271 @@ export class AiWritebackService extends BaseService {
         const dbtVersion = resolveSandboxDbtVersion(project.dbtVersion);
 
         return {
-            organizationUuid: user.organizationUuid,
-            projectName: project.name,
-            provider,
-            gitConnection,
-            existingRow,
-            isResume: existingRow !== null,
-            warehouseType,
-            dbtVersion,
+            kind: 'run',
+            turn: {
+                organizationUuid: user.organizationUuid,
+                projectName: project.name,
+                provider,
+                gitConnection,
+                projectDbtSourceUuid: candidate.sourceUuid,
+                existingRow,
+                isResume: existingRow !== null,
+                warehouseType,
+                dbtVersion,
+            },
+        };
+    }
+
+    /**
+     * Build the candidate dbt sources a writeback run can target: the project's
+     * primary dbt connection (precedence 0) plus any additional
+     * `project_dbt_sources`, keeping only the git-backed ones — GitHub/GitLab
+     * are the only sources writeback can open a PR against. A non-git primary
+     * (e.g. a local `dbt` or dbt-cloud project) is therefore dropped, but its
+     * git-backed additional sources are still targetable. A project with no
+     * additional sources yields just the primary — the single-source path.
+     */
+    private async listDbtTargetCandidates(
+        projectUuid: string,
+        project: { projectUuid: string; dbtConnection: DbtProjectConfig },
+    ): Promise<DbtTargetCandidate[]> {
+        const primary: DbtTargetCandidate | null =
+            AiWritebackService.isWritebackTargetable(project.dbtConnection.type)
+                ? {
+                      sourceUuid: null,
+                      // The primary's client-facing id is the project uuid — the
+                      // same id the project's dbt-sources list synthesises for it.
+                      optionUuid: project.projectUuid,
+                      name: 'Project dbt connection',
+                      isPrimary: true,
+                      connection: project.dbtConnection,
+                  }
+                : null;
+        const additional =
+            await this.projectDbtSourcesModel.getSources(projectUuid);
+        const extra = additional.flatMap<DbtTargetCandidate>((dbtSource) =>
+            dbtSource.dbtConnection &&
+            AiWritebackService.isWritebackTargetable(
+                dbtSource.dbtConnection.type,
+            )
+                ? [
+                      {
+                          sourceUuid: dbtSource.projectDbtSourceUuid,
+                          optionUuid: dbtSource.projectDbtSourceUuid,
+                          name: dbtSource.name,
+                          isPrimary: false,
+                          connection: dbtSource.dbtConnection,
+                      },
+                  ]
+                : [],
+        );
+        return primary ? [primary, ...extra] : extra;
+    }
+
+    /**
+     * Decide which dbt source a turn targets. Precedence:
+     * 1. a resumed thread stays bound to its original source (never re-infer, or
+     *    a follow-up could retarget the sandbox's already-cloned repo);
+     * 2. an explicit `dbtSourceUuid` (a UI picker, or an agent re-call);
+     * 3. the only source, when the project has one — unchanged behaviour;
+     * 4. the source the prompt names, when exactly one matches;
+     * otherwise return the candidates for the caller to choose from.
+     */
+    private async resolveDbtTarget({
+        projectUuid,
+        project,
+        prompt,
+        dbtSourceUuid,
+        existingRow,
+    }: {
+        projectUuid: string;
+        project: { projectUuid: string; dbtConnection: DbtProjectConfig };
+        prompt: string;
+        dbtSourceUuid: string | undefined;
+        existingRow: ResumableWritebackThread | null;
+    }): Promise<
+        | { kind: 'resolved'; candidate: DbtTargetCandidate }
+        | { kind: 'select'; options: AiWritebackDbtSourceOption[] }
+    > {
+        const candidates = await this.listDbtTargetCandidates(
+            projectUuid,
+            project,
+        );
+
+        // No git-backed source anywhere (non-git primary, no git additional
+        // sources) — there's nothing to open a PR against. Mirror the connection
+        // gate getGitProvider enforced when the primary was the only target.
+        if (candidates.length === 0) {
+            throw new WritebackGitNotConnectedError(
+                null,
+                `AI writeback requires a GitHub or GitLab dbt source, but this project ("${project.dbtConnection.type}") has none`,
+            );
+        }
+
+        if (existingRow) {
+            const bound = candidates.find(
+                (c) => c.sourceUuid === existingRow.project_dbt_source_uuid,
+            );
+            if (bound) {
+                return { kind: 'resolved', candidate: bound };
+            }
+            // The bound source is null (the primary) or was deleted after the
+            // thread started (FK SET NULL). Prefer the primary — but it is only a
+            // candidate when git-backed, so `candidates[0]` is NOT always the
+            // primary. Look it up explicitly, and when the primary is non-git
+            // (absent) fall back to the first git-backed source.
+            const primary = candidates.find((c) => c.isPrimary);
+            return { kind: 'resolved', candidate: primary ?? candidates[0] };
+        }
+
+        if (dbtSourceUuid) {
+            const chosen = candidates.find(
+                (c) => c.optionUuid === dbtSourceUuid,
+            );
+            if (!chosen) {
+                throw new ParameterError(
+                    'The specified dbt source is not a valid writeback target for this project',
+                );
+            }
+            return { kind: 'resolved', candidate: chosen };
+        }
+
+        if (candidates.length === 1) {
+            return { kind: 'resolved', candidate: candidates[0] };
+        }
+
+        // Score each candidate by how specifically the prompt names it (the
+        // length of the longest identifier of it found in the prompt), then take
+        // the single best. Scoring by length — not just "matched at all" — is
+        // what disambiguates prefix-related names: a prompt saying "jaffle-2"
+        // matches both `jaffle` and `jaffle-2` as substrings, but `jaffle-2` is
+        // the more specific (longer) match and wins. A tie for the top score
+        // (e.g. the prompt names two sources) stays ambiguous and asks.
+        const scored = candidates
+            .map((candidate) => ({
+                candidate,
+                score: AiWritebackService.dbtSourceMatchScore(
+                    prompt,
+                    candidate,
+                ),
+            }))
+            .filter((s) => s.score > 0);
+        if (scored.length > 0) {
+            const topScore = Math.max(...scored.map((s) => s.score));
+            const top = scored.filter((s) => s.score === topScore);
+            if (top.length === 1) {
+                return { kind: 'resolved', candidate: top[0].candidate };
+            }
+        }
+
+        return {
+            kind: 'select',
+            options: candidates.map(AiWritebackService.toDbtSourceOption),
+        };
+    }
+
+    private static isWritebackTargetable(type: DbtProjectType): boolean {
+        // Mirrors getGitProvider: only GitHub and GitLab can have a PR opened.
+        return type === DbtProjectType.GITHUB || type === DbtProjectType.GITLAB;
+    }
+
+    /** Git identity safe to surface (repo/branch/subpath); nulls for non-git. */
+    private static dbtSourceGitIdentity(connection: DbtProjectConfig): {
+        repository: string | null;
+        branch: string | null;
+        projectSubPath: string | null;
+    } {
+        if (
+            connection.type === DbtProjectType.GITHUB ||
+            connection.type === DbtProjectType.GITLAB ||
+            connection.type === DbtProjectType.BITBUCKET ||
+            connection.type === DbtProjectType.AZURE_DEVOPS
+        ) {
+            return {
+                repository: connection.repository,
+                branch: connection.branch,
+                projectSubPath: connection.project_sub_path,
+            };
+        }
+        return { repository: null, branch: null, projectSubPath: null };
+    }
+
+    private static toDbtSourceOption(
+        candidate: DbtTargetCandidate,
+    ): AiWritebackDbtSourceOption {
+        return {
+            projectDbtSourceUuid: candidate.optionUuid,
+            name: candidate.name,
+            isPrimary: candidate.isPrimary,
+            ...AiWritebackService.dbtSourceGitIdentity(candidate.connection),
+        };
+    }
+
+    /**
+     * How specifically the prompt names this dbt source: the length of the
+     * longest identifier of it (full `owner/repo`, the repo name, or a
+     * non-generic source name) that appears in the prompt, or 0 if none do.
+     * Returning a length — rather than a boolean — lets the caller prefer the
+     * most specific match, so prefix-related names (`jaffle` vs `jaffle-2`)
+     * disambiguate to the longer one instead of colliding.
+     */
+    private static dbtSourceMatchScore(
+        prompt: string,
+        candidate: DbtTargetCandidate,
+    ): number {
+        const haystack = prompt.toLowerCase();
+        const { repository } = AiWritebackService.dbtSourceGitIdentity(
+            candidate.connection,
+        );
+        const needles: string[] = [];
+        if (repository) {
+            needles.push(repository.toLowerCase());
+            const repoName = repository.split('/').pop();
+            if (repoName) {
+                needles.push(repoName.toLowerCase());
+            }
+        }
+        // Skip the synthesised primary's generic name — it names nothing useful.
+        if (!candidate.isPrimary && candidate.name.trim().length >= 3) {
+            needles.push(candidate.name.toLowerCase());
+        }
+        return needles
+            .filter((needle) => needle.length >= 3 && haystack.includes(needle))
+            .reduce((best, needle) => Math.max(best, needle.length), 0);
+    }
+
+    /**
+     * The "which dbt source?" response: a normal run result that opened no PR,
+     * carrying the options to choose from plus a human-readable `output` so every
+     * surface (API, MCP, Slack, web) can present the choice with no bespoke code.
+     */
+    private static buildDbtSourceSelectionResult(
+        projectName: string,
+        options: AiWritebackDbtSourceOption[],
+    ): AiWritebackRunResult {
+        const lines = options.map((option) => {
+            const repo = option.repository ? ` (${option.repository})` : '';
+            const tag = option.isPrimary ? ' [primary]' : '';
+            return `- ${option.name}${repo}${tag}`;
+        });
+        const output = [
+            "This project has more than one dbt source, so I couldn't tell which one to change. Pick one and run the writeback again with that dbt source selected:",
+            ...lines,
+        ].join('\n');
+        return {
+            output,
+            exitCode: 0,
+            prUrl: null,
+            prAction: null,
+            commitSha: null,
+            additions: null,
+            deletions: null,
+            projectName,
+            repository: '',
+            steps: [],
+            dbtSourceUuid: null,
+            needsDbtSourceSelection: true,
+            dbtSourceOptions: options,
         };
     }
 
@@ -1493,14 +1998,26 @@ export class AiWritebackService extends BaseService {
                 exitCode: number;
                 hasChanges: boolean;
                 prCreated: boolean;
+                usage: AiWritebackUsage | null;
             }) =>
                 this.analytics.track({
                     event: 'ai_writeback.completed',
                     userId: user.userUuid,
                     properties: {
                         ...eventBase,
-                        ...props,
+                        exitCode: props.exitCode,
+                        hasChanges: props.hasChanges,
+                        prCreated: props.prCreated,
                         totalDurationMs: Date.now() - startedAt,
+                        costUsd: props.usage?.costUsd ?? null,
+                        inputTokens: props.usage?.inputTokens ?? null,
+                        outputTokens: props.usage?.outputTokens ?? null,
+                        cacheReadInputTokens:
+                            props.usage?.cacheReadInputTokens ?? null,
+                        cacheCreationInputTokens:
+                            props.usage?.cacheCreationInputTokens ?? null,
+                        numTurns: props.usage?.numTurns ?? null,
+                        durationApiMs: props.usage?.durationApiMs ?? null,
                     },
                 }),
             failed: (stage: AiWritebackFailureStage, error: unknown) =>
@@ -1525,34 +2042,42 @@ export class AiWritebackService extends BaseService {
      * agent edits on top of the existing PR.
      */
     private async acquireSandbox({
+        organizationUuid,
         projectUuid,
         cloneTarget,
         existingRow,
         adoptBranch,
         setStage,
     }: {
+        organizationUuid: string;
         projectUuid: string;
         cloneTarget: CloneTarget;
-        existingRow: AiWritebackThreadWithPrUrl | null;
+        existingRow: ResumableWritebackThread | null;
         adoptBranch: string | null;
         setStage: SetStage;
-    }): Promise<Sandbox> {
+    }): Promise<{ sandbox: SandboxHandle; sandboxUuid: string }> {
         setStage('sandbox');
 
         if (existingRow) {
             try {
                 const { sandbox } = await this.resumeSandbox(
-                    existingRow.sandbox_id,
+                    existingRow.sandbox_uuid,
                     projectUuid,
                 );
-                return sandbox;
+                return { sandbox, sandboxUuid: existingRow.sandbox_uuid };
             } catch (error) {
-                // The persisted sandbox is gone (reaped by E2B, or some other
-                // permanent failure). Clear the row so the next turn starts
-                // fresh instead of looping on the same dead reference.
+                // The persisted sandbox is gone (snapshot GC'd, reaped, or some
+                // other permanent failure). GC the dead registry row and clear
+                // the conversation row so the next turn starts fresh instead of
+                // looping on the same dead reference.
                 this.logger.warn(
-                    `AiWriteback: failed to resume sandbox ${existingRow.sandbox_id} — clearing conversation row (ai_thread_uuid=${existingRow.ai_thread_uuid}): ${getErrorMessage(error)}`,
+                    `AiWriteback: failed to resume sandbox ${existingRow.sandbox_uuid} — clearing conversation row (ai_thread_uuid=${existingRow.ai_thread_uuid}): ${getErrorMessage(error)}`,
                 );
+                if (!(error instanceof SandboxExpiredError)) {
+                    await this.getSandboxManager().destroy({
+                        sandboxUuid: existingRow.sandbox_uuid,
+                    });
+                }
                 await this.aiWritebackThreadModel.deleteByAiThreadUuid(
                     existingRow.ai_thread_uuid,
                 );
@@ -1562,7 +2087,10 @@ export class AiWritebackService extends BaseService {
             }
         }
 
-        const { sandbox } = await this.createSandbox(projectUuid);
+        const { sandbox, sandboxUuid } = await this.createSandbox(
+            organizationUuid,
+            projectUuid,
+        );
 
         setStage('clone');
         // Clone over HTTPS with the access token as the password (provider-
@@ -1583,7 +2111,7 @@ export class AiWritebackService extends BaseService {
                 Date.now() - cloneStartedAt
             }ms)`,
         );
-        return sandbox;
+        return { sandbox, sandboxUuid };
     }
 
     /**
@@ -1596,7 +2124,7 @@ export class AiWritebackService extends BaseService {
      * false (best-effort) leaves the agent's prompt fallback in place.
      */
     private async prepareProfiles(
-        sandbox: Sandbox,
+        sandbox: SandboxHandle,
         projectSubPath: string,
     ): Promise<boolean> {
         const start = performance.now();
@@ -1654,7 +2182,7 @@ export class AiWritebackService extends BaseService {
      * on any failure — the run continues without the context block.
      */
     private async gatherRepoContext(
-        sandbox: Sandbox,
+        sandbox: SandboxHandle,
         projectSubPath: string,
     ): Promise<string | null> {
         const start = performance.now();
@@ -1710,7 +2238,7 @@ export class AiWritebackService extends BaseService {
         warehouseType,
         dbtVersion,
     }: {
-        sandbox: Sandbox;
+        sandbox: SandboxHandle;
         systemPrompt: string;
         prompt: string;
         isResume: boolean;
@@ -1719,7 +2247,11 @@ export class AiWritebackService extends BaseService {
         skillKey: WarehouseSkillKey | null;
         warehouseType: WarehouseTypes | null;
         dbtVersion: SupportedDbtVersions;
-    }): Promise<{ stdout: string; exitCode: number }> {
+    }): Promise<{
+        stdout: string;
+        exitCode: number;
+        usage: AiWritebackUsage | null;
+    }> {
         await sandbox.files.write(SYSTEM_PROMPT_PATH, systemPrompt);
         await sandbox.files.write(PROMPT_PATH, prompt);
 
@@ -1770,6 +2302,9 @@ export class AiWritebackService extends BaseService {
         // user-facing reply and the PR_TITLE/PR_DESCRIPTION blocks.
         let buffer = '';
         let assistantText = '';
+        // Token/turn/cost usage from the run's `result` event, captured so the
+        // caller can attach it to the `ai_writeback.completed` analytics event.
+        let agentUsage: AiWritebackUsage | null = null;
         const toolCounts: Record<string, number> = {};
 
         let stderrTail = '';
@@ -1790,6 +2325,16 @@ export class AiWritebackService extends BaseService {
                     interpreted.durationApiMs !== null
                         ? interpreted.durationMs - interpreted.durationApiMs
                         : null;
+                agentUsage = {
+                    costUsd: interpreted.costUsd,
+                    inputTokens: interpreted.inputTokens,
+                    outputTokens: interpreted.outputTokens,
+                    cacheReadInputTokens: interpreted.cacheReadInputTokens,
+                    cacheCreationInputTokens:
+                        interpreted.cacheCreationInputTokens,
+                    numTurns: interpreted.numTurns,
+                    durationApiMs: interpreted.durationApiMs,
+                };
                 this.logger.info(
                     `AI writeback agent run summary (wall=${
                         interpreted.durationMs ?? '?'
@@ -1797,6 +2342,10 @@ export class AiWritebackService extends BaseService {
                         localToolMs ?? '?'
                     }ms, turns=${interpreted.numTurns ?? '?'}, cost=$${
                         interpreted.costUsd ?? '?'
+                    }, in=${interpreted.inputTokens ?? '?'}, out=${
+                        interpreted.outputTokens ?? '?'
+                    }, cacheRead=${
+                        interpreted.cacheReadInputTokens ?? '?'
                     }, tools=${JSON.stringify(toolCounts)})`,
                     {
                         event: 'ai_writeback.run.summary',
@@ -1807,6 +2356,11 @@ export class AiWritebackService extends BaseService {
                         durationApiMs: interpreted.durationApiMs,
                         localToolMs,
                         numTurns: interpreted.numTurns,
+                        inputTokens: interpreted.inputTokens,
+                        outputTokens: interpreted.outputTokens,
+                        cacheReadInputTokens: interpreted.cacheReadInputTokens,
+                        cacheCreationInputTokens:
+                            interpreted.cacheCreationInputTokens,
                         warehouseType,
                         toolCounts,
                     },
@@ -1889,22 +2443,23 @@ export class AiWritebackService extends BaseService {
                 },
             );
         } catch (error) {
-            // e2b throws TimeoutError when RUN_TIMEOUT_MS fires, and
-            // CommandExitError when the claude subprocess returns a non-zero
-            // exit code. Both reach Sentry as the bare message ("exit status
-            // 1") with no stderr — useless for debugging. Capture here so the
-            // rich context (timeout flag, exit code, stderr tail) is attached
+            // The provider shim throws SandboxTimeoutError when RUN_TIMEOUT_MS
+            // fires, and SandboxCommandError when the claude subprocess returns
+            // a non-zero exit code. Both reach Sentry as the bare message ("exit
+            // status 1") with no stderr — useless for debugging. Capture here so
+            // the rich context (timeout flag, exit code, stderr tail) is attached
             // before the error bubbles up to the outer wrapSentryTransaction
             // catch (Sentry's Dedupe integration collapses the two events).
-            const timedOut = error instanceof TimeoutError;
+            const timedOut = error instanceof SandboxTimeoutError;
             const exitCode =
-                error instanceof CommandExitError ? error.exitCode : null;
-            // Prefer the error's stderr (e2b accumulates it server-side and
-            // attaches it to CommandExitError) and fall back to our streamed
-            // tail; both are clipped to STDERR_TAIL_BYTES so the payload stays
-            // small.
+                error instanceof SandboxCommandError ? error.exitCode : null;
+            // Prefer the error's stderr (the shim attaches the command's stderr
+            // to SandboxCommandError) and fall back to our streamed tail; both
+            // are clipped to STDERR_TAIL_BYTES so the payload stays small.
             const errStderr =
-                error instanceof CommandExitError ? (error.stderr ?? '') : '';
+                error instanceof SandboxCommandError
+                    ? (error.stderr ?? '')
+                    : '';
             const stderrSnippet = (errStderr || stderrTail).slice(
                 -STDERR_TAIL_BYTES,
             );
@@ -2009,7 +2564,11 @@ export class AiWritebackService extends BaseService {
             );
         }
 
-        return { stdout: assistantText, exitCode: result.exitCode };
+        return {
+            stdout: assistantText,
+            exitCode: result.exitCode,
+            usage: agentUsage,
+        };
     }
 
     /**
@@ -2027,6 +2586,7 @@ export class AiWritebackService extends BaseService {
      */
     private async applyAgentChanges({
         sandbox,
+        sandboxUuid,
         installation,
         hasChanges,
         adoptedPr,
@@ -2039,7 +2599,8 @@ export class AiWritebackService extends BaseService {
         prDescription,
         prSummary,
     }: {
-        sandbox: Sandbox;
+        sandbox: SandboxHandle;
+        sandboxUuid: string;
         installation: GitInstallation;
         hasChanges: boolean;
         adoptedPr: AdoptedPullRequest | null;
@@ -2103,7 +2664,7 @@ export class AiWritebackService extends BaseService {
                     projectUuid,
                     user,
                     aiThreadUuid,
-                    sandbox,
+                    sandboxUuid,
                     prUrl: targetPrUrl,
                     summary: prSummary,
                 });
@@ -2144,7 +2705,7 @@ export class AiWritebackService extends BaseService {
             projectUuid,
             user,
             aiThreadUuid,
-            sandbox,
+            sandboxUuid,
             prUrl,
             summary: prSummary,
         });
@@ -2166,7 +2727,7 @@ export class AiWritebackService extends BaseService {
      * Provider-independent, so the provider receives a final string.
      */
     private resolvePrTitle(
-        sandbox: Sandbox,
+        sandbox: SandboxHandle,
         prTitle: string | null,
         isUpdate: boolean,
     ): Promise<string> {
@@ -2179,7 +2740,7 @@ export class AiWritebackService extends BaseService {
     }
 
     private resolvePrDescription(
-        sandbox: Sandbox,
+        sandbox: SandboxHandle,
         prDescription: string | null,
         isUpdate: boolean,
     ): Promise<string> {
@@ -2200,7 +2761,7 @@ export class AiWritebackService extends BaseService {
         projectUuid,
         user,
         aiThreadUuid,
-        sandbox,
+        sandboxUuid,
         prUrl,
         summary,
     }: {
@@ -2208,7 +2769,7 @@ export class AiWritebackService extends BaseService {
         projectUuid: string;
         user: SessionUser;
         aiThreadUuid: string | undefined;
-        sandbox: Sandbox;
+        sandboxUuid: string;
         prUrl: string;
         summary: string | null;
     }): Promise<void> {
@@ -2228,30 +2789,40 @@ export class AiWritebackService extends BaseService {
         if (aiThreadUuid) {
             await this.aiWritebackThreadModel.create({
                 aiThreadUuid,
-                sandboxId: sandbox.sandboxId,
+                sandboxUuid,
                 pullRequestUuid: pullRequest.pullRequestUuid,
+                // Bind the thread to the source it targeted so every resume
+                // re-resolves to the same repo — one thread, one PR.
+                projectDbtSourceUuid: turn.projectDbtSourceUuid,
             });
         }
     }
 
     /**
-     * Final sandbox disposition. Pause to preserve it for the next turn, or
-     * kill (with a soft-fail log) to free resources for non-resumable runs.
+     * Final sandbox disposition. Suspend (snapshot + pause/destroy) to preserve
+     * it for the next turn, or destroy (with a soft-fail log) to free resources
+     * and GC the snapshot for non-resumable runs.
      */
     private async releaseSandbox(
-        sandbox: Sandbox,
+        sandboxUuid: string,
+        sandbox: SandboxHandle,
         shouldPause: boolean,
         projectUuid: string,
     ): Promise<void> {
         if (shouldPause) {
-            await this.pauseSandbox(sandbox, projectUuid);
+            await this.suspendSandbox(sandboxUuid, sandbox, projectUuid);
             return;
         }
+        // destroy() is a no-op if the sandbox is already gone and never throws
+        // for that, but guard the whole call so cleanup can't fail the run.
         try {
-            await sandbox.kill();
+            await this.getSandboxManager().destroy({
+                sandboxUuid,
+                handle: sandbox,
+            });
         } catch (error) {
             this.logger.warn(
-                `AiWriteback: failed to kill sandbox ${sandbox.sandboxId}: ${getErrorMessage(
+                `AiWriteback: failed to destroy sandbox ${sandbox.sandboxId}: ${getErrorMessage(
                     error,
                 )}`,
             );

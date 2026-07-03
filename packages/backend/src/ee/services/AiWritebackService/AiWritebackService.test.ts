@@ -6,6 +6,7 @@ import {
     FeatureFlags,
     ForbiddenError,
     getLatestSupportDbtVersion,
+    ParameterError,
     PullRequestProvider,
     RequestMethod,
     SupportedDbtVersions,
@@ -13,7 +14,6 @@ import {
     type MemberAbility,
     type SessionUser,
 } from '@lightdash/common';
-import { Sandbox } from 'e2b';
 import {
     createPullRequest,
     getAppBotIdentity,
@@ -25,6 +25,7 @@ import {
     listReposAccessibleToInstallation,
     listReposAccessibleToUser,
 } from '../../../clients/github/Github';
+import { createSandboxManager, SandboxManager } from '../SandboxRuntime';
 import {
     AiWritebackService,
     mergeSourceCodeRepoAccess,
@@ -36,31 +37,42 @@ import {
     PR_TITLE_CLOSE,
     PR_TITLE_OPEN,
 } from './constants';
+import { WritebackGitNotConnectedError } from './errors';
 
-// e2b (and the GitHub client → octokit) are ESM-only and break Jest's parser.
-// Stub the modules so the import graph stays CJS; the run() tests drive the
-// fakes, the unit tests below never reach them.
-jest.mock('e2b', () => ({
-    Sandbox: { create: jest.fn(), connect: jest.fn() },
+// Stub e2b and the GitHub/octokit client so the run() tests drive fakes and the
+// unit tests below never reach the real SDKs.
+vi.mock('e2b', () => ({
+    Sandbox: { create: vi.fn(), connect: vi.fn() },
     CommandExitError: class CommandExitError extends Error {},
     TimeoutError: class TimeoutError extends Error {},
+    ALL_TRAFFIC: 'all',
 }));
-jest.mock('../../../clients/github/Github', () => ({
-    createBranch: jest.fn().mockResolvedValue(undefined),
-    createPullRequest: jest.fn(),
-    createSignedCommitOnBranch: jest
+// The service talks to a SandboxManager over a provider, never a concrete SDK.
+// Keep the real SandboxManager + error classes (the service branches on them
+// with instanceof) but stub the manager factory so the run() tests wrap a fake
+// provider in a real manager.
+vi.mock('../SandboxRuntime', async () => ({
+    ...(await vi.importActual<typeof import('../SandboxRuntime')>(
+        '../SandboxRuntime',
+    )),
+    createSandboxManager: vi.fn(),
+}));
+vi.mock('../../../clients/github/Github', () => ({
+    createBranch: vi.fn().mockResolvedValue(undefined),
+    createPullRequest: vi.fn(),
+    createSignedCommitOnBranch: vi
         .fn()
         .mockResolvedValue({ oid: 'sha-7', url: 'https://github.com/c/o' }),
-    getAppBotIdentity: jest.fn(),
-    getAuthenticatedUser: jest.fn(),
-    getBranchHeadSha: jest.fn(),
-    getInstallationToken: jest.fn(),
-    getOrRefreshToken: jest.fn(),
-    getRepoDefaultBranch: jest.fn(),
-    getRepoTree: jest.fn(),
-    listReposAccessibleToInstallation: jest.fn(),
-    listReposAccessibleToUser: jest.fn(),
-    updatePullRequest: jest.fn().mockResolvedValue(undefined),
+    getAppBotIdentity: vi.fn(),
+    getAuthenticatedUser: vi.fn(),
+    getBranchHeadSha: vi.fn(),
+    getInstallationToken: vi.fn(),
+    getOrRefreshToken: vi.fn(),
+    getRepoDefaultBranch: vi.fn(),
+    getRepoTree: vi.fn(),
+    listReposAccessibleToInstallation: vi.fn(),
+    listReposAccessibleToUser: vi.fn(),
+    updatePullRequest: vi.fn().mockResolvedValue(undefined),
 }));
 
 const ORG = 'org-1';
@@ -75,18 +87,30 @@ const LANDED = { commitSha: 'sha-7', additions: 5, deletions: 2 };
 const buildService = (overrides: Record<string, AnyType> = {}) =>
     new AiWritebackService({
         lightdashConfig: { gitlab: {} } as AnyType,
-        analytics: { track: jest.fn() } as AnyType,
-        projectModel: { get: jest.fn() } as AnyType,
-        featureFlagModel: { get: jest.fn() } as AnyType,
+        analytics: { track: vi.fn() } as AnyType,
+        projectModel: { get: vi.fn() } as AnyType,
+        // Default: no additional dbt sources, so the single-source (primary)
+        // path is taken unless a test overrides this.
+        projectDbtSourcesModel: {
+            getSources: vi.fn().mockResolvedValue([]),
+        } as AnyType,
+        featureFlagModel: { get: vi.fn() } as AnyType,
         githubAppInstallationsModel: {} as AnyType,
         githubAppService: {
-            getValidUserToken: jest.fn().mockResolvedValue(undefined),
+            getValidUserToken: vi.fn().mockResolvedValue(undefined),
         } as AnyType,
         gitlabAppInstallationsModel: {} as AnyType,
-        aiWritebackThreadModel: { findByAiThreadUuid: jest.fn() } as AnyType,
+        aiWritebackThreadModel: { findByAiThreadUuid: vi.fn() } as AnyType,
+        sandboxRegistryModel: {
+            create: vi.fn().mockResolvedValue('sbx-uuid'),
+            findBySandboxUuid: vi.fn().mockResolvedValue(null),
+            markRunning: vi.fn().mockResolvedValue(undefined),
+            markSuspended: vi.fn().mockResolvedValue(undefined),
+            deleteBySandboxUuid: vi.fn().mockResolvedValue(undefined),
+        } as AnyType,
         pullRequestsModel: {} as AnyType,
-        ciService: { mergePullRequest: jest.fn() } as AnyType,
-        projectService: { scheduleCompileProject: jest.fn() } as AnyType,
+        ciService: { mergePullRequest: vi.fn() } as AnyType,
+        projectService: { scheduleCompileProject: vi.fn() } as AnyType,
         ...overrides,
     });
 
@@ -95,12 +119,12 @@ const buildService = (overrides: Record<string, AnyType> = {}) =>
 const fakeProvider = (overrides: AnyType = {}): AnyType => ({
     provider: PullRequestProvider.GITHUB,
     supportsPreviewDeploy: true,
-    resolveConnection: jest.fn(),
-    resolveInstallation: jest.fn(),
-    getCloneTarget: jest.fn(),
-    openPullRequest: jest.fn().mockResolvedValue({ prUrl: PR_7, ...LANDED }),
-    updatePullRequest: jest.fn().mockResolvedValue({ ...LANDED }),
-    adoptPullRequest: jest.fn(),
+    resolveConnection: vi.fn(),
+    resolveInstallation: vi.fn(),
+    getCloneTarget: vi.fn(),
+    openPullRequest: vi.fn().mockResolvedValue({ prUrl: PR_7, ...LANDED }),
+    updatePullRequest: vi.fn().mockResolvedValue({ ...LANDED }),
+    adoptPullRequest: vi.fn(),
     ...overrides,
 });
 
@@ -123,7 +147,7 @@ const turnContext = (overrides: AnyType = {}): AnyType => ({
 const threadRow = (prUrl: string): AnyType => ({
     ai_writeback_thread_uuid: 'w-1',
     ai_thread_uuid: 'thread-1',
-    sandbox_id: 'sbx-1',
+    sandbox_uuid: 'sbx-1',
     pull_request_uuid: 'pr-1',
     created_at: new Date(),
     pr_url: prUrl,
@@ -141,7 +165,7 @@ describe('AiWritebackService.applyAgentChanges', () => {
     const setup = () => {
         const service = buildService();
         const provider = fakeProvider();
-        const record = jest
+        const record = vi
             .spyOn(service as AnyType, 'recordWritebackPullRequest')
             .mockResolvedValue(undefined);
         return {
@@ -160,6 +184,7 @@ describe('AiWritebackService.applyAgentChanges', () => {
     ): AnyType =>
         (service as AnyType).applyAgentChanges({
             sandbox: { sandboxId: 'sbx-1' },
+            sandboxUuid: 'sbx-uuid',
             installation: {
                 provider: PullRequestProvider.GITHUB,
                 installationId: 'inst-1',
@@ -169,7 +194,7 @@ describe('AiWritebackService.applyAgentChanges', () => {
             user: { userUuid: 'u1' },
             projectUuid: 'p1',
             aiThreadUuid: undefined,
-            setStage: jest.fn(),
+            setStage: vi.fn(),
             prTitle: 'T',
             prDescription: 'D',
             ...args,
@@ -322,17 +347,27 @@ describe('AiWritebackService.prepareTurn', () => {
         warehouseConnection: { type: WarehouseTypes.POSTGRES },
     });
 
-    const prepareTurn = (service: AiWritebackService, user: SessionUser) =>
-        (service as AnyType).prepareTurn({
+    // prepareTurn now returns a discriminated union ({ kind: 'run', turn } |
+    // { kind: 'select', ... }); unwrap the turn so these single-source tests keep
+    // asserting on the turn context directly. Rejections still propagate.
+    const prepareTurn = async (
+        service: AiWritebackService,
+        user: SessionUser,
+    ) => {
+        const prepared = await (service as AnyType).prepareTurn({
             user,
             projectUuid: 'p1',
+            prompt: 'add a revenue metric',
             aiThreadUuid: undefined,
+            dbtSourceUuid: undefined,
         });
+        return prepared.kind === 'run' ? prepared.turn : prepared;
+    };
 
     it('rejects when the AI writeback feature flag is disabled', async () => {
         const service = buildService({
             featureFlagModel: {
-                get: jest.fn().mockResolvedValue({ enabled: false }),
+                get: vi.fn().mockResolvedValue({ enabled: false }),
             } as AnyType,
         });
         await expect(prepareTurn(service, userWithOrg(true))).rejects.toThrow(
@@ -343,10 +378,10 @@ describe('AiWritebackService.prepareTurn', () => {
     it('rejects when the user cannot manage source code', async () => {
         const service = buildService({
             featureFlagModel: {
-                get: jest.fn().mockResolvedValue({ enabled: true }),
+                get: vi.fn().mockResolvedValue({ enabled: true }),
             } as AnyType,
             projectModel: {
-                get: jest.fn().mockResolvedValue(githubProject()),
+                get: vi.fn().mockResolvedValue(githubProject()),
             } as AnyType,
         });
         await expect(prepareTurn(service, userWithOrg(false))).rejects.toThrow(
@@ -357,13 +392,13 @@ describe('AiWritebackService.prepareTurn', () => {
     it('resolves a fresh turn context for a permitted user', async () => {
         const service = buildService({
             featureFlagModel: {
-                get: jest.fn().mockResolvedValue({ enabled: true }),
+                get: vi.fn().mockResolvedValue({ enabled: true }),
             } as AnyType,
             projectModel: {
-                get: jest.fn().mockResolvedValue(githubProject()),
+                get: vi.fn().mockResolvedValue(githubProject()),
             } as AnyType,
             aiWritebackThreadModel: {
-                findByAiThreadUuid: jest.fn().mockResolvedValue(null),
+                findByAiThreadUuid: vi.fn().mockResolvedValue(null),
             } as AnyType,
         });
         await expect(
@@ -387,17 +422,17 @@ describe('AiWritebackService.prepareTurn', () => {
     it('resolves the project `latest` dbt version to the newest supported version', async () => {
         const service = buildService({
             featureFlagModel: {
-                get: jest.fn().mockResolvedValue({ enabled: true }),
+                get: vi.fn().mockResolvedValue({ enabled: true }),
             } as AnyType,
             projectModel: {
-                get: jest
+                get: vi
                     .fn()
                     .mockResolvedValue(
                         githubProject(DbtVersionOptionLatest.LATEST),
                     ),
             } as AnyType,
             aiWritebackThreadModel: {
-                findByAiThreadUuid: jest.fn().mockResolvedValue(null),
+                findByAiThreadUuid: vi.fn().mockResolvedValue(null),
             } as AnyType,
         });
         await expect(
@@ -410,17 +445,17 @@ describe('AiWritebackService.prepareTurn', () => {
     it('clamps a project pinned below the supported range to the oldest installed version', async () => {
         const service = buildService({
             featureFlagModel: {
-                get: jest.fn().mockResolvedValue({ enabled: true }),
+                get: vi.fn().mockResolvedValue({ enabled: true }),
             } as AnyType,
             projectModel: {
-                get: jest
+                get: vi
                     .fn()
                     .mockResolvedValue(
                         githubProject(SupportedDbtVersions.V1_5),
                     ),
             } as AnyType,
             aiWritebackThreadModel: {
-                findByAiThreadUuid: jest.fn().mockResolvedValue(null),
+                findByAiThreadUuid: vi.fn().mockResolvedValue(null),
             } as AnyType,
         });
         await expect(
@@ -433,13 +468,13 @@ describe('AiWritebackService.prepareTurn', () => {
     it('resolves a GitLab connection with its host for a GitLab project', async () => {
         const service = buildService({
             featureFlagModel: {
-                get: jest.fn().mockResolvedValue({ enabled: true }),
+                get: vi.fn().mockResolvedValue({ enabled: true }),
             } as AnyType,
             projectModel: {
-                get: jest.fn().mockResolvedValue(gitlabProject()),
+                get: vi.fn().mockResolvedValue(gitlabProject()),
             } as AnyType,
             aiWritebackThreadModel: {
-                findByAiThreadUuid: jest.fn().mockResolvedValue(null),
+                findByAiThreadUuid: vi.fn().mockResolvedValue(null),
             } as AnyType,
         });
         await expect(
@@ -453,6 +488,314 @@ describe('AiWritebackService.prepareTurn', () => {
                 hostDomain: 'gitlab.acme.com',
             },
         });
+    });
+});
+
+describe('AiWritebackService dbt source targeting', () => {
+    const PRIMARY_CONNECTION = {
+        type: DbtProjectType.GITHUB,
+        authorization_method: 'installation_id',
+        repository: 'acme/analytics',
+        branch: 'main',
+        project_sub_path: '/',
+    };
+    const project = (): AnyType => ({
+        projectUuid: 'p1',
+        dbtConnection: PRIMARY_CONNECTION,
+    });
+    // An additional (non-primary) GitHub dbt source pointing at a different repo.
+    const marketingSource = (): AnyType => ({
+        projectDbtSourceUuid: 'src-marketing',
+        projectUuid: 'p1',
+        name: 'Marketing dbt',
+        isPrimary: false,
+        precedence: 1,
+        dbtConnection: {
+            type: DbtProjectType.GITHUB,
+            authorization_method: 'installation_id',
+            repository: 'acme/marketing',
+            branch: 'main',
+            project_sub_path: '/',
+        },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+    });
+
+    const serviceWithSources = (sources: AnyType[]) =>
+        buildService({
+            projectDbtSourcesModel: {
+                getSources: vi.fn().mockResolvedValue(sources),
+            } as AnyType,
+        });
+
+    const resolve = (
+        service: AiWritebackService,
+        args: {
+            prompt?: string;
+            dbtSourceUuid?: string;
+            existingRow?: AnyType;
+        },
+    ) =>
+        (service as AnyType).resolveDbtTarget({
+            projectUuid: 'p1',
+            project: project(),
+            prompt: args.prompt ?? '',
+            dbtSourceUuid: args.dbtSourceUuid,
+            existingRow: args.existingRow ?? null,
+        });
+
+    it('targets the primary connection when the project has no additional sources', async () => {
+        const result = await resolve(serviceWithSources([]), {
+            prompt: 'add a revenue metric',
+        });
+        expect(result).toMatchObject({
+            kind: 'resolved',
+            candidate: { sourceUuid: null, isPrimary: true, optionUuid: 'p1' },
+        });
+    });
+
+    it('honours an explicit additional dbtSourceUuid', async () => {
+        const result = await resolve(serviceWithSources([marketingSource()]), {
+            dbtSourceUuid: 'src-marketing',
+        });
+        expect(result).toMatchObject({
+            kind: 'resolved',
+            candidate: {
+                sourceUuid: 'src-marketing',
+                isPrimary: false,
+                connection: { repository: 'acme/marketing' },
+            },
+        });
+    });
+
+    it('treats the project uuid as an explicit choice of the primary source', async () => {
+        const result = await resolve(serviceWithSources([marketingSource()]), {
+            dbtSourceUuid: 'p1',
+        });
+        expect(result).toMatchObject({
+            kind: 'resolved',
+            candidate: { sourceUuid: null, isPrimary: true },
+        });
+    });
+
+    it('rejects an explicit dbtSourceUuid that is not a target', async () => {
+        await expect(
+            resolve(serviceWithSources([marketingSource()]), {
+                dbtSourceUuid: 'does-not-exist',
+            }),
+        ).rejects.toThrow(ParameterError);
+    });
+
+    it('infers the source from the prompt when exactly one matches', async () => {
+        const result = await resolve(serviceWithSources([marketingSource()]), {
+            prompt: 'add a spend metric to the marketing models',
+        });
+        expect(result).toMatchObject({
+            kind: 'resolved',
+            candidate: { sourceUuid: 'src-marketing' },
+        });
+    });
+
+    it('prefers the most specific source when names share a prefix', async () => {
+        // Primary `jaffle` is a substring of the additional `jaffle-2`, so naive
+        // substring matching would flag both and ask. The longest-match rule
+        // resolves "jaffle-2" to jaffle-2 and bare "jaffle" to the primary.
+        const jaffle2 = {
+            projectDbtSourceUuid: 'src-j2',
+            projectUuid: 'p1',
+            name: 'jaffle-2',
+            isPrimary: false,
+            precedence: 1,
+            dbtConnection: {
+                type: DbtProjectType.GITHUB,
+                authorization_method: 'installation_id',
+                repository: 'charliedowler/jaffle-2',
+                branch: 'main',
+                project_sub_path: '/dbt',
+            },
+            createdAt: new Date(),
+            updatedAt: new Date(),
+        };
+        const service = serviceWithSources([jaffle2]);
+        const primaryJaffle = {
+            projectUuid: 'p1',
+            dbtConnection: {
+                type: DbtProjectType.GITHUB,
+                authorization_method: 'installation_id',
+                repository: 'charliedowler/jaffle',
+                branch: 'main',
+                project_sub_path: '/dbt',
+            },
+        };
+        const resolvePrompt = (prompt: string) =>
+            (service as AnyType).resolveDbtTarget({
+                projectUuid: 'p1',
+                project: primaryJaffle,
+                prompt,
+                dbtSourceUuid: undefined,
+                existingRow: null,
+            });
+        await expect(
+            resolvePrompt('In jaffle-2, add a total_revenue metric to orders'),
+        ).resolves.toMatchObject({
+            kind: 'resolved',
+            candidate: { sourceUuid: 'src-j2' },
+        });
+        await expect(
+            resolvePrompt('add a metric in the jaffle repo'),
+        ).resolves.toMatchObject({
+            kind: 'resolved',
+            candidate: { sourceUuid: null, isPrimary: true },
+        });
+    });
+
+    it('asks the caller to choose when the prompt names no source', async () => {
+        const result = await resolve(serviceWithSources([marketingSource()]), {
+            prompt: 'add a new metric',
+        });
+        expect(result.kind).toBe('select');
+        expect(result.options).toHaveLength(2);
+        expect(result.options).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    projectDbtSourceUuid: 'p1',
+                    isPrimary: true,
+                }),
+                expect.objectContaining({
+                    projectDbtSourceUuid: 'src-marketing',
+                    repository: 'acme/marketing',
+                }),
+            ]),
+        );
+    });
+
+    it('keeps a resumed thread bound to its original source, ignoring the prompt', async () => {
+        const result = await resolve(serviceWithSources([marketingSource()]), {
+            // The prompt names the primary repo, but the thread is bound to the
+            // additional source — binding wins so the resumed sandbox stays put.
+            prompt: 'change something in analytics',
+            existingRow: { project_dbt_source_uuid: 'src-marketing' },
+        });
+        expect(result).toMatchObject({
+            kind: 'resolved',
+            candidate: { sourceUuid: 'src-marketing' },
+        });
+    });
+
+    it('falls back to the primary when a resumed thread`s bound source was deleted', async () => {
+        const result = await resolve(serviceWithSources([marketingSource()]), {
+            existingRow: { project_dbt_source_uuid: 'deleted-source' },
+        });
+        expect(result).toMatchObject({
+            kind: 'resolved',
+            candidate: { sourceUuid: null, isPrimary: true },
+        });
+    });
+
+    it('falls back to the first git source (not by stale array order) when the bound source is deleted and the primary is non-git', async () => {
+        // Graphite-flagged scenario: with a non-git primary the primary is not a
+        // candidate, so `candidates[0]` is the first *additional* source, not the
+        // primary. When the bound source has been deleted there is no primary to
+        // return; degrade deterministically to the first git-backed source.
+        const service = serviceWithSources([marketingSource()]);
+        const result = await (service as AnyType).resolveDbtTarget({
+            projectUuid: 'p1',
+            project: {
+                projectUuid: 'p1',
+                dbtConnection: { type: DbtProjectType.DBT },
+            },
+            prompt: 'change something',
+            dbtSourceUuid: undefined,
+            existingRow: { project_dbt_source_uuid: 'deleted-src' },
+        });
+        expect(result).toMatchObject({
+            kind: 'resolved',
+            candidate: { sourceUuid: 'src-marketing', isPrimary: false },
+        });
+    });
+
+    it('drops a non-git primary but still targets git-backed additional sources', async () => {
+        const service = serviceWithSources([marketingSource()]);
+        const result = await (service as AnyType).resolveDbtTarget({
+            projectUuid: 'p1',
+            // Local (non-git) primary — cannot be a writeback target.
+            project: {
+                projectUuid: 'p1',
+                dbtConnection: { type: DbtProjectType.DBT },
+            },
+            prompt: 'add a metric',
+            dbtSourceUuid: undefined,
+            existingRow: null,
+        });
+        // Only the git-backed additional source remains, so it's the sole target.
+        expect(result).toMatchObject({
+            kind: 'resolved',
+            candidate: { sourceUuid: 'src-marketing', isPrimary: false },
+        });
+    });
+
+    it('rejects when no git-backed source exists at all', async () => {
+        const service = serviceWithSources([]);
+        await expect(
+            (service as AnyType).resolveDbtTarget({
+                projectUuid: 'p1',
+                project: {
+                    projectUuid: 'p1',
+                    dbtConnection: { type: DbtProjectType.DBT },
+                },
+                prompt: 'add a metric',
+                dbtSourceUuid: undefined,
+                existingRow: null,
+            }),
+        ).rejects.toThrow(WritebackGitNotConnectedError);
+    });
+
+    it('run() returns a selection request without starting a sandbox', async () => {
+        const service = buildService({
+            featureFlagModel: {
+                get: vi.fn().mockResolvedValue({ enabled: true }),
+            } as AnyType,
+            projectModel: {
+                get: vi.fn().mockResolvedValue({
+                    projectUuid: 'p1',
+                    organizationUuid: ORG,
+                    name: 'Analytics',
+                    dbtConnection: PRIMARY_CONNECTION,
+                    warehouseConnection: null,
+                    dbtVersion: SupportedDbtVersions.V1_9,
+                }),
+            } as AnyType,
+            projectDbtSourcesModel: {
+                getSources: vi.fn().mockResolvedValue([marketingSource()]),
+            } as AnyType,
+            aiWritebackThreadModel: {
+                findByAiThreadUuid: vi.fn().mockResolvedValue(null),
+            } as AnyType,
+        });
+        const { build, can } = new AbilityBuilder<MemberAbility>(Ability);
+        can('manage', 'SourceCode', { organizationUuid: ORG });
+        const user = {
+            userUuid: 'u1',
+            organizationUuid: ORG,
+            organizationName: 'Acme',
+            organizationCreatedAt: new Date(),
+            role: 'admin',
+            ability: build(),
+        } as AnyType;
+
+        const result = await service.run({
+            user,
+            projectUuid: 'p1',
+            prompt: 'add a new metric',
+            source: 'api',
+        });
+
+        expect(result.needsDbtSourceSelection).toBe(true);
+        expect(result.prUrl).toBeNull();
+        expect(result.dbtSourceUuid).toBeNull();
+        expect(result.dbtSourceOptions).toHaveLength(2);
+        // No sandbox manager is ever constructed on the selection path.
+        expect(createSandboxManager).not.toHaveBeenCalled();
     });
 });
 
@@ -481,21 +824,21 @@ describe('AiWritebackService.run (mocked end-to-end)', () => {
     ): AnyType => ({
         sandboxId: 'sbx-1',
         files: {
-            write: jest.fn().mockResolvedValue(undefined),
-            read: jest.fn().mockResolvedValue('model contents'),
-            remove: jest.fn().mockResolvedValue(undefined),
+            write: vi.fn().mockResolvedValue(undefined),
+            read: vi.fn().mockResolvedValue('model contents'),
+            remove: vi.fn().mockResolvedValue(undefined),
         },
         git: {
-            clone: jest.fn().mockResolvedValue(undefined),
-            status: jest
+            clone: vi.fn().mockResolvedValue(undefined),
+            status: vi
                 .fn()
                 .mockResolvedValue({ hasChanges, currentBranch: 'main' }),
-            add: jest.fn().mockResolvedValue(undefined),
-            commit: jest.fn().mockResolvedValue(undefined),
-            createBranch: jest.fn().mockResolvedValue(undefined),
+            add: vi.fn().mockResolvedValue(undefined),
+            commit: vi.fn().mockResolvedValue(undefined),
+            createBranch: vi.fn().mockResolvedValue(undefined),
         },
         commands: {
-            run: jest.fn(async (command: string, opts: AnyType) => {
+            run: vi.fn(async (command: string, opts: AnyType) => {
                 if (command.includes('claude')) {
                     opts?.onStdout?.(
                         `${JSON.stringify({
@@ -513,9 +856,22 @@ describe('AiWritebackService.run (mocked end-to-end)', () => {
                 return { exitCode: 0, stdout: '' };
             }),
         },
-        pause: jest.fn().mockResolvedValue(undefined),
-        kill: jest.fn().mockResolvedValue(undefined),
     });
+
+    // A fake SandboxProvider over the fake sandbox. create/connect hand back the
+    // sandbox; destroy/persist are the control-plane calls the service makes to
+    // tear the sandbox down or suspend it.
+    const fakeSandboxProvider = {
+        capabilities: { pauseResume: true },
+        create: vi.fn(),
+        connect: vi.fn(),
+        destroy: vi.fn().mockResolvedValue(undefined),
+        persist: vi
+            .fn()
+            .mockResolvedValue({ kind: 'e2b-paused', sandboxId: 'sb-test' }),
+        resume: vi.fn(),
+        deleteSnapshot: vi.fn().mockResolvedValue(undefined),
+    };
 
     const runService = (sandbox: AnyType) => {
         const service = buildService({
@@ -526,18 +882,21 @@ describe('AiWritebackService.run (mocked end-to-end)', () => {
                     e2bApiKey: 'e2b-key',
                     e2bAiWritebackTemplateName: 'tpl',
                     e2bAiWritebackTemplateTag: '',
+                    sandboxProvider: 'e2b',
+                    sandboxAiWritebackDockerImage:
+                        'lightdash-ai-writeback:local',
                 },
                 aiWriteback: { anthropicApiKey: 'anthropic-key' },
             } as AnyType,
             featureFlagModel: {
-                get: jest.fn(({ featureFlagId }: AnyType) =>
+                get: vi.fn(({ featureFlagId }: AnyType) =>
                     Promise.resolve({
                         enabled: featureFlagId === FeatureFlags.AiWriteback,
                     }),
                 ),
             } as AnyType,
             projectModel: {
-                get: jest.fn().mockResolvedValue({
+                get: vi.fn().mockResolvedValue({
                     organizationUuid: ORG,
                     name: 'Analytics',
                     dbtConnection: {
@@ -552,19 +911,19 @@ describe('AiWritebackService.run (mocked end-to-end)', () => {
                 }),
             } as AnyType,
             githubAppInstallationsModel: {
-                getInstallationId: jest.fn().mockResolvedValue('inst-1'),
-                findInstallationId: jest.fn().mockResolvedValue('inst-1'),
-                getAuth: jest
+                getInstallationId: vi.fn().mockResolvedValue('inst-1'),
+                findInstallationId: vi.fn().mockResolvedValue('inst-1'),
+                getAuth: vi
                     .fn()
                     .mockResolvedValue({ token: 'oauth', refreshToken: 'r' }),
-                updateAuth: jest.fn().mockResolvedValue(undefined),
+                updateAuth: vi.fn().mockResolvedValue(undefined),
             } as AnyType,
             aiWritebackThreadModel: {
-                findByAiThreadUuid: jest.fn().mockResolvedValue(null),
-                create: jest.fn().mockResolvedValue(undefined),
+                findByAiThreadUuid: vi.fn().mockResolvedValue(null),
+                create: vi.fn().mockResolvedValue(undefined),
             } as AnyType,
             pullRequestsModel: {
-                findOrCreate: jest
+                findOrCreate: vi
                     .fn()
                     .mockResolvedValue({ pullRequestUuid: 'pr-uuid' }),
             } as AnyType,
@@ -578,29 +937,45 @@ describe('AiWritebackService.run (mocked end-to-end)', () => {
     };
 
     beforeEach(() => {
-        jest.clearAllMocks();
-        (getInstallationToken as jest.Mock).mockResolvedValue('install-token');
-        (getOrRefreshToken as jest.Mock).mockResolvedValue({
+        vi.clearAllMocks();
+        fakeSandboxProvider.destroy.mockResolvedValue(undefined);
+        // Wrap the fake provider in a real SandboxManager, threading the
+        // service's own fake registry model through.
+        (createSandboxManager as import('vitest').Mock).mockImplementation(
+            (opts: AnyType) =>
+                new SandboxManager({
+                    provider: fakeSandboxProvider as AnyType,
+                    providerKind: 'e2b',
+                    registryModel: opts.registryModel,
+                    logger: opts.logger,
+                }),
+        );
+        (getInstallationToken as import('vitest').Mock).mockResolvedValue(
+            'install-token',
+        );
+        (getOrRefreshToken as import('vitest').Mock).mockResolvedValue({
             token: 'oauth',
             refreshToken: 'r',
         });
-        (getAuthenticatedUser as jest.Mock).mockResolvedValue({
+        (getAuthenticatedUser as import('vitest').Mock).mockResolvedValue({
             login: 'octocat',
             id: 1,
         });
-        (getAppBotIdentity as jest.Mock).mockResolvedValue({
+        (getAppBotIdentity as import('vitest').Mock).mockResolvedValue({
             login: 'lightdash-bot',
             id: 2,
         });
-        (getBranchHeadSha as jest.Mock).mockResolvedValue('base-oid');
-        (createPullRequest as jest.Mock).mockResolvedValue({
+        (getBranchHeadSha as import('vitest').Mock).mockResolvedValue(
+            'base-oid',
+        );
+        (createPullRequest as import('vitest').Mock).mockResolvedValue({
             html_url: PR_7,
         });
     });
 
     it('opens a PR and kills the sandbox for a one-shot run with changes', async () => {
         const sandbox = fakeSandbox(0, true);
-        (Sandbox.create as jest.Mock).mockResolvedValue(sandbox);
+        fakeSandboxProvider.create.mockResolvedValue(sandbox);
 
         const result = await runService(sandbox);
 
@@ -612,22 +987,22 @@ describe('AiWritebackService.run (mocked end-to-end)', () => {
             repository: 'acme/analytics',
         });
         expect(createPullRequest).toHaveBeenCalledTimes(1);
-        expect(sandbox.kill).toHaveBeenCalledTimes(1);
-        expect(sandbox.pause).not.toHaveBeenCalled();
+        expect(fakeSandboxProvider.destroy).toHaveBeenCalledTimes(1);
 
         // The compile wrapper pins `dbt` to the project's version venv (V1_9)
         // and still strips secrets from the compile child's environment.
-        const wrapperWrite = (sandbox.files.write as jest.Mock).mock.calls.find(
-            ([path]) => path === COMPILE_WRAPPER_PATH,
-        );
+        const wrapperWrite = (
+            sandbox.files.write as import('vitest').Mock
+        ).mock.calls.find(([path]) => path === COMPILE_WRAPPER_PATH);
         expect(wrapperWrite).toBeDefined();
+        if (!wrapperWrite) throw new Error('Expected compile wrapper write');
         expect(wrapperWrite[1]).toContain('PATH="/usr/local/dbt1.9/bin:$PATH"');
         expect(wrapperWrite[1]).toContain('-u ANTHROPIC_API_KEY');
     });
 
     it('skips the PR when the agent exits non-zero', async () => {
         const sandbox = fakeSandbox(1, true);
-        (Sandbox.create as jest.Mock).mockResolvedValue(sandbox);
+        fakeSandboxProvider.create.mockResolvedValue(sandbox);
 
         const result = await runService(sandbox);
 
@@ -637,12 +1012,12 @@ describe('AiWritebackService.run (mocked end-to-end)', () => {
             prAction: null,
         });
         expect(createPullRequest).not.toHaveBeenCalled();
-        expect(sandbox.kill).toHaveBeenCalledTimes(1);
+        expect(fakeSandboxProvider.destroy).toHaveBeenCalledTimes(1);
     });
 
     it('opens no PR when the agent produced no changes', async () => {
         const sandbox = fakeSandbox(0, false);
-        (Sandbox.create as jest.Mock).mockResolvedValue(sandbox);
+        fakeSandboxProvider.create.mockResolvedValue(sandbox);
 
         const result = await runService(sandbox);
 
@@ -652,7 +1027,7 @@ describe('AiWritebackService.run (mocked end-to-end)', () => {
             prAction: null,
         });
         expect(createPullRequest).not.toHaveBeenCalled();
-        expect(sandbox.kill).toHaveBeenCalledTimes(1);
+        expect(fakeSandboxProvider.destroy).toHaveBeenCalledTimes(1);
     });
 });
 
@@ -702,15 +1077,15 @@ describe('AiWritebackService repo read access', () => {
 
     const buildWithInstallation = (project: AnyType = githubProject()) => {
         const githubAppService = {
-            getValidUserToken: jest.fn().mockResolvedValue(undefined),
+            getValidUserToken: vi.fn().mockResolvedValue(undefined),
         } as AnyType;
         const service = buildService({
             projectModel: {
-                get: jest.fn().mockResolvedValue(project),
+                get: vi.fn().mockResolvedValue(project),
             } as AnyType,
             githubAppService,
         });
-        const resolveInstallation = jest.spyOn(
+        const resolveInstallation = vi.spyOn(
             (service as AnyType).githubProvider,
             'resolveInstallation',
         );
@@ -726,7 +1101,7 @@ describe('AiWritebackService repo read access', () => {
     };
 
     beforeEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
     });
 
     describe('getRepoReadAccess (dbt project repo, provider-tagged)', () => {
@@ -751,7 +1126,7 @@ describe('AiWritebackService repo read access', () => {
 
         it('returns gitlab-tagged access (with hostDomain) for a GitLab dbt connection', async () => {
             const { service } = buildWithInstallation(gitlabProject());
-            jest.spyOn(
+            vi.spyOn(
                 (service as AnyType).gitlabProvider,
                 'resolveInstallation',
             ).mockResolvedValue({
@@ -800,7 +1175,9 @@ describe('AiWritebackService repo read access', () => {
 
         it('listRepos lists repos for the resolved installation and maps the shape', async () => {
             const { service } = buildWithInstallation();
-            (listReposAccessibleToInstallation as jest.Mock).mockResolvedValue([
+            (
+                listReposAccessibleToInstallation as import('vitest').Mock
+            ).mockResolvedValue([
                 {
                     owner: 'lightdash',
                     repo: 'lightdash',
@@ -833,10 +1210,12 @@ describe('AiWritebackService repo read access', () => {
 
         it('unions the linked user repos with the org repos (org wins on collision)', async () => {
             const { service, githubAppService } = buildWithInstallation();
-            (githubAppService.getValidUserToken as jest.Mock).mockResolvedValue(
-                'user-token',
-            );
-            (listReposAccessibleToUser as jest.Mock).mockResolvedValue([
+            (
+                githubAppService.getValidUserToken as import('vitest').Mock
+            ).mockResolvedValue('user-token');
+            (
+                listReposAccessibleToUser as import('vitest').Mock
+            ).mockResolvedValue([
                 {
                     owner: 'me',
                     repo: 'personal',
@@ -850,7 +1229,9 @@ describe('AiWritebackService repo read access', () => {
                     private: true,
                 },
             ]);
-            (listReposAccessibleToInstallation as jest.Mock).mockResolvedValue([
+            (
+                listReposAccessibleToInstallation as import('vitest').Mock
+            ).mockResolvedValue([
                 {
                     owner: 'acme',
                     repo: 'shared',
@@ -891,10 +1272,12 @@ describe('AiWritebackService repo read access', () => {
 
         it('resolveRepoAccess falls back to the installation token for a repo outside the union', async () => {
             const { service } = buildWithInstallation();
-            (listReposAccessibleToInstallation as jest.Mock).mockResolvedValue(
-                [],
+            (
+                listReposAccessibleToInstallation as import('vitest').Mock
+            ).mockResolvedValue([]);
+            (getRepoDefaultBranch as import('vitest').Mock).mockResolvedValue(
+                'develop',
             );
-            (getRepoDefaultBranch as jest.Mock).mockResolvedValue('develop');
 
             const access = await service.getInstallationRepoReadAccess({
                 user: userWithOrg(true),
@@ -947,13 +1330,13 @@ describe('AiWritebackService.mergePullRequest', () => {
     };
 
     const setup = (overrides: Record<string, AnyType> = {}) => {
-        const mergePullRequest = jest
+        const mergePullRequest = vi
             .fn()
             .mockResolvedValue({ merged: true, sha: 'sha-7' });
-        const scheduleCompileProject = jest
+        const scheduleCompileProject = vi
             .fn()
             .mockResolvedValue({ jobUuid: 'job-1' });
-        const get = jest.fn().mockResolvedValue(gitProject());
+        const get = vi.fn().mockResolvedValue(gitProject());
         const service = buildService({
             projectModel: { get } as AnyType,
             ciService: { mergePullRequest } as AnyType,
@@ -979,7 +1362,7 @@ describe('AiWritebackService.mergePullRequest', () => {
     it('does not schedule a recompile when the PR was not merged', async () => {
         const { service, scheduleCompileProject, get } = setup({
             ciService: {
-                mergePullRequest: jest
+                mergePullRequest: vi
                     .fn()
                     .mockResolvedValue({ merged: false, sha: null }),
             } as AnyType,
@@ -993,7 +1376,7 @@ describe('AiWritebackService.mergePullRequest', () => {
     it('skips the recompile for a non-git project', async () => {
         const { service, scheduleCompileProject } = setup({
             projectModel: {
-                get: jest.fn().mockResolvedValue(nonGitProject()),
+                get: vi.fn().mockResolvedValue(nonGitProject()),
             } as AnyType,
         });
         const result = await service.mergePullRequest(mergeArgs);
@@ -1004,7 +1387,7 @@ describe('AiWritebackService.mergePullRequest', () => {
     it('still returns the merge result when scheduling the recompile fails', async () => {
         const { service } = setup({
             projectService: {
-                scheduleCompileProject: jest
+                scheduleCompileProject: vi
                     .fn()
                     .mockRejectedValue(new Error('scheduler down')),
             } as AnyType,
@@ -1018,7 +1401,7 @@ describe('AiWritebackService.mergePullRequest', () => {
     const userWithOrg = { userUuid: 'u1', organizationUuid: ORG } as AnyType;
 
     it('tracks ai_writeback.merged with the parsed PR context on a successful git merge', async () => {
-        const track = jest.fn();
+        const track = vi.fn();
         const { service } = setup({ analytics: { track } as AnyType });
         await service.mergePullRequest({ ...mergeArgs, user: userWithOrg });
         expect(track).toHaveBeenCalledTimes(1);
@@ -1039,11 +1422,11 @@ describe('AiWritebackService.mergePullRequest', () => {
     });
 
     it('tracks the merge with compileScheduled=false for a non-git project', async () => {
-        const track = jest.fn();
+        const track = vi.fn();
         const { service } = setup({
             analytics: { track } as AnyType,
             projectModel: {
-                get: jest.fn().mockResolvedValue(nonGitProject()),
+                get: vi.fn().mockResolvedValue(nonGitProject()),
             } as AnyType,
         });
         await service.mergePullRequest({ ...mergeArgs, user: userWithOrg });
@@ -1058,11 +1441,11 @@ describe('AiWritebackService.mergePullRequest', () => {
     });
 
     it('does not track ai_writeback.merged when the PR was not merged', async () => {
-        const track = jest.fn();
+        const track = vi.fn();
         const { service } = setup({
             analytics: { track } as AnyType,
             ciService: {
-                mergePullRequest: jest
+                mergePullRequest: vi
                     .fn()
                     .mockResolvedValue({ merged: false, sha: null }),
             } as AnyType,
@@ -1072,7 +1455,7 @@ describe('AiWritebackService.mergePullRequest', () => {
     });
 
     it('leaves owner/repo/pullNumber null when the PR URL is not a github.com link', async () => {
-        const track = jest.fn();
+        const track = vi.fn();
         const { service } = setup({ analytics: { track } as AnyType });
         await service.mergePullRequest({
             ...mergeArgs,

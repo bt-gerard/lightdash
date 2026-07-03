@@ -1,4 +1,3 @@
-import { FeatureFlags } from '@lightdash/common';
 import { Box, Button, Flex, Text } from '@mantine/core';
 import { noop } from '@mantine/utils';
 import { IconAlertCircle, IconRefresh, IconTable } from '@tabler/icons-react';
@@ -7,7 +6,6 @@ import {
     isChunkLoadError,
     triggerChunkErrorReload,
 } from '../../features/chunkErrorHandler';
-import { useServerFeatureFlag } from '../../hooks/useServerOrClientFeatureFlag';
 import { computeLimitedRowCount, sliceRows } from '../../utils/sliceRows';
 import LoadingChart from '../common/LoadingChart';
 import PivotTable from '../common/PivotTable';
@@ -55,12 +53,8 @@ const SimpleTable: FC<SimpleTableProps> = ({
         isLoading,
         isEditMode,
         parameters,
+        hasExplorerStore,
     } = useVisualizationContext();
-
-    const { data: pivotColumnSortFlag } = useServerFeatureFlag(
-        FeatureFlags.PivotColumnSort,
-    );
-    const isPivotColumnSortEnabled = pivotColumnSortFlag?.enabled ?? false;
 
     const hasSignaledScreenshotReady = useRef(false);
 
@@ -310,12 +304,8 @@ const SimpleTable: FC<SimpleTableProps> = ({
             >
                 {pivotTableData.data && resultsData?.hasFetchedAllRows ? (
                     <>
-                        {/* Dashboard mode has no explorer store — use plain
-                         * table. Gated behind PivotColumnSort flag so we can
-                         * validate the new sort UX with design partners before
-                         * GA. */}
-                        {isDashboard || !isPivotColumnSortEnabled ? (
-                            <PivotTable
+                        {hasExplorerStore && !isDashboard ? (
+                            <ExplorerPivotTable
                                 className={className}
                                 data={pivotTableData.data}
                                 isMinimal={minimal}
@@ -337,7 +327,7 @@ const SimpleTable: FC<SimpleTableProps> = ({
                                 {...rest}
                             />
                         ) : (
-                            <ExplorerPivotTable
+                            <PivotTable
                                 className={className}
                                 data={pivotTableData.data}
                                 isMinimal={minimal}

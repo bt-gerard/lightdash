@@ -1,6 +1,8 @@
+import { type AiReviewNotificationEvent } from '../ee/types/aiReviewNotification';
 import assertUnreachable from '../utils/assertUnreachable';
 import { type AnyType } from './any';
 import { type ApiSuccess } from './api/success';
+import { type ConditionalFormattingConfig } from './conditionalFormatting';
 import type { DownloadFileType } from './downloadFile';
 import { type Explore, type ExploreError } from './explore';
 import {
@@ -203,6 +205,26 @@ export type SchedulerAndTargets = Scheduler & {
     latestRun?: SchedulerRun | null;
 };
 
+export type SchedulerAiAugmentationType = 'agent' | 'fast_model';
+
+/**
+ * Enterprise-only AI augmentation attached to a scheduled delivery. On each
+ * fire the agent (or ambient fast model) writes the delivery message from the
+ * delivery's content and the prompt. Persisted in the EE `scheduler_ai_augmentation`
+ * satellite table, not on the scheduler itself, so OSS carries none of it.
+ */
+export type SchedulerAiAugmentation =
+    | {
+          type: 'agent';
+          prompt: string;
+          agentUuid: string;
+          sourceThreadUuid: string | null;
+      }
+    | {
+          type: 'fast_model';
+          prompt: string;
+      };
+
 export type SchedulerSlackTarget = {
     schedulerSlackTargetUuid: string;
     createdAt: Date;
@@ -292,6 +314,10 @@ export type CreateSchedulerAndTargets = Omit<
     | 'savedSqlName'
 > & {
     targets: CreateSchedulerTarget[];
+    // Transient: carries the AI augmentation for an unsaved "send now" so the
+    // worker can run it without a persisted row. Never written to the scheduler
+    // table (persisted separately via the ai-augmentation sub-resource).
+    aiAugmentation?: SchedulerAiAugmentation | null;
 };
 
 export type CreateSchedulerAndTargetsWithoutIds = Omit<
@@ -485,6 +511,11 @@ export type ApiSchedulerAndTargetsResponse = {
     results: SchedulerAndTargets;
 };
 
+export type ApiSchedulerAiAugmentationResponse = {
+    status: 'ok';
+    results: SchedulerAiAugmentation | null;
+};
+
 export type ApiAppSchedulersResponse = {
     status: 'ok';
     results: SchedulerAndTargets[];
@@ -558,6 +589,8 @@ export type ManagedAgentHeartbeatPayload = TraceTaskBase & {
 export type QueueTraceProperties = {
     traceHeader?: string;
     baggageHeader?: string;
+    otelTraceparent?: string;
+    otelBaggage?: string;
     sentryMessageId?: string;
 };
 
@@ -807,6 +840,7 @@ export type DownloadAsyncQueryResultsPayload = TraceTaskBase & {
     pivotConfig?: PivotConfig;
     exportPivotedData?: boolean;
     attachmentDownloadName?: string;
+    conditionalFormattings?: ConditionalFormattingConfig[];
     encodedJwt?: string;
 };
 
@@ -816,4 +850,15 @@ export type SyncSlackChannelsPayload = Pick<
 > & {
     projectUuid: undefined;
     userUuid: undefined;
+};
+
+export type SendReviewNotificationPayload = {
+    organizationUuid: string;
+    event: AiReviewNotificationEvent;
+    fingerprints: string[];
+    projectUuid: string;
+    assigneeUserUuid: string | null;
+    reviewRunUuid: string | null;
+    schedulerUuid?: string;
+    userUuid?: string;
 };

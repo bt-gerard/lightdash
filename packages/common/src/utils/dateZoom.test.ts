@@ -1,12 +1,27 @@
+import type { DateZoomConfig, DateZoomControl } from '../types/dashboard';
 import type { Explore } from '../types/explore';
 import { ExploreType } from '../types/explore';
 import { DimensionType, FieldType } from '../types/field';
 import type { CompiledDimension } from '../types/field';
 import type { MetricQuery } from '../types/metricQuery';
+import { ChartType, type ChartConfig } from '../types/savedCharts';
+import { DateGranularity } from '../types/timeFrames';
 import {
+    copyDateZoomTileTargets,
+    EMPTY_DATE_ZOOM_CONFIG,
+    getChartZoomableFields,
+    getControlActiveGranularity,
     getDateZoomCapabilities,
+    getDateZoomXAxisFieldId,
+    getTileControl,
     getTimeDimensionsMap,
+    isEmptyDateZoomConfig,
+    normalizeDateZoomConfig,
+    normalizeGranularityParam,
+    pruneDateZoomConfig,
+    removeDateZoomTileTargets,
     resolveBaseDimension,
+    resolveTileDateZoom,
 } from './dateZoom';
 
 const makeDimension = (
@@ -258,6 +273,393 @@ describe('resolveBaseDimension', () => {
         );
 
         expect(result).toBe(dim);
+    });
+});
+
+const controlConfig = (
+    overrides?: Partial<DateZoomControl>,
+): DateZoomConfig => ({
+    controls: [
+        {
+            uuid: 'ctrl-1',
+            name: 'Revenue zoom',
+            granularity: DateGranularity.MONTH,
+            ...overrides,
+        },
+    ],
+    tileTargets: {
+        tileA: {
+            controlUuid: 'ctrl-1',
+            fieldId: 'orders_fiscal_date',
+            tableName: 'orders',
+        },
+    },
+});
+
+describe('normalizeDateZoomConfig', () => {
+    it('returns the empty config when dashboard config is undefined', () => {
+        expect(normalizeDateZoomConfig(undefined)).toEqual(
+            EMPTY_DATE_ZOOM_CONFIG,
+        );
+    });
+
+    it('returns the empty config when dateZoomConfig is absent', () => {
+        expect(normalizeDateZoomConfig({ isDateZoomDisabled: false })).toEqual(
+            EMPTY_DATE_ZOOM_CONFIG,
+        );
+    });
+
+    it('passes through an existing dateZoomConfig', () => {
+        const cfg = controlConfig();
+        expect(
+            normalizeDateZoomConfig({
+                isDateZoomDisabled: false,
+                dateZoomConfig: cfg,
+            }),
+        ).toBe(cfg);
+    });
+});
+
+describe('isEmptyDateZoomConfig', () => {
+    it('is true when there are no controls', () => {
+        expect(isEmptyDateZoomConfig(EMPTY_DATE_ZOOM_CONFIG)).toBe(true);
+    });
+
+    it('is false when a control exists', () => {
+        expect(isEmptyDateZoomConfig(controlConfig())).toBe(false);
+    });
+});
+
+describe('getTileControl', () => {
+    it('finds the control a tile is attached to', () => {
+        expect(getTileControl(controlConfig(), 'tileA')?.uuid).toBe('ctrl-1');
+    });
+
+    it('returns undefined for an unassigned tile', () => {
+        expect(getTileControl(controlConfig(), 'tileZ')).toBeUndefined();
+    });
+
+    it('returns undefined for a dangling controlUuid', () => {
+        const cfg: DateZoomConfig = {
+            controls: [],
+            tileTargets: {
+                tileA: {
+                    controlUuid: 'ctrl-gone',
+                    fieldId: 'f',
+                    tableName: 't',
+                },
+            },
+        };
+        expect(getTileControl(cfg, 'tileA')).toBeUndefined();
+    });
+});
+
+describe('getControlActiveGranularity', () => {
+    const control = controlConfig().controls[0];
+
+    it('uses the persisted granularity when no runtime override exists', () => {
+        expect(getControlActiveGranularity(control, {})).toBe(
+            DateGranularity.MONTH,
+        );
+    });
+
+    it('prefers a runtime override', () => {
+        expect(
+            getControlActiveGranularity(control, {
+                'ctrl-1': DateGranularity.WEEK,
+            }),
+        ).toBe(DateGranularity.WEEK);
+    });
+});
+
+describe('resolveTileDateZoom', () => {
+    const base = {
+        config: controlConfig(),
+        runtimeGranularities: {},
+        globalGranularity: DateGranularity.YEAR as
+            | DateGranularity
+            | string
+            | undefined,
+        defaultXAxisFieldId: 'orders_order_date_year' as string | undefined,
+    };
+
+    it('zooms an attached tile on its field at the control grain', () => {
+        expect(resolveTileDateZoom({ ...base, tileUuid: 'tileA' })).toEqual({
+            granularity: DateGranularity.MONTH,
+            xAxisFieldId: 'orders_fiscal_date',
+        });
+    });
+
+    it('applies a runtime control-grain override', () => {
+        expect(
+            resolveTileDateZoom({
+                ...base,
+                tileUuid: 'tileA',
+                runtimeGranularities: { 'ctrl-1': DateGranularity.WEEK },
+            }),
+        ).toEqual({
+            granularity: DateGranularity.WEEK,
+            xAxisFieldId: 'orders_fiscal_date',
+        });
+    });
+
+    it('zooms a param-only attached tile at the control grain with no x-axis field', () => {
+        const cfg: DateZoomConfig = {
+            controls: [
+                {
+                    uuid: 'ctrl-1',
+                    name: 'Revenue zoom',
+                    granularity: DateGranularity.MONTH,
+                },
+            ],
+            tileTargets: {
+                tileParamOnly: {
+                    controlUuid: 'ctrl-1',
+                    fieldId: null,
+                    tableName: null,
+                },
+            },
+        };
+        expect(
+            resolveTileDateZoom({
+                ...base,
+                config: cfg,
+                tileUuid: 'tileParamOnly',
+            }),
+        ).toEqual({ granularity: DateGranularity.MONTH });
+    });
+
+    it('applies a runtime grain override to a param-only attached tile', () => {
+        const cfg: DateZoomConfig = {
+            controls: [
+                {
+                    uuid: 'ctrl-1',
+                    name: 'Revenue zoom',
+                    granularity: DateGranularity.MONTH,
+                },
+            ],
+            tileTargets: {
+                tileParamOnly: {
+                    controlUuid: 'ctrl-1',
+                    fieldId: null,
+                    tableName: null,
+                },
+            },
+        };
+        expect(
+            resolveTileDateZoom({
+                ...base,
+                config: cfg,
+                tileUuid: 'tileParamOnly',
+                runtimeGranularities: { 'ctrl-1': DateGranularity.WEEK },
+            }),
+        ).toEqual({ granularity: DateGranularity.WEEK });
+    });
+
+    it('falls through to the Default for an unassigned tile (preserves x-axis baseline)', () => {
+        expect(resolveTileDateZoom({ ...base, tileUuid: 'tileZ' })).toEqual({
+            granularity: DateGranularity.YEAR,
+            xAxisFieldId: 'orders_order_date_year',
+        });
+    });
+
+    it('falls through to the Default for a dangling target', () => {
+        const cfg: DateZoomConfig = {
+            controls: [],
+            tileTargets: {
+                tileA: {
+                    controlUuid: 'ctrl-gone',
+                    fieldId: 'f',
+                    tableName: 't',
+                },
+            },
+        };
+        expect(
+            resolveTileDateZoom({ ...base, config: cfg, tileUuid: 'tileA' }),
+        ).toEqual({
+            granularity: DateGranularity.YEAR,
+            xAxisFieldId: 'orders_order_date_year',
+        });
+    });
+
+    it('returns undefined for an unassigned tile when the Default grain is unset', () => {
+        expect(
+            resolveTileDateZoom({
+                ...base,
+                tileUuid: 'tileZ',
+                globalGranularity: undefined,
+            }),
+        ).toBeUndefined();
+    });
+
+    it('returns grain-only for an unassigned tile with no x-axis target', () => {
+        expect(
+            resolveTileDateZoom({
+                ...base,
+                tileUuid: 'tileZ',
+                defaultXAxisFieldId: undefined,
+            }),
+        ).toEqual({ granularity: DateGranularity.YEAR });
+    });
+});
+
+// Locks the backwards-compatibility contract the config read path relies on:
+// with no config (existing dashboards), every tile resolves to the single
+// global date-zoom setting exactly as it did before configs existed.
+describe('resolveTileDateZoom — legacy single-setting backwards compatibility', () => {
+    const legacyBase = {
+        config: EMPTY_DATE_ZOOM_CONFIG,
+        runtimeGranularities: {},
+        defaultXAxisFieldId: 'orders_order_date_year' as string | undefined,
+    };
+
+    it('applies the global granularity to every tile on its x-axis baseline', () => {
+        const expected = {
+            granularity: DateGranularity.YEAR,
+            xAxisFieldId: 'orders_order_date_year',
+        };
+        // No per-tile config exists, so the result is identical across tiles.
+        expect(
+            resolveTileDateZoom({
+                ...legacyBase,
+                tileUuid: 'tile-1',
+                globalGranularity: DateGranularity.YEAR,
+            }),
+        ).toEqual(expected);
+        expect(
+            resolveTileDateZoom({
+                ...legacyBase,
+                tileUuid: 'tile-2',
+                globalGranularity: DateGranularity.YEAR,
+            }),
+        ).toEqual(expected);
+    });
+
+    it('applies no zoom when the global setting is unset (chart keeps its own grain)', () => {
+        expect(
+            resolveTileDateZoom({
+                ...legacyBase,
+                tileUuid: 'tile-1',
+                globalGranularity: undefined,
+            }),
+        ).toBeUndefined();
+    });
+
+    it('zooms grain-only for a tile with no date x-axis field', () => {
+        expect(
+            resolveTileDateZoom({
+                ...legacyBase,
+                tileUuid: 'tile-1',
+                globalGranularity: DateGranularity.WEEK,
+                defaultXAxisFieldId: undefined,
+            }),
+        ).toEqual({ granularity: DateGranularity.WEEK });
+    });
+
+    it('flag-off swap makes saved controls inert: a would-be-attached tile falls back to the global setting', () => {
+        // useDashboardChartReadyQuery substitutes EMPTY_DATE_ZOOM_CONFIG when the
+        // flag is off, so 'tileA' (attached to ctrl-1 under controlConfig()) and
+        // its runtime override are ignored, resolving to the legacy global grain.
+        expect(
+            resolveTileDateZoom({
+                ...legacyBase,
+                tileUuid: 'tileA',
+                globalGranularity: DateGranularity.MONTH,
+                runtimeGranularities: { 'ctrl-1': DateGranularity.DAY },
+            }),
+        ).toEqual({
+            granularity: DateGranularity.MONTH,
+            xAxisFieldId: 'orders_order_date_year',
+        });
+    });
+});
+
+describe('normalizeGranularityParam', () => {
+    it('normalizes a lowercased standard grain to canonical case', () => {
+        expect(normalizeGranularityParam('week')).toBe(DateGranularity.WEEK);
+    });
+
+    it('passes through a non-standard (custom interval) value as-is', () => {
+        expect(normalizeGranularityParam('orders_custom_period')).toBe(
+            'orders_custom_period',
+        );
+    });
+});
+
+describe('lifecycle helpers', () => {
+    it('copies a tile target to a duplicated tile, inheriting control + field', () => {
+        const next = copyDateZoomTileTargets(controlConfig(), [
+            { fromTileUuid: 'tileA', toTileUuid: 'tileA-copy' },
+        ]);
+        expect(next.tileTargets['tileA-copy']).toEqual({
+            controlUuid: 'ctrl-1',
+            fieldId: 'orders_fiscal_date',
+            tableName: 'orders',
+        });
+    });
+
+    it('returns the same config when the source tile is unassigned', () => {
+        const cfg = controlConfig();
+        expect(
+            copyDateZoomTileTargets(cfg, [
+                { fromTileUuid: 'tileZ', toTileUuid: 'tileZ-copy' },
+            ]),
+        ).toBe(cfg);
+    });
+
+    it('prunes controls that have no targets', () => {
+        const emptied: DateZoomConfig = {
+            controls: controlConfig().controls,
+            tileTargets: {},
+        };
+        expect(pruneDateZoomConfig(emptied)).toEqual(EMPTY_DATE_ZOOM_CONFIG);
+    });
+
+    it('prunes targets whose control was removed (dangling)', () => {
+        const cfg: DateZoomConfig = {
+            controls: [],
+            tileTargets: {
+                tileA: {
+                    controlUuid: 'ctrl-gone',
+                    fieldId: 'f',
+                    tableName: 't',
+                },
+            },
+        };
+        expect(pruneDateZoomConfig(cfg)).toEqual(EMPTY_DATE_ZOOM_CONFIG);
+    });
+
+    it('removes a deleted tile and prunes the now-empty control', () => {
+        // tileA is the control's only target -> deleting it drops the control.
+        expect(removeDateZoomTileTargets(controlConfig(), ['tileA'])).toEqual(
+            EMPTY_DATE_ZOOM_CONFIG,
+        );
+    });
+
+    it('removes a deleted tile but keeps a control with surviving targets', () => {
+        const cfg: DateZoomConfig = {
+            controls: controlConfig().controls,
+            tileTargets: {
+                tileA: {
+                    controlUuid: 'ctrl-1',
+                    fieldId: 'orders_fiscal_date',
+                    tableName: 'orders',
+                },
+                tileB: {
+                    controlUuid: 'ctrl-1',
+                    fieldId: 'orders_fiscal_date',
+                    tableName: 'orders',
+                },
+            },
+        };
+        const next = removeDateZoomTileTargets(cfg, ['tileA']);
+        expect(next.controls).toHaveLength(1);
+        expect(Object.keys(next.tileTargets)).toEqual(['tileB']);
+    });
+
+    it('returns the same config when no deleted tile had a target', () => {
+        const cfg = controlConfig();
+        expect(removeDateZoomTileTargets(cfg, ['tileZ'])).toBe(cfg);
     });
 });
 
@@ -608,6 +1010,18 @@ describe('getDateZoomCapabilities', () => {
         });
     });
 
+    it('exposes standard granularity overrides keyed by DateGranularity', () => {
+        const explore = {
+            ...makeExplore([]),
+            granularityLabels: { WEEK: 'Week starting Monday' },
+        } as unknown as Explore;
+        const metricQuery = makeMetricQuery([]);
+        const caps = getDateZoomCapabilities(explore, metricQuery);
+        expect(caps.availableCustomGranularities.Week).toBe(
+            'Week starting Monday',
+        );
+    });
+
     it('exposes every custom granularity defined in the explore, regardless of which dim the chart currently queries', () => {
         const orderDate = makeDimension({
             name: 'order_date',
@@ -640,5 +1054,224 @@ describe('getDateZoomCapabilities', () => {
         expect(result.availableCustomGranularities).toEqual({
             fiscal_quarter: 'Shipped Fiscal Quarter',
         });
+    });
+});
+
+describe('getDateZoomXAxisFieldId', () => {
+    const makeCartesianConfig = (xField: string | undefined): ChartConfig => ({
+        type: ChartType.CARTESIAN,
+        config: {
+            layout: xField
+                ? { xField, yField: ['orders_revenue'] }
+                : { yField: ['orders_revenue'] },
+            eChartsConfig: {},
+        },
+    });
+
+    it('returns the xField when it is a DATE dimension', () => {
+        const explore = makeExplore([
+            makeDimension({
+                name: 'order_date_month',
+                table: 'orders',
+                type: DimensionType.DATE,
+            }),
+        ]);
+
+        expect(
+            getDateZoomXAxisFieldId(
+                makeCartesianConfig('orders_order_date_month'),
+                explore,
+            ),
+        ).toBe('orders_order_date_month');
+    });
+
+    it('returns the xField when it is a TIMESTAMP dimension', () => {
+        const explore = makeExplore([
+            makeDimension({
+                name: 'created_at',
+                table: 'orders',
+                type: DimensionType.TIMESTAMP,
+            }),
+        ]);
+
+        expect(
+            getDateZoomXAxisFieldId(
+                makeCartesianConfig('orders_created_at'),
+                explore,
+            ),
+        ).toBe('orders_created_at');
+    });
+
+    it('returns a string-typed custom interval x-axis (resolves via base dimension)', () => {
+        const explore = makeExplore([
+            makeDimension({
+                name: 'order_date',
+                table: 'orders',
+                type: DimensionType.DATE,
+            }),
+            makeDimension({
+                name: 'order_date_fiscal_quarter',
+                table: 'orders',
+                type: DimensionType.STRING,
+                customTimeInterval: 'fiscal_quarter',
+                timeIntervalBaseDimensionName: 'order_date',
+            }),
+        ]);
+
+        expect(
+            getDateZoomXAxisFieldId(
+                makeCartesianConfig('orders_order_date_fiscal_quarter'),
+                explore,
+            ),
+        ).toBe('orders_order_date_fiscal_quarter');
+    });
+
+    it('returns undefined when the xField is not a date dimension', () => {
+        const explore = makeExplore([
+            makeDimension({
+                name: 'status',
+                table: 'orders',
+                type: DimensionType.STRING,
+            }),
+        ]);
+
+        expect(
+            getDateZoomXAxisFieldId(
+                makeCartesianConfig('orders_status'),
+                explore,
+            ),
+        ).toBeUndefined();
+    });
+
+    it('returns undefined for non-cartesian charts', () => {
+        const explore = makeExplore([
+            makeDimension({
+                name: 'order_date_month',
+                table: 'orders',
+                type: DimensionType.DATE,
+            }),
+        ]);
+        const bigNumberConfig: ChartConfig = {
+            type: ChartType.BIG_NUMBER,
+            config: {},
+        };
+
+        expect(
+            getDateZoomXAxisFieldId(bigNumberConfig, explore),
+        ).toBeUndefined();
+    });
+
+    it('returns undefined when there is no xField', () => {
+        const explore = makeExplore([
+            makeDimension({
+                name: 'order_date_month',
+                table: 'orders',
+                type: DimensionType.DATE,
+            }),
+        ]);
+
+        expect(
+            getDateZoomXAxisFieldId(makeCartesianConfig(undefined), explore),
+        ).toBeUndefined();
+    });
+
+    it('returns undefined when the explore is not loaded', () => {
+        expect(
+            getDateZoomXAxisFieldId(
+                makeCartesianConfig('orders_order_date_month'),
+                undefined,
+            ),
+        ).toBeUndefined();
+    });
+});
+
+describe('getChartZoomableFields', () => {
+    it('returns only the chart-queried date/timestamp dimensions', () => {
+        const dateDim = makeDimension({
+            name: 'order_date',
+            table: 'orders',
+            type: DimensionType.DATE,
+            label: 'Order date',
+        });
+        const createdAt = makeDimension({
+            name: 'created_at',
+            table: 'orders',
+            type: DimensionType.TIMESTAMP,
+            label: 'Created at',
+        });
+        const unusedDate = makeDimension({
+            name: 'shipped_date',
+            table: 'orders',
+            type: DimensionType.DATE,
+            label: 'Shipped date',
+        });
+        const stringDim = makeDimension({
+            name: 'status',
+            table: 'orders',
+            type: DimensionType.STRING,
+        });
+        const explore = makeExplore([
+            dateDim,
+            createdAt,
+            unusedDate,
+            stringDim,
+        ]);
+        const metricQuery = makeMetricQuery([
+            'orders_order_date',
+            'orders_created_at',
+            'orders_status',
+        ]);
+
+        expect(getChartZoomableFields(explore, metricQuery)).toEqual([
+            {
+                fieldId: 'orders_order_date',
+                label: 'Order date',
+                tableName: 'orders',
+            },
+            {
+                fieldId: 'orders_created_at',
+                label: 'Created at',
+                tableName: 'orders',
+            },
+        ]);
+    });
+
+    it('includes a queried time-interval dimension (resolves to a base time dim)', () => {
+        const baseDim = makeDimension({
+            name: 'order_date',
+            table: 'orders',
+            type: DimensionType.DATE,
+            isIntervalBase: true,
+        });
+        const monthDim = makeDimension({
+            name: 'order_date_month',
+            table: 'orders',
+            type: DimensionType.DATE,
+            timeInterval: 'MONTH' as CompiledDimension['timeInterval'],
+            timeIntervalBaseDimensionName: 'order_date',
+            label: 'Order date month',
+        });
+        const explore = makeExplore([baseDim, monthDim]);
+        const metricQuery = makeMetricQuery(['orders_order_date_month']);
+
+        expect(getChartZoomableFields(explore, metricQuery)).toEqual([
+            {
+                fieldId: 'orders_order_date_month',
+                label: 'Order date month',
+                tableName: 'orders',
+            },
+        ]);
+    });
+
+    it('returns an empty list when the chart queries no date dimensions', () => {
+        const stringDim = makeDimension({
+            name: 'status',
+            table: 'orders',
+            type: DimensionType.STRING,
+        });
+        const explore = makeExplore([stringDim]);
+        const metricQuery = makeMetricQuery(['orders_status']);
+
+        expect(getChartZoomableFields(explore, metricQuery)).toEqual([]);
     });
 });

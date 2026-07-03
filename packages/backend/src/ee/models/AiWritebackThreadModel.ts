@@ -19,6 +19,16 @@ export type AiWritebackThreadWithPrUrl = DbAiWritebackThread & {
     pr_url: string | null;
 };
 
+/**
+ * A writeback thread that points at a registry sandbox (`sandbox_uuid` is
+ * non-null). A null `sandbox_uuid` only occurs for a row an old pod inserts
+ * mid-rollout, which is not resumable; the service narrows to this type before
+ * driving a resume.
+ */
+export type ResumableWritebackThread = AiWritebackThreadWithPrUrl & {
+    sandbox_uuid: string;
+};
+
 export class AiWritebackThreadModel {
     private database: Knex;
 
@@ -46,16 +56,20 @@ export class AiWritebackThreadModel {
 
     async create(data: {
         aiThreadUuid: string;
-        sandboxId: string;
+        sandboxUuid: string;
         pullRequestUuid: string;
+        // The dbt source this thread targets — null for the project's primary
+        // dbt connection. Binds the thread to one repo across resumes.
+        projectDbtSourceUuid: string | null;
     }): Promise<DbAiWritebackThread> {
         const [row] = await this.database<AiWritebackThreadTable>(
             AiWritebackThreadTableName,
         )
             .insert({
                 ai_thread_uuid: data.aiThreadUuid,
-                sandbox_id: data.sandboxId,
+                sandbox_uuid: data.sandboxUuid,
                 pull_request_uuid: data.pullRequestUuid,
+                project_dbt_source_uuid: data.projectDbtSourceUuid,
             })
             .returning('*');
         return row;

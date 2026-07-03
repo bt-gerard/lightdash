@@ -1,4 +1,8 @@
-import { type AiChartRuntimeOverrides } from '@lightdash/common';
+import {
+    type AiAgentModelConfig,
+    type AiChartRuntimeOverrides,
+    type AiThreadCreatedFrom,
+} from '@lightdash/common';
 import { Knex } from 'knex';
 
 export const AiThreadTableName = 'ai_thread';
@@ -10,9 +14,10 @@ export type DbAiThread = {
     created_at: Date;
     organization_uuid: string;
     project_uuid: string;
-    created_from: 'slack' | 'web_app' | 'evals'; // slack, web_app, evals etc
+    created_from: AiThreadCreatedFrom;
     title: string | null;
     title_generated_at: Date | null;
+    sql_auto_approved_at: Date | null;
 };
 
 export type AiThreadTable = Knex.CompositeTableType<
@@ -29,6 +34,7 @@ export type AiThreadTable = Knex.CompositeTableType<
             | 'title_generated_at'
             | 'project_uuid'
             | 'share_source_thread_share_uuid'
+            | 'sql_auto_approved_at'
         >
     >
 >;
@@ -106,8 +112,23 @@ export const AiWritebackThreadTableName = 'ai_writeback_thread';
 export type DbAiWritebackThread = {
     ai_writeback_thread_uuid: string;
     ai_thread_uuid: string;
-    sandbox_id: string;
+    /**
+     * The registry-owned, turn-stable sandbox id (see sandbox_registry).
+     * Backfilled for pre-registry rows by the registry migration. Null only for
+     * a row an old pod inserts mid-rollout (it sets the legacy `sandbox_id`
+     * column instead); such a thread is treated as unresumable and cleared on
+     * its next turn.
+     */
+    sandbox_uuid: string | null;
     pull_request_uuid: string | null;
+    /**
+     * The dbt source this thread (and its single PR) is bound to: a
+     * `project_dbt_sources` row uuid for an additional source, or null for the
+     * project's primary dbt connection. Every resumed turn re-resolves to this
+     * source so the thread keeps editing the same repo. FK is ON DELETE SET
+     * NULL — deleting the source degrades a resume back to the primary.
+     */
+    project_dbt_source_uuid: string | null;
     created_at: Date;
 };
 
@@ -115,9 +136,10 @@ export type AiWritebackThreadTable = Knex.CompositeTableType<
     DbAiWritebackThread,
     Pick<
         DbAiWritebackThread,
-        'ai_thread_uuid' | 'sandbox_id' | 'pull_request_uuid'
-    >,
-    Pick<DbAiWritebackThread, 'sandbox_id' | 'pull_request_uuid'>
+        'ai_thread_uuid' | 'sandbox_uuid' | 'pull_request_uuid'
+    > &
+        Partial<Pick<DbAiWritebackThread, 'project_dbt_source_uuid'>>,
+    Pick<DbAiWritebackThread, 'sandbox_uuid' | 'pull_request_uuid'>
 >;
 
 export const AiPromptTableName = 'ai_prompt';
@@ -371,6 +393,7 @@ export type DbAiOrganizationSettings = {
     ai_agents_visible: boolean;
     ai_agent_reviews_enabled: boolean;
     mcp_content_writes_enabled: boolean;
+    default_ai_agent_model_config: AiAgentModelConfig | null;
     created_at: Date;
     updated_at: Date;
 };
@@ -381,7 +404,9 @@ export type AiOrganizationSettingsTable = Knex.CompositeTableType<
         Partial<
             Pick<
                 DbAiOrganizationSettings,
-                'ai_agent_reviews_enabled' | 'mcp_content_writes_enabled'
+                | 'ai_agent_reviews_enabled'
+                | 'mcp_content_writes_enabled'
+                | 'default_ai_agent_model_config'
             >
         >,
     Partial<
@@ -390,6 +415,7 @@ export type AiOrganizationSettingsTable = Knex.CompositeTableType<
             | 'ai_agents_visible'
             | 'ai_agent_reviews_enabled'
             | 'mcp_content_writes_enabled'
+            | 'default_ai_agent_model_config'
         >
     >
 >;

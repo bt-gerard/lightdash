@@ -1,11 +1,12 @@
 import {
     assertUnreachable,
+    getResourceViewItemName,
     ResourceViewItemType,
     type ResourceViewItem,
 } from '@lightdash/common';
 import { Button, LoadingOverlay, Text } from '@mantine-8/core';
 import { IconFolderShare, IconPlus } from '@tabler/icons-react';
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, type ReactNode } from 'react';
 import { useSpaceManagement } from '../../../hooks/useSpaceManagement';
 import { useSpaceSummaries } from '../../../hooks/useSpaces';
 import Callout from '../Callout';
@@ -19,6 +20,10 @@ type Props<T> = Pick<MantineModalProps, 'opened' | 'onClose'> & {
     items: T;
     isLoading: boolean;
     onConfirm: (spaceUuid: string | null) => void;
+    title?: string;
+    description?: ReactNode;
+    confirmLabel?: string;
+    createSpaceConfirmLabel?: string;
 };
 
 const ItemName = ({ name }: { name: string }) => {
@@ -32,7 +37,7 @@ const ItemName = ({ name }: { name: string }) => {
 const getItemsText = <T extends ResourceViewItem>(items: T[]) => {
     if (items.length === 1) {
         return {
-            name: <ItemName name={items[0].data.name} />,
+            name: <ItemName name={getResourceViewItemName(items[0])} />,
             type: items[0].type,
         };
     }
@@ -50,6 +55,10 @@ const TransferItemsModal = <R extends ResourceViewItem, T extends Array<R>>({
     items,
     onConfirm,
     isLoading,
+    title,
+    description,
+    confirmLabel = 'Confirm',
+    createSpaceConfirmLabel = 'Create space & move',
 }: Props<T>) => {
     // Fetch spaces only when the modal is opened
     const { data: spaces = [], isLoading: isLoadingSpaces } = useSpaceSummaries(
@@ -132,7 +141,7 @@ const TransferItemsModal = <R extends ResourceViewItem, T extends Array<R>>({
 
     return (
         <MantineModal
-            title={`Move ${getItemsText(items).type}`}
+            title={title ?? `Move ${getItemsText(items).type}`}
             opened={opened}
             onClose={onClose}
             icon={IconFolderShare}
@@ -156,7 +165,7 @@ const TransferItemsModal = <R extends ResourceViewItem, T extends Array<R>>({
                         disabled={newSpaceName.length === 0}
                         onClick={createSpace}
                     >
-                        Create space & move
+                        {createSpaceConfirmLabel}
                     </Button>
                 ) : (
                     <Button
@@ -165,7 +174,7 @@ const TransferItemsModal = <R extends ResourceViewItem, T extends Array<R>>({
                         }
                         onClick={handleConfirm}
                     >
-                        Confirm
+                        {confirmLabel}
                     </Button>
                 )
             }
@@ -190,9 +199,14 @@ const TransferItemsModal = <R extends ResourceViewItem, T extends Array<R>>({
                 />
             ) : (
                 <>
-                    <Text fz="sm" fw={500}>
-                        Select a space to move {getItemsText(items).name} to:
-                    </Text>
+                    {description ?? (
+                        <Text fz="sm" fw={500}>
+                            <>
+                                Select a space to move{' '}
+                                {getItemsText(items).name} to:
+                            </>
+                        </Text>
+                    )}
 
                     <SpaceSelector
                         itemType={singleItemType}

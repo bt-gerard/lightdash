@@ -55,15 +55,19 @@ import { type WarehouseSqlBuilder } from '../types/warehouse';
 import assertUnreachable from '../utils/assertUnreachable';
 import {
     getDefaultTimeFrames,
+    getTimeFramesWithProjectDefaults,
     isTimeInterval,
     timeFrameConfigs,
     validateTimeFrames,
+    type ResolvedAdditionalTimeIntervals,
     type WeekDay,
 } from '../utils/timeFrames';
 import { ExploreCompiler } from './exploreCompiler';
 import {
     getCategoriesFromResource,
     getSpotlightConfigurationForResource,
+    resolveAdditionalTimeIntervals,
+    resolveGranularityLabels,
 } from './lightdashProjectConfig';
 
 const convertTimezone = (
@@ -122,6 +126,53 @@ const isInterval = (
     ((dimension?.time_intervals && dimension.time_intervals !== 'OFF') ||
         !dimension?.time_intervals);
 
+const convertFilterAutocomplete = (
+    filterAutocomplete: NonNullable<
+        DbtColumnMetadata['dimension']
+    >['filter_autocomplete'],
+    modelName: string,
+    dimensionName: string,
+): {
+    filterAutocomplete: Dimension['filterAutocomplete'] | undefined;
+    warnings: InlineError[];
+} => {
+    if (!filterAutocomplete) {
+        return { filterAutocomplete: undefined, warnings: [] };
+    }
+
+    const { values } = filterAutocomplete;
+    const duplicateValues = values
+        ?.map(({ value }) => value)
+        .filter(
+            (value, index, allValues) => allValues.indexOf(value) !== index,
+        );
+    const uniqueValues = values?.filter(
+        ({ value }, index, allValues) =>
+            allValues.findIndex((item) => item.value === value) === index,
+    );
+    const warnings =
+        duplicateValues && duplicateValues.length > 0
+            ? [
+                  {
+                      type: InlineErrorType.FIELD_ERROR,
+                      message: `Duplicate filter autocomplete values found for dimension "${dimensionName}" in dbt model "${modelName}": ${[
+                          ...new Set(duplicateValues),
+                      ].join(
+                          ', ',
+                      )}. Keeping the first value and ignoring duplicates.`,
+                  },
+              ]
+            : [];
+
+    return {
+        filterAutocomplete: {
+            ...(uniqueValues ? { values: uniqueValues } : {}),
+            fetchFromWarehouse: filterAutocomplete.fetch_from_warehouse ?? true,
+        },
+        warnings,
+    };
+};
+
 const convertDimension = (
     index: number,
     targetWarehouse: SupportedDbtAdapter,
@@ -133,6 +184,8 @@ const convertDimension = (
     startOfWeek?: WeekDay | null,
     isAdditionalDimension?: boolean,
     disableTimestampConversion?: boolean,
+    warnings?: InlineError[],
+    granularityLabels?: Partial<Record<TimeFrames, string>>,
 ): Dimension => {
     // Config block takes priority, then meta block
     const meta = merge({}, column.meta, column.config?.meta);
@@ -163,6 +216,17 @@ const convertDimension = (
         meta.dimension?.groups,
         meta.dimension?.group_label,
     );
+    const convertedFilterAutocomplete =
+        meta.dimension?.filter_autocomplete !== undefined
+            ? convertFilterAutocomplete(
+                  meta.dimension.filter_autocomplete,
+                  model.name,
+                  name,
+              )
+            : undefined;
+    if (convertedFilterAutocomplete?.warnings) {
+        warnings?.push(...convertedFilterAutocomplete.warnings);
+    }
 
     if (timeInterval) {
         timeIntervalBaseDimensionName = name;
@@ -175,9 +239,12 @@ const convertDimension = (
             startOfWeek,
         );
         name = `${column.name}_${timeInterval.toLowerCase()}`;
-        label = `${label} ${timeFrameConfigs[timeInterval]
-            .getLabel()
-            .toLowerCase()}`;
+        const grainOverride = granularityLabels?.[timeInterval];
+        label = grainOverride
+            ? `${label} ${grainOverride}`
+            : `${label} ${timeFrameConfigs[timeInterval]
+                  .getLabel()
+                  .toLowerCase()}`;
 
         groups.push(
             meta.dimension?.label ??
@@ -200,6 +267,9 @@ const convertDimension = (
         timeInterval,
         timeIntervalBaseDimensionName,
         timeIntervalBaseDimensionType,
+        ...(timeInterval && granularityLabels?.[timeInterval]
+            ? { timeIntervalLabel: granularityLabels[timeInterval] }
+            : {}),
         hidden: !!meta.dimension?.hidden,
         format: meta.dimension?.format,
         round: meta.dimension?.round,
@@ -212,6 +282,12 @@ const convertDimension = (
         ...(meta.dimension?.image ? { image: meta.dimension.image } : {}),
         ...(meta.dimension?.richText
             ? { richText: meta.dimension.richText }
+            : {}),
+        ...(meta.dimension?.filter_autocomplete
+            ? {
+                  filterAutocomplete:
+                      convertedFilterAutocomplete?.filterAutocomplete,
+              }
             : {}),
         ...(isAdditionalDimension ? { isAdditionalDimension } : {}),
         // Polarity flip: YAML reads `convert_timezone: false` (defaults true,
@@ -644,6 +720,8 @@ export const convertTable = (
     disableTimestampConversion?: boolean,
     customGranularities?: Record<string, CustomGranularity>,
     allowPartialCompilation?: boolean,
+    additionalTimeIntervals?: ResolvedAdditionalTimeIntervals,
+    granularityLabels?: Partial<Record<TimeFrames, string>>,
 ): Omit<Table, 'lineageGraph'> => {
     // Config block takes priority, then meta block
     const meta = merge({}, model.meta, model.config?.meta);
@@ -666,6 +744,8 @@ export const convertTable = (
                 startOfWeek,
                 undefined,
                 disableTimestampConversion,
+                tableWarnings,
+                granularityLabels,
             );
 
             // Config block takes priority, then meta block
@@ -690,7 +770,10 @@ export const convertTable = (
                     ) {
                         allIntervals = overrideTimeIntervals;
                     } else {
-                        allIntervals = getDefaultTimeFrames(dim.type);
+                        allIntervals = getTimeFramesWithProjectDefaults(
+                            dim.type,
+                            additionalTimeIntervals,
+                        );
                     }
 
                     // Split into standard TimeFrames and custom granularity names
@@ -748,6 +831,8 @@ export const convertTable = (
                                     'isAdditionalDimension' in dim &&
                                         dim.isAdditionalDimension,
                                     disableTimestampConversion,
+                                    undefined,
+                                    granularityLabels,
                                 ),
                         }),
                         {},
@@ -847,6 +932,8 @@ export const convertTable = (
                     startOfWeek,
                     true,
                     disableTimestampConversion,
+                    tableWarnings,
+                    granularityLabels,
                 );
 
                 return {
@@ -1116,6 +1203,13 @@ export const convertExplores = async (
         postProcessors,
     } = options ?? {};
     const tableLineage = translateDbtModelsToTableLineage(models);
+    const additionalTimeIntervals = resolveAdditionalTimeIntervals(
+        lightdashProjectConfig.defaults?.additional_time_intervals,
+        lightdashProjectConfig.custom_granularities,
+    );
+    const granularityLabels = resolveGranularityLabels(
+        lightdashProjectConfig.defaults?.granularity_labels,
+    );
     const [tables, exploreErrors] = models.reduce(
         ([accTables, accErrors], model) => {
             // Config block takes priority, then meta block
@@ -1147,6 +1241,8 @@ export const convertExplores = async (
                     disableTimestampConversion,
                     lightdashProjectConfig.custom_granularities,
                     allowPartialCompilation,
+                    additionalTimeIntervals,
+                    granularityLabels,
                 );
 
                 // add lineage
@@ -1315,7 +1411,7 @@ export const convertExplores = async (
         // Properties created from `exploreToCreate` are specific to each explore. e.g. each explore can have a different name, label & joins
         const compiledExplores = exploresToCreate.map((exploreToCreate) => {
             try {
-                return exploreCompiler.compileExplore({
+                const compiled = exploreCompiler.compileExplore({
                     name: exploreToCreate.name,
                     label: exploreToCreate.label,
                     tags: tags || [],
@@ -1360,6 +1456,12 @@ export const convertExplores = async (
                     projectParameters: lightdashProjectConfig.parameters,
                     projectDefaults: lightdashProjectConfig.defaults,
                 });
+                return {
+                    ...compiled,
+                    ...(Object.keys(granularityLabels).length > 0
+                        ? { granularityLabels }
+                        : {}),
+                };
             } catch (e: unknown) {
                 return {
                     name: exploreToCreate.name,

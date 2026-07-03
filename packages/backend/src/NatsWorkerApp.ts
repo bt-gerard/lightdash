@@ -3,6 +3,8 @@ import * as Sentry from '@sentry/node';
 import express from 'express';
 import http from 'http';
 import knex, { Knex } from 'knex';
+import { BufferedEventStreamWriter } from './analytics/eventStream/BufferedEventStreamWriter';
+import { createEventStreamWriter } from './analytics/eventStream/createEventStreamWriter';
 import { LightdashAnalytics } from './analytics/LightdashAnalytics';
 import { registerOAuthRefreshStrategies } from './auth/registerOAuthRefreshStrategies';
 import {
@@ -15,7 +17,10 @@ import Logger from './logging/logger';
 import { ModelProviderMap, ModelRepository } from './models/ModelRepository';
 import { STREAM_CONFIGS, type NatsWorkerStream } from './nats/natsConfig';
 import { NatsWorker } from './nats/NatsWorker';
-import { initOtelHttpMetrics } from './prometheus/otelHttpMetrics';
+import {
+    initOtelHttpMetrics,
+    shouldSelfRegisterHttpInstrumentation,
+} from './prometheus/otelHttpMetrics';
 import PrometheusMetrics from './prometheus/PrometheusMetrics';
 import { IGNORE_ERRORS } from './sentry';
 import { createOrganizationNameResolver } from './sentry/organizationNameResolver';
@@ -24,6 +29,11 @@ import {
     ServiceProviderMap,
     ServiceRepository,
 } from './services/ServiceRepository';
+import {
+    initOtelTracing,
+    otelTracingEnabled,
+    shutdownOtelTracing,
+} from './tracing/tracing';
 import { UtilProviderMap, UtilRepository } from './utils/UtilRepository';
 import { VERSION } from './version';
 
@@ -89,6 +99,8 @@ export default class NatsWorkerApp {
 
     private readonly prometheusMetrics: PrometheusMetrics;
 
+    private readonly eventStreamWriter: BufferedEventStreamWriter | null;
+
     constructor(args: NatsWorkerAppArguments) {
         this.lightdashConfig = args.lightdashConfig;
         this.port = args.port;
@@ -134,6 +146,10 @@ export default class NatsWorkerApp {
         this.prometheusMetrics = new PrometheusMetrics(
             this.lightdashConfig.prometheus,
         );
+        this.eventStreamWriter = createEventStreamWriter(
+            this.lightdashConfig,
+            this.prometheusMetrics,
+        );
 
         this.clients = clients;
         this.modelRepository = models;
@@ -168,7 +184,12 @@ export default class NatsWorkerApp {
     }
 
     private async initSentry() {
-        initOtelHttpMetrics(this.lightdashConfig.prometheus);
+        initOtelHttpMetrics(this.lightdashConfig.prometheus, {
+            registerHttpInstrumentation: shouldSelfRegisterHttpInstrumentation({
+                hasSentryDsn: !!this.lightdashConfig.sentry.backend.dsn,
+                isOtelTracingEnabled: otelTracingEnabled(),
+            }),
+        });
         Sentry.init({
             release: VERSION,
             dsn: this.lightdashConfig.sentry.backend.dsn,
@@ -176,12 +197,15 @@ export default class NatsWorkerApp {
                 this.environment === 'development'
                     ? 'development'
                     : this.lightdashConfig.mode,
+            skipOpenTelemetrySetup: otelTracingEnabled(),
+            registerEsmLoaderHooks: !otelTracingEnabled(),
             integrations: [],
             ignoreErrors: IGNORE_ERRORS,
             tracesSampleRate:
                 this.lightdashConfig.sentry.queryTracesSampleRate ??
                 this.lightdashConfig.sentry.tracesSampleRate,
         });
+        initOtelTracing();
     }
 
     private async initWorker(): Promise<{
@@ -233,8 +257,13 @@ export default class NatsWorkerApp {
                 Logger.info('Shutting down NATS worker gracefully');
             },
             onSignal: async () => {
+                if (this.eventStreamWriter) {
+                    Logger.info('Flushing usage event stream writer');
+                    await this.eventStreamWriter.close();
+                }
                 Logger.info('Stopping Prometheus metrics');
                 await this.prometheusMetrics.stop();
+                await shutdownOtelTracing();
                 Logger.info('Stopping NATS worker');
                 await worker.stop();
                 await natsClient.drain();
@@ -251,5 +280,9 @@ export default class NatsWorkerApp {
         });
 
         server.listen(this.port);
+    }
+
+    public getEventStreamWriter() {
+        return this.eventStreamWriter;
     }
 }

@@ -86,17 +86,17 @@ type Props = {
     selectedReviewItemUuid?: string | null;
     onReviewItemSelect: (target: AiAgentAdminReviewItemPreviewTarget) => void;
     showOnboardingExamples?: boolean;
+    initialProjectUuids?: string[];
 };
 
 const toTarget = (
     item: AiAgentReviewItemSummary,
-): AiAgentAdminReviewItemPreviewTarget | null => {
+): AiAgentAdminReviewItemPreviewTarget => {
     const finding = item.latestFinding;
-    if (!finding) return null;
     return {
-        projectUuid: finding.projectUuid,
-        agentUuid: finding.agentUuid,
-        threadUuid: finding.threadUuid,
+        projectUuid: finding?.projectUuid ?? item.projectUuid,
+        agentUuid: finding?.agentUuid ?? item.agentUuid,
+        threadUuid: finding?.threadUuid ?? null,
         reviewItemUuid: item.uuid,
     };
 };
@@ -175,11 +175,12 @@ export const ReviewKanbanBoard: FC<Props> = ({
     selectedReviewItemUuid,
     onReviewItemSelect,
     showOnboardingExamples = false,
+    initialProjectUuids = [],
 }) => {
     const [search, setSearch] = useState<string | undefined>(undefined);
     const deferredSearch = useDeferredValue(search);
     const [selectedProjectUuids, setSelectedProjectUuids] = useState<string[]>(
-        [],
+        () => initialProjectUuids,
     );
     const [selectedRootCauses, setSelectedRootCauses] = useState<
         AiAgentRootCause[]
@@ -222,8 +223,10 @@ export const ReviewKanbanBoard: FC<Props> = ({
     }, [projects]);
 
     const allItems = useMemo<AiAgentReviewItemSummary[]>(() => {
-        if (showOnboardingExamples && (!data || data.length === 0)) {
-            return EXAMPLE_REVIEW_ITEMS as AiAgentReviewItemSummary[];
+        // Tie the examples to the tour being open (not to emptiness) so the same
+        // cards get highlighted every run, even on a populated board.
+        if (showOnboardingExamples) {
+            return EXAMPLE_REVIEW_ITEMS;
         }
         return data ?? [];
     }, [data, showOnboardingExamples]);
@@ -268,6 +271,9 @@ export const ReviewKanbanBoard: FC<Props> = ({
     const projectFacetOptions = useMemo((): FilterFacetOption[] => {
         const counts = new Map<string, number>();
         for (const item of searchFilteredItems.filter((item) => {
+            // Exclude done items (resolved, dismissed, duplicate) so the badge
+            // reflects only open work in each project.
+            if (getReviewLane(item) === 'done') return false;
             if (selectedRootCauses.length === 0) return true;
             return selectedRootCauses.includes(item.primaryRootCause);
         })) {
@@ -532,7 +538,15 @@ export const ReviewKanbanBoard: FC<Props> = ({
                             const hasMore = all.length > VISIBLE_PER_LANE;
 
                             return (
-                                <Box key={lane.id} className={styles.lane}>
+                                <Box
+                                    key={lane.id}
+                                    className={styles.lane}
+                                    data-tour={
+                                        lane.id === 'in_progress'
+                                            ? 'reviews-in-progress'
+                                            : undefined
+                                    }
+                                >
                                     <Group gap={8} px={4} pb="xs">
                                         <Box
                                             w={8}
@@ -589,26 +603,23 @@ export const ReviewKanbanBoard: FC<Props> = ({
                                                         </Text>
                                                     </Box>
                                                 ) : (
-                                                    displayed.map((item) => {
-                                                        const target =
-                                                            toTarget(item);
-                                                        return (
-                                                            <SortableCard
-                                                                key={item.uuid}
-                                                                item={item}
-                                                                isSelected={
-                                                                    selectedReviewItemUuid ===
-                                                                    item.uuid
-                                                                }
-                                                                onSelect={() => {
-                                                                    if (target)
-                                                                        onReviewItemSelect(
-                                                                            target,
-                                                                        );
-                                                                }}
-                                                            />
-                                                        );
-                                                    })
+                                                    displayed.map((item) => (
+                                                        <SortableCard
+                                                            key={item.uuid}
+                                                            item={item}
+                                                            isSelected={
+                                                                selectedReviewItemUuid ===
+                                                                item.uuid
+                                                            }
+                                                            onSelect={() =>
+                                                                onReviewItemSelect(
+                                                                    toTarget(
+                                                                        item,
+                                                                    ),
+                                                                )
+                                                            }
+                                                        />
+                                                    ))
                                                 )}
                                                 {hasMore && (
                                                     <Button

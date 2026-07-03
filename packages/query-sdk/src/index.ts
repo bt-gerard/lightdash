@@ -1,5 +1,6 @@
 // Query builder
 export { query } from './query';
+export { savedChart, type SavedChartQuery } from './savedChart';
 
 // Drill-down helper
 export { drillDown } from './drillDown';
@@ -28,6 +29,7 @@ export type {
     DownloadResultsResult,
     DownloadResultsValues,
     DownloadUnderlyingDataOptions,
+    ExternalFetchMethod,
     ExternalFetchOptions,
     ExternalFetchResult,
     Filter,
@@ -76,3 +78,18 @@ export type {
     ExportToSheetsOptions,
     ExportToSheetsResult,
 } from './exportToSheets';
+
+// Data app viz render context (host-pushed rows + field mapping)
+export {
+    VizContextProvider,
+    useVizContext,
+    getFormatted,
+    getRaw,
+} from './vizContext';
+export type {
+    VizContext,
+    VizContextCell,
+    VizContextRow,
+    DataAppVizContextMessage,
+    VizContextRequestMessage,
+} from './vizContext';
