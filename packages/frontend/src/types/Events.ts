@@ -56,6 +56,7 @@ export enum PageName {
     CATALOG = 'catalog',
     METRICS_CATALOG = 'metrics_catalog',
     FUNNEL_BUILDER = 'funnel_builder',
+    ROADMAP = 'roadmap',
 }
 
 export enum CategoryName {
