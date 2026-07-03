@@ -1438,6 +1438,14 @@
             },
             "RoadmapItem": {
                 "properties": {
+                    "pullRequestUrl": {
+                        "type": "string",
+                        "nullable": true
+                    },
+                    "issueUrl": {
+                        "type": "string",
+                        "nullable": true
+                    },
                     "status": {
                         "$ref": "#/components/schemas/RoadmapItemStatus"
                     },
@@ -1449,9 +1457,15 @@
                         "type": "string"
                     }
                 },
-                "required": ["status", "description", "title"],
+                "required": [
+                    "pullRequestUrl",
+                    "issueUrl",
+                    "status",
+                    "description",
+                    "title"
+                ],
                 "type": "object",
-                "description": "A single curated roadmap item, exactly as exposed to customers. These are\nthe only fields allowed across the curation boundary — the subset already\nsynced to the public GitHub issue. `description` is nullable because a Linear\nissue may have an empty body."
+                "description": "A single curated roadmap item, exactly as exposed to customers. These are\nthe only fields allowed across the curation boundary — the subset already\nsynced to the public GitHub issue. `description` is nullable because a Linear\nissue may have an empty body. `issueUrl`/`pullRequestUrl` link to the public\nGitHub issue and its delivering pull request; they are only ever\ngithub.com URLs (see {@link sanitizeRoadmapLink}) and null when no public\nlink exists."
             },
             "ApiRoadmapResponse": {
                 "properties": {
