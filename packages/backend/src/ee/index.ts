@@ -76,6 +76,7 @@ import { McpService } from './services/McpService/McpService';
 import { OrganizationWarehouseCredentialsService } from './services/OrganizationWarehouseCredentialsService';
 import { PreviewDeploySetupService } from './services/PreviewDeploySetupService/PreviewDeploySetupService';
 import { ProjectContextService } from './services/ProjectContextService/ProjectContextService';
+import { RoadmapProxyService } from './services/RoadmapProxyService/RoadmapProxyService';
 import { RoadmapService } from './services/RoadmapService/RoadmapService';
 import { SchedulerAiAugmentationService } from './services/SchedulerAiAugmentationService/SchedulerAiAugmentationService';
 import { ScimService } from './services/ScimService/ScimService';
@@ -222,6 +223,11 @@ export async function getEnterpriseAppArguments(): Promise<EnterpriseAppArgument
                         : null,
                 });
             },
+            roadmapProxyService: ({ context, repository }) =>
+                new RoadmapProxyService({
+                    lightdashConfig: context.lightdashConfig,
+                    featureFlagService: repository.getFeatureFlagService(),
+                }),
             embedService: ({ repository, context, models }) =>
                 new EmbedService({
                     analytics: context.lightdashAnalytics,

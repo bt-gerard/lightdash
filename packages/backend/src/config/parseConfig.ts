@@ -1276,6 +1276,7 @@ export type LightdashConfig = {
     roadmap: {
         enabled: boolean;
         syncCron: string;
+        serviceUrl: string | null;
         linear: {
             apiKey: string | null;
             apiUrl: string;
@@ -2191,6 +2192,7 @@ export const parseConfig = (): LightdashConfig => {
         roadmap: {
             enabled: process.env.ROADMAP_ENABLED === 'true',
             syncCron: process.env.ROADMAP_SYNC_CRON || '17 * * * *',
+            serviceUrl: process.env.ROADMAP_SERVICE_URL || null,
             linear: {
                 apiKey: process.env.ROADMAP_LINEAR_API_KEY || null,
                 apiUrl:
