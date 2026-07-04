@@ -231,6 +231,7 @@ import { type QueryHistoryStatus } from './queryHistory';
 import { type ApiRenameFieldsResponse, type ApiRenameResponse } from './rename';
 import { type MostPopularAndRecentlyUpdated } from './resourceViewItem';
 import { type ResultColumns, type ResultRow } from './results';
+import { type ApiRoadmapResponse } from './roadmap';
 import {
     type ApiCalculateSubtotalsResponse,
     type ApiCalculateTotalResponse,
@@ -1195,7 +1196,8 @@ type ApiResults =
     | ExternalConnectionSample[]
     | AppExternalConnectionLink
     | AppExternalConnectionLink[]
-    | ExternalFetchResponse;
+    | ExternalFetchResponse
+    | ApiRoadmapResponse['results'];
 // Note: EE API types removed from ApiResults to avoid circular imports
 // They can still be used with ApiResponse<T> by importing from '@lightdash/common'
 

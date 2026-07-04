@@ -1469,8 +1469,15 @@ const models: TsoaRoute.Models = {
             dataType: 'nestedObjectLiteral',
             nestedProperties: {
                 results: {
-                    dataType: 'array',
-                    array: { dataType: 'refAlias', ref: 'RoadmapItem' },
+                    dataType: 'nestedObjectLiteral',
+                    nestedProperties: {
+                        items: {
+                            dataType: 'array',
+                            array: { dataType: 'refAlias', ref: 'RoadmapItem' },
+                            required: true,
+                        },
+                        mapped: { dataType: 'boolean', required: true },
+                    },
                     required: true,
                 },
                 status: { dataType: 'enum', enums: ['ok'], required: true },

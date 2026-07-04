@@ -1470,10 +1470,20 @@
             "ApiRoadmapResponse": {
                 "properties": {
                     "results": {
-                        "items": {
-                            "$ref": "#/components/schemas/RoadmapItem"
+                        "properties": {
+                            "items": {
+                                "items": {
+                                    "$ref": "#/components/schemas/RoadmapItem"
+                                },
+                                "type": "array"
+                            },
+                            "mapped": {
+                                "type": "boolean",
+                                "description": "False when the organization has no mapped Linear customer yet —\nthe roadmap channel hasn't been set up (an onboarding gap), as\nopposed to a connected org that simply has no requests."
+                            }
                         },
-                        "type": "array"
+                        "required": ["items", "mapped"],
+                        "type": "object"
                     },
                     "status": {
                         "type": "string",
