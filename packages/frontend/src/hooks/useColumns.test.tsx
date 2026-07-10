@@ -36,7 +36,14 @@ const createMockCellContext = ({
     columnId: string;
     value: ResultValue;
     minMaxMap?: Record<string, { min: number; max: number }>;
-    columnProperties?: Record<string, { displayStyle?: 'text' | 'bar' }>;
+    columnProperties?: Record<
+        string,
+        {
+            displayStyle?: 'text' | 'bar';
+            color?: string;
+            negativeColor?: string;
+        }
+    >;
     barLabelMaxMap?: Record<string, string>;
     item?: any;
 }): CellContext<ResultRow, { value: ResultValue }> => {
@@ -272,6 +279,63 @@ describe('getFormattedValueCell - Bar Chart Display', () => {
         expect(barElement).toBeTruthy();
         // Anchored at the right edge (right: 0%), growing leftward
         expect(barElement?.getAttribute('style') || '').toContain('right: 0%');
+    });
+
+    test('diverging: negative bars use negativeColor when set (PROD-8704)', () => {
+        const context = createMockCellContext({
+            columnId: 'revenue',
+            value: {
+                raw: -25,
+                formatted: '-$25',
+            },
+            minMaxMap: {
+                revenue: { min: -100, max: 100 },
+            },
+            columnProperties: {
+                revenue: {
+                    displayStyle: 'bar',
+                    color: '#5470c6',
+                    negativeColor: '#e03131',
+                },
+            },
+        });
+
+        const result = getFormattedValueCell(context);
+        const { container } = renderWithMantine(result as React.ReactElement);
+
+        // The negative bar (anchored at the zero line via right:) uses negativeColor.
+        // Mantine renders the bg hex as rgb: #e03131 -> rgb(224, 49, 49).
+        const negativeBar = container.querySelector('div[style*="right: 50%"]');
+        expect(negativeBar).toBeTruthy();
+        expect(negativeBar?.getAttribute('style') || '').toContain(
+            'rgb(224, 49, 49)',
+        );
+    });
+
+    test('diverging: negative bars fall back to positive color when negativeColor unset (PROD-8704)', () => {
+        const context = createMockCellContext({
+            columnId: 'revenue',
+            value: {
+                raw: -25,
+                formatted: '-$25',
+            },
+            minMaxMap: {
+                revenue: { min: -100, max: 100 },
+            },
+            columnProperties: {
+                revenue: { displayStyle: 'bar', color: '#5470c6' },
+            },
+        });
+
+        const result = getFormattedValueCell(context);
+        const { container } = renderWithMantine(result as React.ReactElement);
+
+        // Falls back to the positive color: #5470c6 -> rgb(84, 112, 198).
+        const negativeBar = container.querySelector('div[style*="right: 50%"]');
+        expect(negativeBar).toBeTruthy();
+        expect(negativeBar?.getAttribute('style') || '').toContain(
+            'rgb(84, 112, 198)',
+        );
     });
 
     test('should not render bar for zero', () => {

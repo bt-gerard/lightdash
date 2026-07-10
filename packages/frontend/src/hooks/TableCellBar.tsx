@@ -10,6 +10,8 @@ type TableCellBarProps = {
     min: number;
     max: number;
     color?: string;
+    // Color for negative bars in diverging mode; falls back to `color` when unset.
+    negativeColor?: string;
 };
 
 const BAR_HEIGHT = '20px';
@@ -26,8 +28,11 @@ export const TableCellBar = ({
     min,
     max,
     color = DEFAULT_BAR_COLOR,
+    negativeColor,
 }: TableCellBarProps) => {
     const range = max - min;
+    // Negative bars use their own color when set, otherwise match positives.
+    const negativeBarColor = negativeColor ?? color;
 
     // Diverging mode only kicks in when the column contains negative values.
     // Positive-only columns keep the original left-anchored bar unchanged.
@@ -101,7 +106,7 @@ export const TableCellBar = ({
                 {value < 0 && (
                     <Box
                         h={BAR_HEIGHT}
-                        bg={color}
+                        bg={negativeBarColor}
                         miw={MIN_BAR_WIDTH}
                         style={{
                             position: 'absolute',
