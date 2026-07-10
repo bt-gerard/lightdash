@@ -1,6 +1,7 @@
 import {
     APP_SDK_DATA_APP_VIZ_CONTEXT_MESSAGE,
     APP_SDK_VIZ_CONTEXT_REQUEST_MESSAGE,
+    isAllowedAppSdkRoute,
     JWT_HEADER_NAME,
     LightdashAppUuidHeader,
     type DataAppVizContext,
@@ -99,52 +100,10 @@ export type ExternalRequestEvent = {
     error: string | null;
 };
 
-/**
- * Routes the SDK is allowed to call through the postMessage bridge.
- * Everything else is rejected. Patterns use :param for path segments.
- */
-const ALLOWED_ROUTES: Array<{ method: string; pattern: RegExp }> = [
-    // Async metric query execution
-    {
-        method: 'POST',
-        pattern: /^\/api\/v2\/projects\/[^/]+\/query\/metric-query$/,
-    },
-    // Run a saved chart live by UUID (linked charts)
-    {
-        method: 'POST',
-        pattern: /^\/api\/v2\/projects\/[^/]+\/query\/chart$/,
-    },
-    // Run underlying-data queries for SDK result rows
-    {
-        method: 'POST',
-        pattern: /^\/api\/v2\/projects\/[^/]+\/query\/underlying-data$/,
-    },
-    // Poll for query results
-    {
-        method: 'GET',
-        pattern: /^\/api\/v2\/projects\/[^/]+\/query\/[^/]+$/,
-    },
-    // Schedule backend CSV/XLSX export jobs for SDK query results
-    {
-        method: 'POST',
-        pattern:
-            /^\/api\/v2\/projects\/[^/]+\/query\/[^/]+\/schedule-download$/,
-    },
-    // Poll export job status until the backend returns a file URL
-    {
-        method: 'GET',
-        pattern: /^\/api\/v1\/schedulers\/job\/[^/]+\/status$/,
-    },
-    // Get current user
-    { method: 'GET', pattern: /^\/api\/v1\/user$/ },
-];
-
-function isAllowedRoute(method: string, path: string): boolean {
-    return ALLOWED_ROUTES.some(
-        (route) =>
-            route.method === method.toUpperCase() && route.pattern.test(path),
-    );
-}
+// Routes the SDK is allowed to call through the postMessage bridge live in
+// @lightdash/common (APP_SDK_ALLOWED_ROUTES) — shared with the CLI preview
+// proxy so preview and deployed authority can't drift. Everything else is
+// rejected.
 
 const isMetricQueryPost = (method: string, path: string): boolean =>
     method.toUpperCase() === 'POST' &&
@@ -570,7 +529,7 @@ export function useAppSdkBridge({
                 );
             };
 
-            if (!isAllowedRoute(method, path)) {
+            if (!isAllowedAppSdkRoute(method, path)) {
                 respond({ error: `Blocked: ${method} ${path}` });
                 return;
             }
