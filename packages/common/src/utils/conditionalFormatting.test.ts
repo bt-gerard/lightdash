@@ -243,6 +243,73 @@ describe('hasMatchingConditionalRules', () => {
                 ),
             ).toBe(false);
         });
+
+        it('should not match null values', () => {
+            expect(
+                hasMatchingConditionalRules(
+                    mockNumericField,
+                    null,
+                    {},
+                    colorRangeConfig,
+                ),
+            ).toBe(false);
+        });
+
+        it('should not match undefined values', () => {
+            expect(
+                hasMatchingConditionalRules(
+                    mockNumericField,
+                    undefined,
+                    {},
+                    colorRangeConfig,
+                ),
+            ).toBe(false);
+        });
+
+        it('should not match empty string values', () => {
+            expect(
+                hasMatchingConditionalRules(
+                    mockNumericField,
+                    '',
+                    {},
+                    colorRangeConfig,
+                ),
+            ).toBe(false);
+        });
+
+        it('should not match null/empty even with out-of-range matching enabled', () => {
+            expect(
+                hasMatchingConditionalRules(
+                    mockNumericField,
+                    null,
+                    {},
+                    colorRangeConfig,
+                    undefined,
+                    { matchOutOfRangeValues: true },
+                ),
+            ).toBe(false);
+            expect(
+                hasMatchingConditionalRules(
+                    mockNumericField,
+                    '',
+                    {},
+                    colorRangeConfig,
+                    undefined,
+                    { matchOutOfRangeValues: true },
+                ),
+            ).toBe(false);
+        });
+
+        it('should match numeric strings', () => {
+            expect(
+                hasMatchingConditionalRules(
+                    mockNumericField,
+                    '500',
+                    {},
+                    colorRangeConfig,
+                ),
+            ).toBe(true);
+        });
     });
 });
 
@@ -364,6 +431,52 @@ describe('getConditionalFormattingConfig', () => {
                     },
                 ]),
             ).toBeUndefined();
+        });
+
+        it('does not fall back to a color range rule for null values', () => {
+            expect(
+                getConditionalFormattingConfig({
+                    field: mockNumericField,
+                    value: null,
+                    minMaxMap: {},
+                    conditionalFormattings: [lowRange],
+                }),
+            ).toBeUndefined();
+        });
+
+        it('does not fall back to a color range rule for empty string values', () => {
+            expect(
+                getConditionalFormattingConfig({
+                    field: mockNumericField,
+                    value: '',
+                    minMaxMap: {},
+                    conditionalFormattings: [lowRange],
+                }),
+            ).toBeUndefined();
+        });
+
+        it('prefers a single-color NULL rule over a color range rule for null values', () => {
+            const nullRule = {
+                target: null,
+                color: '#00ff00',
+                rules: [
+                    {
+                        id: 'null-1',
+                        operator: FilterOperator.NULL,
+                        values: [],
+                    },
+                ],
+            };
+            // NULL rule listed first, color range second: the range must not
+            // shadow the NULL rule for null values.
+            expect(
+                getConditionalFormattingConfig({
+                    field: mockNumericField,
+                    value: null,
+                    minMaxMap: {},
+                    conditionalFormattings: [nullRule, lowRange],
+                }),
+            ).toBe(nullRule);
         });
 
         it('respects applyTo when falling back', () => {

@@ -2094,4 +2094,73 @@ describe('ExcelService conditional formatting in xlsx export (PROD-8199)', () =>
             fgColor: { argb: 'FFFF0000' },
         });
     });
+
+    it('applies the single-color NULL rule instead of a color-range rule for null cells', async () => {
+        // Second (non-null) column so the row is actually written — exceljs'
+        // streaming writer drops rows whose only cell is null.
+        const labelField = {
+            fieldType: FieldType.DIMENSION,
+            type: DimensionType.STRING,
+            name: 'status',
+            table: 'orders',
+            tableLabel: 'Orders',
+            label: 'Status',
+            sql: '',
+            hidden: false,
+        } as ItemsMap[string];
+        const labelFieldId = getItemId(labelField);
+        const twoFields: ItemsMap = {
+            [fieldId]: numericField,
+            [labelFieldId]: labelField,
+        };
+
+        const nullConfig = createConditionalFormattingConfigWithSingleColor(
+            '#00ff00',
+            { fieldId },
+        );
+        nullConfig.rules = [
+            {
+                id: 'is-null',
+                operator: FilterOperator.NULL,
+                values: [],
+            },
+        ];
+
+        // Color-range rule targeting the same field, listed last so it would
+        // shadow the NULL rule if null were wrongly treated as a numeric 0.
+        const colorRangeConfig = {
+            target: { fieldId },
+            color: { start: '#ffffff', end: '#ff0000' },
+            rule: { min: 0, max: 100 },
+        };
+
+        const tempFilePath = path.join(
+            os.tmpdir(),
+            `excel-cf-null-test-${process.pid}.xlsx`,
+        );
+        await streamJsonlToExcelFile(
+            Readable.from([
+                JSON.stringify({ [fieldId]: null, [labelFieldId]: 'shipped' }),
+            ]),
+            tempFilePath,
+            ['Orders count', 'Status'],
+            twoFields,
+            false,
+            [fieldId, labelFieldId],
+            undefined,
+            [nullConfig, colorRangeConfig as unknown as typeof nullConfig],
+            {},
+        );
+        const workbook = new (await import('exceljs')).Workbook();
+        await workbook.xlsx.readFile(tempFilePath);
+        const worksheet = workbook.getWorksheet('Sheet1');
+        fs.unlinkSync(tempFilePath);
+
+        const cell = worksheet!.getRow(2).getCell(1);
+        expect(cell.fill).toMatchObject({
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FF00FF00' },
+        });
+    });
 });

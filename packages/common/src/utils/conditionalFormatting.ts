@@ -491,6 +491,10 @@ export const hasMatchingConditionalRules = (
     }
 
     if (isConditionalFormattingConfigWithColorRange(config)) {
+        // Null/undefined/empty-string are non-numeric and must not match a
+        // color range rule — otherwise Number(null)/Number('') coerce to 0 and
+        // wrongly saturate blank cells, shadowing single-color NULL rules.
+        if (value === null || value === undefined || value === '') return false;
         if (typeof convertedValue !== 'number' || Number.isNaN(convertedValue))
             return false;
 
@@ -709,7 +713,8 @@ export const getConditionalFormattingColorWithColorRange = ({
         return undefined;
     }
 
-    if (typeof convertedValue !== 'number') return undefined;
+    if (typeof convertedValue !== 'number' || Number.isNaN(convertedValue))
+        return undefined;
 
     let min: number;
     let max: number;
