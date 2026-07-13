@@ -39,6 +39,7 @@ import FieldLabel from '../../../components/common/Filters/FieldLabel';
 import MantineIcon from '../../../components/common/MantineIcon';
 import useDashboardTileStatusContext from '../../../providers/Dashboard/useDashboardTileStatusContext';
 import { DEFAULT_TAB, FilterActions, FilterTabs } from './constants';
+import classes from './FilterConfiguration.module.css';
 import FilterCoverageSummary from './FilterCoverageSummary';
 import FilterFieldSelect from './FilterFieldSelect';
 import FilterSettings from './FilterSettings';
@@ -381,8 +382,15 @@ const FilterConfiguration: FC<Props> = ({
         ? 'A locked, required filter must have a value'
         : 'Filter field and value required';
 
+    const inlinePopoverProps = {
+        ...popoverProps,
+        withinPortal: false,
+    };
+
     return (
-        <Stack>
+        // Keep dropdowns in document flow so the panel grows and Apply stays
+        // reachable — PROD-2395.
+        <Stack className={classes.inlineDropdowns}>
             <Tabs
                 value={selectedTabId}
                 onChange={(tabId) => {
@@ -432,7 +440,7 @@ const FilterConfiguration: FC<Props> = ({
                                     activeTabUuid={activeTabUuid}
                                     selectedField={selectedField}
                                     onChange={handleChangeField}
-                                    popoverProps={popoverProps}
+                                    popoverProps={inlinePopoverProps}
                                 />
                             ) : (
                                 <Select
@@ -503,7 +511,7 @@ const FilterConfiguration: FC<Props> = ({
                                 field={selectedField}
                                 filterRule={draftFilterRule}
                                 onChangeFilterRule={handleChangeFilterRule}
-                                popoverProps={popoverProps}
+                                popoverProps={inlinePopoverProps}
                             />
                         )}
 
@@ -534,7 +542,7 @@ const FilterConfiguration: FC<Props> = ({
                             field={selectedField}
                             tabs={tabs}
                             filterRule={draftFilterRule}
-                            popoverProps={popoverProps}
+                            popoverProps={inlinePopoverProps}
                             tiles={tiles}
                             availableTileFilters={availableTileFilters}
                             onChange={handleChangeTileConfiguration}
