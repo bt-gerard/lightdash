@@ -6,10 +6,11 @@ import {
     Anchor,
     CopyButton,
     Stack,
+    TagsInput,
 } from '@mantine-8/core';
-import { MultiSelect, PasswordInput, Tooltip } from '@mantine/core';
+import { PasswordInput, Tooltip } from '@mantine/core';
 import { IconCheck, IconCopy, IconInfoCircle } from '@tabler/icons-react';
-import React, { useCallback, useState, type FC } from 'react';
+import { type FC } from 'react';
 import useApp from '../../../providers/App/useApp';
 import MantineIcon from '../../common/MantineIcon';
 import DocumentationHelpButton from '../../DocumentationHelpButton';
@@ -22,11 +23,6 @@ const DbtCloudForm: FC<{ disabled: boolean }> = ({ disabled }) => {
     const { savedProject } = useProjectFormContext();
     const requireSecrets: boolean =
         savedProject?.dbtConnection.type !== DbtProjectType.DBT_CLOUD_IDE;
-
-    const [search, setSearch] = useState('');
-    const handleResetSearch = useCallback(() => {
-        setTimeout(() => setSearch(() => ''), 0);
-    }, [setSearch]);
 
     const form = useFormContext();
 
@@ -165,7 +161,7 @@ const DbtCloudForm: FC<{ disabled: boolean }> = ({ disabled }) => {
                 placeholder="https://metadata.cloud.getdbt.com/graphql"
                 disabled={disabled}
             />
-            <MultiSelect
+            <TagsInput
                 name="dbt.tags"
                 {...form.getInputProps('dbt.tags')}
                 {...dbtTagsField}
@@ -177,40 +173,10 @@ const DbtCloudForm: FC<{ disabled: boolean }> = ({ disabled }) => {
                     </p>
                 }
                 placeholder="e.g lightdash, prod"
-                searchable
-                searchValue={search}
-                onSearchChange={setSearch}
                 clearable
-                creatable
-                clearSearchOnChange
+                acceptValueOnBlur={false}
+                splitChars={[]}
                 data={dbtTagsField.value || []}
-                getCreateLabel={(query) => `+ Add ${query}`}
-                onCreate={(query) => {
-                    form.insertListItem('dbt.tags', query);
-                    return query;
-                }}
-                onKeyDown={(event: React.KeyboardEvent<HTMLInputElement>) => {
-                    if (
-                        event.key === 'Enter' &&
-                        event.currentTarget.value.trim()
-                    ) {
-                        event.preventDefault(); // Prevent form submission
-                        if (
-                            !dbtTagsField.value.includes(
-                                event.currentTarget.value.trim(),
-                            )
-                        ) {
-                            form.insertListItem(
-                                'dbt.tags',
-                                event.currentTarget.value.trim(),
-                            );
-                            handleResetSearch();
-                        }
-                    }
-                }}
-                onDropdownClose={() => {
-                    handleResetSearch();
-                }}
             />
         </Stack>
     );

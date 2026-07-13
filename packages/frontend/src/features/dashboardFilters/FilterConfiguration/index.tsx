@@ -39,7 +39,6 @@ import FieldLabel from '../../../components/common/Filters/FieldLabel';
 import MantineIcon from '../../../components/common/MantineIcon';
 import useDashboardTileStatusContext from '../../../providers/Dashboard/useDashboardTileStatusContext';
 import { DEFAULT_TAB, FilterActions, FilterTabs } from './constants';
-import classes from './FilterConfiguration.module.css';
 import FilterCoverageSummary from './FilterCoverageSummary';
 import FilterFieldSelect from './FilterFieldSelect';
 import FilterSettings from './FilterSettings';
@@ -383,9 +382,7 @@ const FilterConfiguration: FC<Props> = ({
         : 'Filter field and value required';
 
     return (
-        // Make inline dropdowns flow in the panel (instead of absolute), so the
-        // panel grows with them and Apply stays visible — PROD-2395 sketch.
-        <Stack className={classes.inlineDropdowns}>
+        <Stack>
             <Tabs
                 value={selectedTabId}
                 onChange={(tabId) => {
