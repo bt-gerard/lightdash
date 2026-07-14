@@ -637,10 +637,16 @@ describe('Date tests', () => {
 
         cy.findAllByText('Loading chart').should('have.length', 0);
 
-        const checkDatetime = ($value, sqlFilter) => {
+        const checkDatetime = (
+            $value: JQuery<HTMLElement>,
+            sqlFilter: string,
+        ) => {
             const now = dayjs();
             const aSecondBefore = dayjs().subtract(1, 'seconds'); // Fix millisecond race condition
-            const dateString = $value?.val();
+            const dateString = $value.val();
+            if (typeof dateString !== 'string') {
+                throw new Error('Expected datetime input to contain a string');
+            }
             const inputDatetimeFormat = 'YYYY-MM-DD, HH:mm:ss:000';
             const expectedDatetimes = [
                 now.format(inputDatetimeFormat),

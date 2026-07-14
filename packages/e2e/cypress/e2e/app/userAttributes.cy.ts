@@ -1,4 +1,4 @@
-import { SEED_PROJECT } from '@lightdash/common';
+import { SEED_PROJECT, type UserAttribute } from '@lightdash/common';
 
 const apiUrl = '/api/v1';
 
@@ -11,7 +11,7 @@ describe('User attributes sql_filter', () => {
         cy.request(`${apiUrl}/org/attributes`).then((resp) => {
             expect(resp.status).to.eq(200);
             const customerIdAttr = resp.body.results.find(
-                (attr) => attr.name === 'customer_id',
+                (attr: UserAttribute) => attr.name === 'customer_id',
             );
             if (customerIdAttr)
                 cy.request({
@@ -122,7 +122,7 @@ describe('User attributes dimension required_attribute', () => {
         cy.request(`${apiUrl}/org/attributes`).then((resp) => {
             expect(resp.status).to.eq(200);
             const customerIdAttr = resp.body.results.find(
-                (attr) => attr.name === 'is_admin',
+                (attr: UserAttribute) => attr.name === 'is_admin',
             );
             if (customerIdAttr)
                 cy.request({

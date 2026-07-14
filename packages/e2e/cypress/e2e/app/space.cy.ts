@@ -1,5 +1,10 @@
 /* eslint-disable no-restricted-syntax */
-import { SEED_PROJECT, SPACE_TREE_1, SPACE_TREE_2 } from '@lightdash/common';
+import {
+    SEED_PROJECT,
+    SPACE_TREE_1,
+    SPACE_TREE_2,
+    type ApiSpaceSummaryListResponse,
+} from '@lightdash/common';
 
 const apiUrl = '/api/v1';
 
@@ -103,7 +108,7 @@ describe('Space', () => {
 
         // We assume the previous test has been run and the private space has been created
         // If this is causing issues, try reusing the `createPrivateChart` from spacePermissions.cy.ts
-        cy.request({
+        cy.request<ApiSpaceSummaryListResponse>({
             url: `${apiUrl}/projects/${SEED_PROJECT.project_uuid}/spaces`,
             failOnStatusCode: false,
         }).then((resp) => {
@@ -111,10 +116,13 @@ describe('Space', () => {
             const privateSpace = resp.body.results.find(
                 (space) =>
                     space.name.toLowerCase().startsWith('private space') &&
-                    space.chartCount !== '0' &&
-                    space.dashboardCount !== '0',
+                    space.chartCount !== 0 &&
+                    space.dashboardCount !== 0,
             ); // Get a private space with charts and dashboards
             expect(privateSpace).to.not.eq(undefined);
+            if (privateSpace === undefined) {
+                throw new Error('Expected private space to exist');
+            }
 
             cy.request({
                 url: `${apiUrl}/projects/${SEED_PROJECT.project_uuid}/spaces/${privateSpace.uuid}`,

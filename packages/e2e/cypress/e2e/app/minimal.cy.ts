@@ -1,4 +1,9 @@
-import { SCREENSHOT_READY_INDICATOR_ID, SEED_PROJECT } from '@lightdash/common';
+import {
+    SCREENSHOT_READY_INDICATOR_ID,
+    SEED_PROJECT,
+    type ApiChartSummaryListResponse,
+    type ApiGetDashboardsResponse,
+} from '@lightdash/common';
 
 const apiUrl = '/api/v1';
 
@@ -7,7 +12,7 @@ describe('Minimal pages', () => {
         cy.login();
     });
     it('I can view a minimal chart', () => {
-        cy.request(
+        cy.request<ApiChartSummaryListResponse>(
             `${apiUrl}/projects/${SEED_PROJECT.project_uuid}/charts`,
         ).then((projectResponse) => {
             const savedChart = projectResponse.body.results.find(
@@ -15,6 +20,9 @@ describe('Minimal pages', () => {
                     s.name ===
                     'How much revenue do we have per payment method?',
             );
+            if (savedChart === undefined) {
+                throw new Error('Expected minimal chart to exist');
+            }
 
             cy.visit(
                 `/minimal/projects/${SEED_PROJECT.project_uuid}/saved/${savedChart.uuid}`,
@@ -27,7 +35,7 @@ describe('Minimal pages', () => {
     });
 
     it('I can view a minimal table', () => {
-        cy.request(
+        cy.request<ApiChartSummaryListResponse>(
             `${apiUrl}/projects/${SEED_PROJECT.project_uuid}/charts`,
         ).then((projectResponse) => {
             const savedChart = projectResponse.body.results.find(
@@ -35,6 +43,9 @@ describe('Minimal pages', () => {
                     s.name ===
                     'Which customers have not recently ordered an item?',
             );
+            if (savedChart === undefined) {
+                throw new Error('Expected minimal table to exist');
+            }
 
             cy.visit(
                 `/minimal/projects/${SEED_PROJECT.project_uuid}/saved/${savedChart.uuid}`,
@@ -48,12 +59,15 @@ describe('Minimal pages', () => {
     });
 
     it('I can view a minimal big number', () => {
-        cy.request(
+        cy.request<ApiChartSummaryListResponse>(
             `${apiUrl}/projects/${SEED_PROJECT.project_uuid}/charts`,
         ).then((projectResponse) => {
             const savedChart = projectResponse.body.results.find(
                 (s) => s.name === `What's our total revenue to date?`,
             );
+            if (savedChart === undefined) {
+                throw new Error('Expected minimal big number to exist');
+            }
 
             cy.visit(
                 `/minimal/projects/${SEED_PROJECT.project_uuid}/saved/${savedChart.uuid}`,
@@ -67,12 +81,15 @@ describe('Minimal pages', () => {
         });
     });
     it('I can view a minimal dashboard', () => {
-        cy.request(
+        cy.request<ApiGetDashboardsResponse>(
             `${apiUrl}/projects/${SEED_PROJECT.project_uuid}/dashboards`,
         ).then((projectResponse) => {
             const dashboard = projectResponse.body.results.find(
                 (s) => s.name === `Jaffle dashboard`,
             );
+            if (dashboard === undefined) {
+                throw new Error('Expected minimal dashboard to exist');
+            }
 
             cy.visit(
                 `/minimal/projects/${SEED_PROJECT.project_uuid}/dashboards/${dashboard.uuid}`,
