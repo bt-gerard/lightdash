@@ -116,8 +116,8 @@ describe('Space', () => {
             const privateSpace = resp.body.results.find(
                 (space) =>
                     space.name.toLowerCase().startsWith('private space') &&
-                    space.chartCount !== 0 &&
-                    space.dashboardCount !== 0,
+                    Number(space.chartCount) > 0 &&
+                    Number(space.dashboardCount) > 0,
             ); // Get a private space with charts and dashboards
             expect(privateSpace).to.not.eq(undefined);
             if (privateSpace === undefined) {

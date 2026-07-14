@@ -1,8 +1,7 @@
 import { defineConfig } from 'cypress';
 import cypressSplit from 'cypress-split';
 import { readdirSync, readFileSync, unlinkSync } from 'fs';
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { load: loadYaml } = require('js-yaml');
+import { load as loadYaml } from 'js-yaml';
 import { join } from 'path';
 
 // If running natively, we want to use environment variables from the host machine
