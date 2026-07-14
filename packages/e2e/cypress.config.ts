@@ -1,3 +1,4 @@
+import createBundler from '@bahmutov/cypress-esbuild-preprocessor';
 import { defineConfig } from 'cypress';
 import cypressSplit from 'cypress-split';
 import { readdirSync, readFileSync, unlinkSync } from 'fs';
@@ -34,6 +35,8 @@ export default defineConfig({
         trashAssetsBeforeRuns: true,
         experimentalMemoryManagement: true,
         setupNodeEvents(on, config) {
+            on('file:preprocessor', createBundler());
+
             // Count dbt models and read thread count so CLI tests can
             // scale timeouts dynamically based on parallel execution.
             const demoDir = join(

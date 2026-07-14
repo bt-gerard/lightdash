@@ -10,6 +10,7 @@
         "cypress:run": "cypress run",
         "linter": "eslint -c .eslintrc.js --ignore-path ./../../.gitignore",
         "formatter": "oxfmt",
+        "typecheck": "tsc --project tsconfig.json --noEmit",
         "lint": "pnpm run linter ./cypress",
         "fix-lint": "pnpm run linter ./cypress --fix",
         "format": "oxfmt ./cypress --check",
@@ -24,7 +25,9 @@
         "js-yaml": "4.3.0"
     },
     "devDependencies": {
+        "@bahmutov/cypress-esbuild-preprocessor": "2.2.8",
         "@types/js-yaml": "4.0.9",
+        "esbuild": "0.27.7",
         "typescript": "7.0.2"
     }
 }

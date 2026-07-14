@@ -989,9 +989,15 @@ importers:
         specifier: 4.3.0
         version: 4.3.0
     devDependencies:
+      '@bahmutov/cypress-esbuild-preprocessor':
+        specifier: 2.2.8
+        version: 2.2.8(esbuild@0.27.7)
       '@types/js-yaml':
         specifier: 4.0.9
         version: 4.0.9
+      esbuild:
+        specifier: 0.27.7
+        version: 0.27.7
       typescript:
         specifier: 7.0.2
         version: 7.0.2
@@ -2998,6 +3004,11 @@ packages:
   '@babel/types@7.29.0':
     resolution: {integrity: sha512-LwdZHpScM4Qz8Xw2iKSzS+cfglZzJGvofQICy7W7v4caru4EaAmyUuO6BGrbyQ2mYV11W0U8j5mBhd14dd3B0A==}
     engines: {node: '>=6.9.0'}
+
+  '@bahmutov/cypress-esbuild-preprocessor@2.2.8':
+    resolution: {integrity: sha512-pN90es4T1DYcQbBuDEpa7yotC/VhE+BgfHIEGpS0uxibTIqt7g4ZITQZbTFcaQATZh3QmPIMMkeZyBE7PWf1LA==}
+    peerDependencies:
+      esbuild: '>=0.17.0'
 
   '@balena/dockerignore@1.0.2':
     resolution: {integrity: sha512-wMue2Sy4GAVTk6Ic4tJVcnfdau+gx2EnG7S+uAEe+TWJFqE4YoWN4/H8MSLj4eYJKxGg26lZwboEniNiNwZQ6Q==}
@@ -19362,6 +19373,13 @@ snapshots:
     dependencies:
       '@babel/helper-string-parser': 7.27.1
       '@babel/helper-validator-identifier': 7.28.5
+
+  '@bahmutov/cypress-esbuild-preprocessor@2.2.8(esbuild@0.27.7)':
+    dependencies:
+      debug: 4.4.3(supports-color@9.1.0)
+      esbuild: 0.27.7
+    transitivePeerDependencies:
+      - supports-color
 
   '@balena/dockerignore@1.0.2': {}
 
