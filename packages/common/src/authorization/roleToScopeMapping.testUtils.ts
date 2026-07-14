@@ -85,7 +85,9 @@ export const extractRolePermissions = (
         rules: ability.rules.map((rule) => ({
             action: rule.action as string,
             subject: rule.subject as string,
-            conditions: rule.conditions,
+            conditions: rule.conditions
+                ? structuredClone<unknown>(rule.conditions)
+                : undefined,
             inverted: rule.inverted,
             reason: rule.reason,
         })),
