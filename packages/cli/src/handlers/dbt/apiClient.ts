@@ -142,7 +142,7 @@ export const getContentAsCodeUploadPermissions = async (
 
     if (
         ability.cannot(
-            'manage',
+            'create',
             subject('ContentAsCode', {
                 organizationUuid: project.organizationUuid,
                 projectUuid: project.projectUuid,
@@ -153,7 +153,7 @@ export const getContentAsCodeUploadPermissions = async (
         )
     ) {
         throw new ForbiddenError(
-            `You don't have permission to upload content as code to project "${project.name}". The manage:ContentAsCode permission is required.`,
+            `You don't have permission to upload content as code to project "${project.name}". The create:ContentAsCode permission is required.`,
         );
     }
 
