@@ -1,6 +1,8 @@
 # Fork image build — see FORK.md. Bump _LOD_SUFFIX on each release.
 steps:
   - name: 'gcr.io/cloud-builders/docker'
+    env:
+      - 'DOCKER_BUILDKIT=1'
     args:
       - build
       - '-f'
