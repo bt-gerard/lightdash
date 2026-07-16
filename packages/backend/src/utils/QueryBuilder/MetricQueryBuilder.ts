@@ -54,6 +54,7 @@ import {
     MetricQuery,
     MetricType,
     naiveTimestampRebaseAdapters,
+    ParameterError,
     parseAllReferences,
     parseTableCalculationFunctions,
     PivotConfiguration,
@@ -87,6 +88,13 @@ import {
     compileMetricQuery,
     compilePostCalculationMetric,
 } from '../../queryCompiler';
+// FORK: LOD
+import {
+    buildLodCteParts,
+    groupLodMetrics,
+    isLodMetricsEnabled,
+    type LodGroup,
+} from './lodCtes';
 import { reportMalformedFilterValues } from './malformedFilterValueReporter';
 import {
     safeReplaceParametersWithTypes,
@@ -1679,6 +1687,62 @@ export class MetricQueryBuilder {
         });
     }
 
+    // FORK: LOD
+    private lodActiveMetricIdsCache: Set<string> | undefined;
+
+    // FORK: LOD
+    private lodGroupsCache: LodGroup[] | undefined;
+
+    // FORK: LOD — LOD metrics whose ignored dims intersect this query's
+    // selected dims. Grouping itself lives in lodCtes.ts.
+    private getLodActiveMetricIds(): Set<string> {
+        if (this.lodActiveMetricIdsCache) return this.lodActiveMetricIdsCache;
+        if (!isLodMetricsEnabled()) {
+            this.lodActiveMetricIdsCache = new Set();
+            return this.lodActiveMetricIdsCache;
+        }
+        const groups = this.getLodGroups();
+        this.lodActiveMetricIdsCache = new Set(
+            groups.flatMap((g) => g.metricIds),
+        );
+        return this.lodActiveMetricIdsCache;
+    }
+
+    // FORK: LOD
+    private getLodGroups(): LodGroup[] {
+        if (this.lodGroupsCache) return this.lodGroupsCache;
+        const adapterType = this.args.warehouseSqlBuilder.getAdapterType();
+        const startOfWeek = this.args.warehouseSqlBuilder.getStartOfWeek();
+        const selectedDimensions = this.args.compiledMetricQuery.dimensions
+            .map((dimId) => {
+                try {
+                    return getDimensionFromId({
+                        dimId,
+                        dimensions: this.exploreDimensions,
+                        dimensionsWithoutAccess:
+                            this.exploreDimensionsWithoutAccess,
+                        adapterType,
+                        startOfWeek,
+                        timezone: this.timezoneForDateTrunc,
+                        columnTimezone: this.columnTimezone,
+                    });
+                } catch {
+                    return null;
+                }
+            })
+            .filter((d): d is CompiledDimension => d !== null);
+        this.lodGroupsCache = groupLodMetrics({
+            selectedDimensions,
+            metrics: this.getSelectedAndReferencedMetricIds().map(
+                (metricId) => ({
+                    metricId,
+                    metric: this.getMetricFromId(metricId),
+                }),
+            ),
+        });
+        return this.lodGroupsCache;
+    }
+
     /**
      * Returns the set of non-aggregate metric IDs whose SQL templates
      * reference at least one sum_distinct / average_distinct metric.
@@ -1896,6 +1960,14 @@ export class MetricQueryBuilder {
                 // Non-aggregate metrics referencing distinct metrics are
                 // handled in the dd CTE outer SELECT
                 if (nonAggReferencingDd.has(field)) {
+                    (metric.tablesReferences || [metric.table]).forEach(
+                        (table) => tables.add(table),
+                    );
+                    return;
+                }
+                // FORK: LOD — metrics computed at a coarser grain are built
+                // in their own CTE (lodCtes.ts) and joined back
+                if (this.getLodActiveMetricIds().has(field)) {
                     (metric.tablesReferences || [metric.table]).forEach(
                         (table) => tables.add(table),
                     );
@@ -5602,6 +5674,79 @@ export class MetricQueryBuilder {
                     `FROM nested_agg_results`,
                 ];
             }
+        }
+
+        // FORK: LOD — coarser-grain metric CTEs (see lodCtes.ts). LOD-active
+        // metrics are computed in their own CTE grouped by the surviving
+        // dimensions only, then joined back onto the full-grain base rows.
+        const lodGroups = isLodMetricsEnabled() ? this.getLodGroups() : [];
+        if (lodGroups.length > 0) {
+            // LOD cannot be combined with PoP or distinct metrics in the same
+            // query — those paths already rewrite finalSelectParts / metric
+            // references in ways that would conflict with the LOD join-back.
+            if (
+                this.popComparisonConfigs.length > 0 ||
+                ddMetricIds.length > 0
+            ) {
+                throw new ParameterError(
+                    'LOD metrics cannot be combined with period-over-period or distinct metrics in the same query',
+                );
+            }
+
+            const fieldQuoteChar =
+                this.args.warehouseSqlBuilder.getFieldQuoteChar();
+            const lodBaseCteName = 'lod_base';
+
+            // Defensive: every surviving dimension must have a select, and every
+            // LOD metric must resolve to a select. These are guaranteed upstream;
+            // fail loudly rather than emit malformed SQL.
+            const lodMetricSelects: Record<string, string> = {};
+            lodGroups.forEach((group) => {
+                group.survivingDimensionIds.forEach((dimId) => {
+                    if (!(dimId in dimensionsSQL.selects)) {
+                        throw new Error(
+                            `LOD: surviving dimension "${dimId}" has no dimension select`,
+                        );
+                    }
+                });
+                group.metricIds.forEach((metricId) => {
+                    const metric = this.getMetricFromId(metricId);
+                    lodMetricSelects[metricId] =
+                        `  ${this.getQueryTimeMetricSql(
+                            metricId,
+                            metric,
+                        )} AS ${fieldQuoteChar}${metricId}${fieldQuoteChar}`;
+                });
+            });
+
+            ctes.push(
+                MetricQueryBuilder.wrapAsCte(lodBaseCteName, finalSelectParts),
+            );
+            const lodParts = buildLodCteParts({
+                lodGroups,
+                dimensionSelects: dimensionsSQL.selects,
+                sqlFrom,
+                joinParts: [joins.joinSQL, ...dimensionsSQL.joins],
+                dimensionFiltersSQL: dimensionsSQL.filtersSQL,
+                metricSelects: lodMetricSelects,
+                baseCteName: lodBaseCteName,
+                fieldQuoteChar,
+                getNullSafeEqualJoinSql: (left, right) =>
+                    this.args.warehouseSqlBuilder.getNullSafeEqualJoinSql(
+                        left,
+                        right,
+                    ),
+            });
+            ctes.push(...lodParts.ctes);
+            finalSelectParts = [
+                `SELECT`,
+                [`  ${lodBaseCteName}.*`, ...lodParts.metricSelects].join(
+                    ',\n',
+                ),
+                `FROM ${lodBaseCteName}`,
+                ...lodParts.joins,
+            ];
+            requiresQueryInCTE = true;
         }
 
         const { simpleTableCalcs, interdependentTableCalcs } =
