@@ -1,7 +1,7 @@
 import {
+    convertModelMetric,
     SupportedDbtAdapter,
     type DbtModelNode,
-    convertModelMetric,
 } from '../types/dbt';
 import { InlineErrorType, type Explore } from '../types/explore';
 import {
@@ -2520,6 +2520,7 @@ describe('granularity_labels overrides', () => {
     });
 });
 
+// FORK: LOD
 describe('convertModelMetric ignore_dimensions', () => {
     it('copies ignore_dimensions through to the metric', () => {
         const metric = convertModelMetric({
