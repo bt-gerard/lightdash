@@ -46,7 +46,7 @@ Query grouped by `product_name` only, `pct = customers_purchasing / total_custom
 | Join-back / row set | Main query drives; LEFT JOIN LOD CTE on surviving dims, CROSS JOIN when none survive. No densification |
 | Time dimensions | Base dimension name in `ignore_dimensions` matches ALL its granularity variants; exact grain names also accepted |
 | Warehouse verification | BigQuery with real data (production warehouse); other dialects via snapshots; Postgres via local stack as second check |
-| Gating | Env var `LIGHTDASH_LOD_METRICS_ENABLED` via `lightdashConfig`, default ON in the fork image; kill switch without redeploy |
+| Gating | Env var `LIGHTDASH_LOD_METRICS_ENABLED` read directly from `process.env` in `lodCtes.ts` (not `lightdashConfig`), default ON in the fork image; kill switch without redeploy |
 | Fork CI | GCP Cloud Build trigger → Artifact Registry, images tagged `<upstream-version>-lod.<n>` |
 | Upstream syncs | Manual, on demand: merge upstream release tags (not main), run test suites, rebuild |
 | Upstream-PR readiness | Conventional commits, Lightdash code conventions, tests in their existing patterns, removable fork markers |
@@ -119,7 +119,7 @@ The main query's join tree and dimension-filter SQL are reused verbatim so the C
 
 **Totals:** inherited for free — `TotalQueryBuilder` re-compiles through `MetricQueryBuilder` at the totals grain, so LOD totals are computed by the same CTE logic with fewer dimensions (verified by test, not assumed).
 
-**Gating:** `LIGHTDASH_LOD_METRICS_ENABLED` (parsed in `parseConfig.ts` into `lightdashConfig`), default ON in the fork's deploy config. OFF → legacy behavior, byte-identical SQL to upstream (snapshot-asserted).
+**Gating:** `LIGHTDASH_LOD_METRICS_ENABLED` is read directly from `process.env` in `lodCtes.ts` (`isLodMetricsEnabled()`), not threaded through `parseConfig.ts`/`lightdashConfig` — a deliberate choice to keep the upstream diff smaller (no config-schema surface, one self-contained module). Default ON in the fork's deploy config. OFF → legacy behavior, byte-identical SQL to upstream (snapshot-asserted).
 
 ## Error handling & edge cases
 
@@ -139,10 +139,10 @@ The main query's join tree and dimension-filter SQL are reused verbatim so the C
 
 ## Fork setup & deployment
 
-- **Repo:** GitHub fork of `lightdash/lightdash` under the org. Local remotes: `origin` = fork, `upstream` = official. Fork `main` = deploy branch. Feature developed on a branch off the latest upstream **release tag**, merged to fork `main`.
+- **Repo:** GitHub fork of `lightdash/lightdash` under the org. Local remotes: `origin` = fork, `upstream` = official. `lod-metrics` = deploy branch. Feature developed on a branch off the latest upstream **release tag**, merged to `lod-metrics`.
 - **`FORK.md`** at repo root: list of files changed vs upstream, sync runbook, image/versioning convention.
-- **Build:** `cloudbuild.yaml` in the fork; Cloud Build trigger on push to `main` (plus manual runs) builds the root `dockerfile` and pushes to Artifact Registry, tagged `<upstream-version>-lod.<n>` and the git SHA. GCP resource creation (registry repo, trigger, Cloud Run repoint) requires project/region details and explicit confirmation at execution time.
-- **Deploy:** repoint the Cloud Run service to the Artifact Registry image with `LIGHTDASH_LOD_METRICS_ENABLED=true`. First deploy is an **unmodified** fork build to validate the pipeline; the feature image follows.
+- **Build:** `cloudbuild.yaml` in the fork; Cloud Build trigger on push to `lod-metrics` (plus manual runs) builds the root `dockerfile` and pushes to Artifact Registry, tagged `<upstream-version>-lod.<n>` and the git SHA. GCP resource creation (registry repo, trigger, Cloud Run repoint) requires project/region details and explicit confirmation at execution time.
+- **Deploy:** repoint the Cloud Run service **`lightdash-fork`** to the Artifact Registry image with `LIGHTDASH_LOD_METRICS_ENABLED=true`. First deploy is an **unmodified** fork build to validate the pipeline; the feature image follows.
 - **Sync runbook (manual, on demand):** `git fetch upstream` → merge the target release tag → resolve (expected conflict surface: the three marked insertion points) → run backend tests + both snapshot suites → build → deploy.
 
 ## Conventions (upstream-PR readiness)
