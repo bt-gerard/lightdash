@@ -92,6 +92,32 @@ const LOD_TEST_EXPLORE: Explore = {
                     tablesReferences: ['sales'],
                     hidden: false,
                 },
+                pct_customers_purchasing: {
+                    fieldType: FieldType.METRIC,
+                    type: MetricType.NUMBER,
+                    name: 'pct_customers_purchasing',
+                    table: 'sales',
+                    tableLabel: 'sales',
+                    label: 'pct',
+                    sql: '(${customers_purchasing} / ${total_customers}) * 100',
+                    compiledSql:
+                        '(SUM("sales".customers_purchasing) / SUM("sales".total_customers)) * 100',
+                    tablesReferences: ['sales'],
+                    hidden: false,
+                },
+                pct_distinct_over_total: {
+                    fieldType: FieldType.METRIC,
+                    type: MetricType.NUMBER,
+                    name: 'pct_distinct_over_total',
+                    table: 'sales',
+                    tableLabel: 'sales',
+                    label: 'pct distinct over total',
+                    sql: '(${distinct_customers} / ${total_customers}) * 100',
+                    compiledSql:
+                        '(SUM("sales".amount) / SUM("sales".total_customers)) * 100',
+                    tablesReferences: ['sales'],
+                    hidden: false,
+                },
             },
             lineageGraph: {},
         },
@@ -361,6 +387,52 @@ describe('MetricQueryBuilder snapshot: LOD queries (FORK: LOD)', () => {
             }),
         ).toThrow(
             'LOD metrics cannot be combined with period-over-period or distinct metrics in the same query',
+        );
+    });
+
+    // A non-aggregate metric (pct = a / b) that references an LOD metric must
+    // have its references rewritten to read the CTE columns in the outer
+    // SELECT, instead of inlining+re-aggregating in the main SELECT.
+    test('rewrites derived metric refs to CTE columns', () => {
+        const query = buildQuery({
+            explore: LOD_TEST_EXPLORE,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                dimensions: ['sales_product_name'],
+                metrics: [
+                    'sales_customers_purchasing',
+                    'sales_total_customers',
+                    'sales_pct_customers_purchasing',
+                ],
+            },
+        });
+        // pct must NOT be aggregated inline in the main select (before lod_base)
+        const mainSelect = query.slice(0, query.indexOf('lod_base'));
+        expect(mainSelect).not.toContain('sales_pct_customers_purchasing');
+        // outer select divides the base CTE column by the LOD CTE column
+        expect(query).toContain('lod_base."sales_customers_purchasing"');
+        expect(query).toContain('lod_1."sales_total_customers"');
+        expect(query).toMatchSnapshot();
+    });
+
+    // A metric referencing BOTH an LOD metric and a distinct metric would need
+    // to be rewritten against two conflicting CTE registries at once.
+    test('throws when derived metric references both LOD and distinct metrics', () => {
+        expect(() =>
+            buildQuery({
+                explore: LOD_TEST_EXPLORE,
+                compiledMetricQuery: {
+                    ...BASE_METRIC_QUERY,
+                    dimensions: ['sales_product_name'],
+                    metrics: [
+                        'sales_distinct_customers',
+                        'sales_total_customers',
+                        'sales_pct_distinct_over_total',
+                    ],
+                },
+            }),
+        ).toThrow(
+            'Metrics referencing both LOD and distinct metrics are not supported',
         );
     });
 

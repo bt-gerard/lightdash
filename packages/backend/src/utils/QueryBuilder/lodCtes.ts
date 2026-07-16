@@ -1,5 +1,7 @@
 import {
     getItemId,
+    isNonAggregateMetric,
+    parseAllReferences,
     type CompiledDimension,
     type CompiledMetric,
 } from '@lightdash/common';
@@ -63,6 +65,46 @@ export const groupLodMetrics = (params: {
         }
     });
     return Array.from(groupsByKey.values());
+};
+
+// Non-aggregate metrics (e.g. pct = a / b) whose SQL templates reference an
+// LOD metric, transitively (pct -> pct2 -> lod_metric). These must be computed
+// in the LOD outer SELECT with their refs rewritten to CTE columns, rather than
+// inlined and re-aggregated in the main SELECT (which would be wrong once the
+// LOD metric moves to its own coarser-grain CTE).
+export const getNonAggregateMetricsReferencingLod = (params: {
+    allMetrics: Array<[string, CompiledMetric]>;
+    lodMetricIds: Set<string>;
+}): Set<string> => {
+    const nonAggRefs = new Map<string, Set<string>>();
+    for (const [metricId, metric] of params.allMetrics) {
+        if (isNonAggregateMetric(metric)) {
+            const refIds = new Set<string>();
+            for (const ref of parseAllReferences(metric.sql, metric.table)) {
+                refIds.add(
+                    getItemId({ table: ref.refTable, name: ref.refName }),
+                );
+            }
+            nonAggRefs.set(metricId, refIds);
+        }
+    }
+    const result = new Set<string>();
+    let changed = true;
+    while (changed) {
+        changed = false;
+        for (const [metricId, refIds] of nonAggRefs) {
+            if (!result.has(metricId)) {
+                for (const refId of refIds) {
+                    if (params.lodMetricIds.has(refId) || result.has(refId)) {
+                        result.add(metricId);
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    return result;
 };
 
 export const buildLodCteParts = (params: {

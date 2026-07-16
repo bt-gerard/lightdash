@@ -1,7 +1,8 @@
-import { DimensionType, FieldType } from '@lightdash/common';
+import { DimensionType, FieldType, MetricType } from '@lightdash/common';
 import {
     buildLodCteParts,
     getIgnoredSelectedDimensionIds,
+    getNonAggregateMetricsReferencingLod,
     groupLodMetrics,
 } from './lodCtes';
 
@@ -173,5 +174,67 @@ describe('buildLodCteParts', () => {
         });
         expect(parts.ctes[0]).not.toContain('GROUP BY');
         expect(parts.joins).toEqual(['CROSS JOIN lod_1']);
+    });
+});
+
+describe('getNonAggregateMetricsReferencingLod', () => {
+    const totalMetricFixture = {
+        fieldType: FieldType.METRIC,
+        type: MetricType.SUM,
+        name: 'total',
+        table: 'sales',
+        tableLabel: 'sales',
+        label: 'total',
+        sql: '${TABLE}.total',
+        compiledSql: 'SUM("sales".total)',
+        tablesReferences: ['sales'],
+        hidden: false,
+    } as never;
+    const pctMetricFixture = {
+        fieldType: FieldType.METRIC,
+        type: MetricType.NUMBER,
+        name: 'pct',
+        table: 'sales',
+        tableLabel: 'sales',
+        label: 'pct',
+        sql: '${total} * 100',
+        compiledSql: 'SUM("sales".total) * 100',
+        tablesReferences: ['sales'],
+        hidden: false,
+    } as never;
+    const pct2MetricFixture = {
+        fieldType: FieldType.METRIC,
+        type: MetricType.NUMBER,
+        name: 'pct2',
+        table: 'sales',
+        tableLabel: 'sales',
+        label: 'pct2',
+        sql: '${pct} * 2',
+        compiledSql: 'SUM("sales".total) * 100 * 2',
+        tablesReferences: ['sales'],
+        hidden: false,
+    } as never;
+
+    it('finds direct and transitive non-aggregate referencers', () => {
+        const result = getNonAggregateMetricsReferencingLod({
+            allMetrics: [
+                ['sales_total', totalMetricFixture],
+                ['sales_pct', pctMetricFixture],
+                ['sales_pct2', pct2MetricFixture],
+            ],
+            lodMetricIds: new Set(['sales_total']),
+        });
+        expect(result).toEqual(new Set(['sales_pct', 'sales_pct2']));
+    });
+
+    it('is empty when no non-aggregate metric references an LOD metric', () => {
+        const result = getNonAggregateMetricsReferencingLod({
+            allMetrics: [
+                ['sales_total', totalMetricFixture],
+                ['sales_pct', pctMetricFixture],
+            ],
+            lodMetricIds: new Set(['sales_other']),
+        });
+        expect(result).toEqual(new Set());
     });
 });
