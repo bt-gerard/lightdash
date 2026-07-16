@@ -1,0 +1,22 @@
+# Fork image build — see FORK.md. Bump _LOD_SUFFIX on each release.
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - '-f'
+      - dockerfile
+      - '-t'
+      - '${_AR}/lightdash:${_UPSTREAM_TAG}-lod.${_LOD_SUFFIX}'
+      - '-t'
+      - '${_AR}/lightdash:${SHORT_SHA}'
+      - .
+images:
+  - '${_AR}/lightdash:${_UPSTREAM_TAG}-lod.${_LOD_SUFFIX}'
+  - '${_AR}/lightdash:${SHORT_SHA}'
+substitutions:
+  _AR: 'us-central1-docker.pkg.dev/${PROJECT_ID}/lightdash'
+  _UPSTREAM_TAG: '0.3388.0'
+  _LOD_SUFFIX: '1'
+options:
+  machineType: 'E2_HIGHCPU_32'
+timeout: '3600s'
