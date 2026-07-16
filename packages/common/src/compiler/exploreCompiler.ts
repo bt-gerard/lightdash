@@ -14,9 +14,9 @@ import {
     friendlyName,
     isCustomBinDimension,
     isNonAggregateMetric,
-    isNonAggregateMetricType,
+    isNonAggregateMetricType, // FORK: LOD
     isPostCalculationMetric,
-    isPostCalculationMetricType,
+    isPostCalculationMetricType, // FORK: LOD
     MetricType,
     type CompiledCustomDimension,
     type CompiledCustomSqlDimension,
@@ -88,8 +88,6 @@ type Reference = {
  *
  * Matches: sum(, count(, avg(, etc. with word boundary to avoid false positives
  * like "summary" matching "sum".
- * "merge" is included for warehouse sketch aggregations like
- * hll_count.merge(...) — FORK: LOD
  */
 // Diamond metric references repeat the same recorded filter predicate
 const uniqByFilterId = <T extends { id: string }>(filters: T[]): T[] =>
@@ -99,7 +97,13 @@ const uniqByFilterId = <T extends { id: string }>(filters: T[]): T[] =>
     );
 
 const SQL_AGGREGATION_FUNCTIONS_PATTERN =
-    /\b(sum|count_if|countif|count|avg|average|max_by|min_by|min|max|median|stddev|stddev_pop|stddev_samp|variance|var_pop|var_samp|percentile|percentile_cont|percentile_disc|count_distinct|approx_count_distinct|any_value|array_agg|string_agg|group_concat|listagg|corr|covar_pop|covar_samp|mode|approx_percentile|merge)\s*\(/i;
+    /\b(sum|count_if|countif|count|avg|average|max_by|min_by|min|max|median|stddev|stddev_pop|stddev_samp|variance|var_pop|var_samp|percentile|percentile_cont|percentile_disc|count_distinct|approx_count_distinct|any_value|array_agg|string_agg|group_concat|listagg|corr|covar_pop|covar_samp|mode|approx_percentile)\s*\(/i;
+
+/**
+ * Matches warehouse sketch merge aggregations like hll_count.merge(...).
+ * Scoped to LOD ignore_dimensions validation only — FORK: LOD
+ */
+const LOD_MERGE_AGGREGATION_PATTERN = /\bmerge\s*\(/i;
 
 /**
  * Check if the SQL contains any aggregation functions.
@@ -1424,9 +1428,14 @@ export class ExploreCompiler {
                     {},
                 );
             }
+            // FORK: LOD — treat SQL as aggregated if it contains a
+            // standard aggregation function OR a warehouse sketch merge
+            // call (e.g. hll_count.merge(...)), local to this check only
             const hasAggregationInMetricSql =
                 isNonAggregateMetric(metric) &&
-                sqlContainsAggregation(metric.sql);
+                (sqlContainsAggregation(metric.sql) ||
+                    (metric.sql != null &&
+                        LOD_MERGE_AGGREGATION_PATTERN.test(metric.sql)));
             if (
                 isPostCalculationMetricType(metric.type) ||
                 (isNonAggregateMetricType(metric.type) &&

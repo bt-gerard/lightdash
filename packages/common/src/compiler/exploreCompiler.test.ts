@@ -661,6 +661,20 @@ describe('compileMetric ignoreDimensions', () => {
         ).toThrowError(CompileError);
     });
 
+    it('allows a NUMBER metric with merge() aggregation in sql', () => {
+        const mergeMetric = {
+            ...validMetric,
+            type: MetricType.NUMBER,
+            sql: 'hll_count.merge(${TABLE}.number_column)',
+        };
+        const compiled = compiler.compileMetric(
+            { ...mergeMetric, ignoreDimensions: ['dim1'] },
+            tablesWithMetricsWithFilters,
+            [],
+        );
+        expect(compiled.compiledIgnoreDimensions).toEqual(['table1.dim1']);
+    });
+
     it('throws CompileError combined with sum_distinct', () => {
         const validSumDistinctMetric = {
             ...validMetric,
