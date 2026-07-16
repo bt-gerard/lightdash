@@ -1,5 +1,6 @@
 import { combineManifestSources } from '../dbt/manifest';
 import {
+    convertModelMetric,
     getCompiledModels,
     getModelInventoryFromManifest,
     getModelsFromManifest,
@@ -9,7 +10,6 @@ import {
     type DbtModelLightdashConfig,
     type DbtModelNode,
     type RESERVED_MODEL_META_KEYS,
-    convertModelMetric,
 } from '../types/dbt';
 import {
     getExploreSplitCandidates,
@@ -5891,6 +5891,7 @@ describe('model-level additional dimensions', () => {
     });
 });
 
+// FORK: LOD
 describe('convertModelMetric ignore_dimensions', () => {
     it('copies ignore_dimensions through to the metric', () => {
         const metric = convertModelMetric({
