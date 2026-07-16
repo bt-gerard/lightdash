@@ -1,5 +1,7 @@
 import {
+    CompiledCustomSqlDimension,
     CompiledMetricQuery,
+    CustomDimensionType,
     DimensionType,
     Explore,
     FieldType,
@@ -247,6 +249,20 @@ const LOD_FANOUT_EXPLORE: Explore = {
     },
 };
 
+// FORK: LOD — custom SQL dimension on the LOD test explore, used to prove
+// custom dimensions don't crash LOD dimension resolution (getDimensionFromId
+// throws for custom dimension ids since they aren't explore dimensions).
+const CUSTOM_SQL_DIMENSION: CompiledCustomSqlDimension = {
+    id: 'is_emea',
+    name: 'Is EMEA',
+    table: 'sales',
+    type: CustomDimensionType.SQL,
+    sql: "${sales.region} = 'EMEA'",
+    dimensionType: DimensionType.BOOLEAN,
+    compiledSql: '"sales".region = \'EMEA\'',
+    tablesReferences: ['sales'],
+};
+
 const BASE_METRIC_QUERY: CompiledMetricQuery = {
     exploreName: 'sales',
     dimensions: [],
@@ -450,5 +466,39 @@ describe('MetricQueryBuilder snapshot: LOD queries (FORK: LOD)', () => {
                 },
             }),
         ).toThrow('metric-inflating joins');
+    });
+
+    // FORK: LOD — regression coverage: with the flag on but no LOD-active
+    // metric selected, getLodGroups must bail out before it ever tries to
+    // resolve dimensions, so a custom dimension in the query doesn't crash it.
+    test('compiles a custom dimension query with no LOD metric selected', () => {
+        const query = buildQuery({
+            explore: LOD_TEST_EXPLORE,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                dimensions: ['sales_region', 'is_emea'],
+                metrics: ['sales_customers_purchasing'],
+                compiledCustomDimensions: [CUSTOM_SQL_DIMENSION],
+            },
+        });
+        expect(query).not.toContain('lod_');
+        expect(query).toMatchSnapshot();
+    });
+
+    // FORK: LOD — v1 doesn't support LOD metrics combined with custom
+    // dimensions (custom dimensions aren't explore dimensions, so LOD's
+    // grouping-by-surviving-dimensions logic can't reason about them).
+    test('throws when LOD metric is combined with a custom dimension', () => {
+        expect(() =>
+            buildQuery({
+                explore: LOD_TEST_EXPLORE,
+                compiledMetricQuery: {
+                    ...BASE_METRIC_QUERY,
+                    dimensions: ['sales_region', 'is_emea'],
+                    metrics: ['sales_total_customers'],
+                    compiledCustomDimensions: [CUSTOM_SQL_DIMENSION],
+                },
+            }),
+        ).toThrow('custom dimensions');
     });
 });

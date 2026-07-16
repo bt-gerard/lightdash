@@ -1712,29 +1712,60 @@ export class MetricQueryBuilder {
     // FORK: LOD
     private getLodGroups(): LodGroup[] {
         if (this.lodGroupsCache) return this.lodGroupsCache;
+
+        // FORK: LOD — bail out before resolving any dimensions when no
+        // selected/referenced metric declares ignoreDimensions. This keeps
+        // flag-on queries with no LOD metrics (e.g. custom dimension
+        // queries) completely untouched by LOD dimension resolution.
+        const candidateMetrics = this.getSelectedAndReferencedMetricIds().map(
+            (metricId) => ({
+                metricId,
+                metric: this.getMetricFromId(metricId),
+            }),
+        );
+        const hasLodCandidateMetric = candidateMetrics.some(
+            ({ metric }) =>
+                metric.compiledIgnoreDimensions &&
+                metric.compiledIgnoreDimensions.length > 0,
+        );
+        if (!hasLodCandidateMetric) {
+            this.lodGroupsCache = [];
+            return this.lodGroupsCache;
+        }
+
+        // FORK: LOD — custom dimensions don't live in explore dimensions
+        // (getDimensionFromId throws for them), and v1 doesn't support
+        // combining LOD metrics with custom dimensions. Fail loudly instead
+        // of silently producing wrong SQL.
+        const { compiledMetricQuery } = this.args;
+        const customDimensionIds = new Set(
+            compiledMetricQuery.compiledCustomDimensions.map((cd) => cd.id),
+        );
+        const hasSelectedCustomDimension = compiledMetricQuery.dimensions.some(
+            (dimId) => customDimensionIds.has(dimId),
+        );
+        if (hasSelectedCustomDimension) {
+            throw new ParameterError(
+                'LOD metrics cannot be combined with custom dimensions',
+            );
+        }
+
         const adapterType = this.args.warehouseSqlBuilder.getAdapterType();
         const startOfWeek = this.args.warehouseSqlBuilder.getStartOfWeek();
-        const selectedDimensions = this.args.compiledMetricQuery.dimensions.map(
-            (dimId) =>
-                getDimensionFromId({
-                    dimId,
-                    dimensions: this.exploreDimensions,
-                    dimensionsWithoutAccess:
-                        this.exploreDimensionsWithoutAccess,
-                    adapterType,
-                    startOfWeek,
-                    timezone: this.timezoneForDateTrunc,
-                    columnTimezone: this.columnTimezone,
-                }),
+        const selectedDimensions = compiledMetricQuery.dimensions.map((dimId) =>
+            getDimensionFromId({
+                dimId,
+                dimensions: this.exploreDimensions,
+                dimensionsWithoutAccess: this.exploreDimensionsWithoutAccess,
+                adapterType,
+                startOfWeek,
+                timezone: this.timezoneForDateTrunc,
+                columnTimezone: this.columnTimezone,
+            }),
         );
         this.lodGroupsCache = groupLodMetrics({
             selectedDimensions,
-            metrics: this.getSelectedAndReferencedMetricIds().map(
-                (metricId) => ({
-                    metricId,
-                    metric: this.getMetricFromId(metricId),
-                }),
-            ),
+            metrics: candidateMetrics,
         });
         return this.lodGroupsCache;
     }
