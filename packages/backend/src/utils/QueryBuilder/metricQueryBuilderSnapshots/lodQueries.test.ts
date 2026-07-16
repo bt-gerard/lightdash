@@ -4,6 +4,7 @@ import {
     Explore,
     FieldType,
     FilterOperator,
+    JoinRelationship,
     MetricType,
     SupportedDbtAdapter,
 } from '@lightdash/common';
@@ -89,6 +90,129 @@ const LOD_TEST_EXPLORE: Explore = {
                     compiledValueSql: '"sales".amount',
                     compiledDistinctKeys: ['"sales".sale_id'],
                     tablesReferences: ['sales'],
+                    hidden: false,
+                },
+            },
+            lineageGraph: {},
+        },
+    },
+};
+
+// Minimal inflating-join shape (primaryKey + one-to-many-ish join), mirroring
+// the fixture in fanoutQueries.test.ts (EXPLORE / METRIC_QUERY_TWO_TABLES),
+// but with an LOD metric (ignoreDimensions) added on the base table.
+const LOD_FANOUT_EXPLORE: Explore = {
+    targetDatabase: SupportedDbtAdapter.POSTGRES,
+    name: 'table1',
+    label: 'table1',
+    baseTable: 'table1',
+    tags: [],
+    joinedTables: [
+        {
+            table: 'table2',
+            sqlOn: '${table1.shared} = ${table2.shared}',
+            compiledSqlOn: '("table1".shared) = ("table2".shared)',
+            type: undefined,
+            tablesReferences: ['table1', 'table2'],
+            relationship: JoinRelationship.MANY_TO_ONE,
+        },
+    ],
+    tables: {
+        table1: {
+            name: 'table1',
+            label: 'table1',
+            database: 'database',
+            schema: 'schema',
+            sqlTable: '"db"."schema"."table1"',
+            primaryKey: ['dim1'],
+            dimensions: {
+                dim1: {
+                    type: DimensionType.NUMBER,
+                    name: 'dim1',
+                    label: 'dim1',
+                    table: 'table1',
+                    tableLabel: 'table1',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.dim1',
+                    compiledSql: '"table1".dim1',
+                    tablesReferences: ['table1'],
+                    hidden: false,
+                },
+                shared: {
+                    type: DimensionType.STRING,
+                    name: 'shared',
+                    label: 'shared',
+                    table: 'table1',
+                    tableLabel: 'table1',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.shared',
+                    compiledSql: '"table1".shared',
+                    tablesReferences: ['table1'],
+                    hidden: false,
+                },
+            },
+            metrics: {
+                metric1: {
+                    type: MetricType.MAX,
+                    fieldType: FieldType.METRIC,
+                    table: 'table1',
+                    tableLabel: 'table1',
+                    name: 'metric1',
+                    label: 'metric1',
+                    sql: '${TABLE}.number_column',
+                    compiledSql: 'MAX("table1".number_column)',
+                    tablesReferences: ['table1'],
+                    hidden: false,
+                    ignoreDimensions: ['dim1'],
+                    compiledIgnoreDimensions: ['table1.dim1'],
+                },
+            },
+            lineageGraph: {},
+        },
+        table2: {
+            name: 'table2',
+            label: 'table2',
+            database: 'database',
+            schema: 'schema',
+            sqlTable: '"db"."schema"."table2"',
+            primaryKey: ['dim2'],
+            dimensions: {
+                dim2: {
+                    type: DimensionType.NUMBER,
+                    name: 'dim2',
+                    label: 'dim2',
+                    table: 'table2',
+                    tableLabel: 'table2',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.dim2',
+                    compiledSql: '"table2".dim2',
+                    tablesReferences: ['table2'],
+                    hidden: false,
+                },
+                shared: {
+                    type: DimensionType.STRING,
+                    name: 'shared',
+                    label: 'shared',
+                    table: 'table2',
+                    tableLabel: 'table2',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.shared',
+                    compiledSql: '"table2".shared',
+                    tablesReferences: ['table2'],
+                    hidden: false,
+                },
+            },
+            metrics: {
+                metric3: {
+                    type: MetricType.SUM,
+                    fieldType: FieldType.METRIC,
+                    table: 'table2',
+                    tableLabel: 'table2',
+                    name: 'metric3',
+                    label: 'metric3',
+                    sql: '${TABLE}.number_column',
+                    compiledSql: 'SUM("table2".number_column)',
+                    tablesReferences: ['table2'],
                     hidden: false,
                 },
             },
@@ -238,5 +362,21 @@ describe('MetricQueryBuilder snapshot: LOD queries (FORK: LOD)', () => {
         ).toThrow(
             'LOD metrics cannot be combined with period-over-period or distinct metrics in the same query',
         );
+    });
+
+    // LOD metrics cannot be combined with the experimental fanout rewrite
+    // (metric-inflating joins) — that rewrite replaces finalSelectParts in a
+    // way that would conflict with the LOD join-back.
+    test('throws when LOD metric is combined with a metric-inflating join', () => {
+        expect(() =>
+            buildQuery({
+                explore: LOD_FANOUT_EXPLORE,
+                compiledMetricQuery: {
+                    ...BASE_METRIC_QUERY,
+                    dimensions: ['table1_dim1'],
+                    metrics: ['table1_metric1', 'table2_metric3'],
+                },
+            }),
+        ).toThrow('metric-inflating joins');
     });
 });
