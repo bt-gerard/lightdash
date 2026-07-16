@@ -1,0 +1,35 @@
+version: 2
+models:
+  - name: lod_sales
+    description: LOD metrics verification fixture (fork, ignore_dimensions)
+    config:
+      materialized: table
+      meta:
+        metrics:
+          customers_purchasing:
+            type: number
+            sql: "COUNT(DISTINCT CASE WHEN ${TABLE}.product_name IS NOT NULL THEN ${TABLE}.customer_id END)"
+          total_customers:
+            type: number
+            sql: "COUNT(DISTINCT ${TABLE}.customer_id)"
+            ignore_dimensions:
+              - product_name
+          pct_customers_purchasing:
+            type: number
+            sql: "ROUND((${customers_purchasing}::numeric / NULLIF(${total_customers}, 0)) * 100, 2)"
+    columns:
+      - name: customer_id
+        config:
+          meta:
+            dimension:
+              hidden: true
+      - name: region
+        config:
+          meta:
+            dimension:
+              type: string
+      - name: product_name
+        config:
+          meta:
+            dimension:
+              type: string
