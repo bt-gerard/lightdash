@@ -144,3 +144,41 @@ ORDER BY
 LIMIT
   500"
 `;
+
+exports[`MetricQueryBuilder snapshot: LOD queries (FORK: LOD) > rewrites derived metric refs to CTE columns 1`] = `
+"WITH
+  lod_base AS (
+    SELECT
+      "sales".product_name AS "sales_product_name",
+      SUM("sales".customers_purchasing) AS "sales_customers_purchasing"
+    FROM
+      "postgres"."jaffle"."sales" AS "sales"
+    GROUP BY
+      1
+  ),
+  lod_1 AS (
+    SELECT
+      SUM("sales".total_customers) AS "sales_total_customers"
+    FROM
+      "postgres"."jaffle"."sales" AS "sales"
+  ),
+  metrics AS (
+    SELECT
+      lod_base.*,
+      lod_1."sales_total_customers" AS "sales_total_customers",
+      (
+        lod_base."sales_customers_purchasing" / lod_1."sales_total_customers"
+      ) * 100 AS "sales_pct_customers_purchasing"
+    FROM
+      lod_base
+      CROSS JOIN lod_1
+  )
+SELECT
+  *
+FROM
+  metrics
+ORDER BY
+  "sales_customers_purchasing" DESC
+LIMIT
+  500"
+`;
