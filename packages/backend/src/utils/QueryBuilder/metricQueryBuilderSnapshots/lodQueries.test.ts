@@ -940,4 +940,46 @@ describe('MetricQueryBuilder snapshot: LOD queries (FORK: LOD)', () => {
         expect(query).not.toContain('lod_');
         expect(query).toMatchSnapshot();
     });
+
+    // Totals path (subtotal grain): unlike a grand total, TotalQueryBuilder's
+    // columnSubtotal retains a dimension subset (subtotalDimensions) instead
+    // of stripping all dimensions. Here the retained dimension (product_name)
+    // is itself in total_customers' ignore set, so LOD reactivates at the
+    // subtotal grain: all retained dims are ignored, so lod_1 has no GROUP BY
+    // and is merged back with a CROSS JOIN (same shape as the grand-total-CTE
+    // test above, but reached via a subtotal rather than a bare aggregate).
+    test('reactivates LOD at the columnSubtotal grain when the retained dimension is ignored', () => {
+        const sourceMetricQuery: MetricQuery = {
+            exploreName: 'sales',
+            dimensions: ['sales_product_name', 'sales_region'],
+            metrics: ['sales_customers_purchasing', 'sales_total_customers'],
+            filters: {},
+            sorts: [],
+            limit: 500,
+            tableCalculations: [],
+        };
+        const { metricQuery: totalsQuery } = new TotalQueryBuilder({
+            metricQuery: sourceMetricQuery,
+            pivotConfiguration: null,
+            kind: 'columnSubtotal',
+            subtotalDimensions: ['sales_product_name'],
+        }).compileQuery();
+
+        // Only the subtotal dimension survives — region is dropped.
+        expect(totalsQuery.dimensions).toEqual(['sales_product_name']);
+
+        const query = buildQuery({
+            explore: LOD_TEST_EXPLORE,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                ...totalsQuery,
+                compiledTableCalculations: [],
+                compiledAdditionalMetrics: [],
+                compiledCustomDimensions: [],
+            },
+        });
+        expect(query).toContain('lod_1 AS (');
+        expect(query).toContain('CROSS JOIN lod_1');
+        expect(query).toMatchSnapshot();
+    });
 });
