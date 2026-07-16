@@ -7,9 +7,12 @@ import {
     FieldType,
     FilterOperator,
     JoinRelationship,
+    MetricQuery,
     MetricType,
     SupportedDbtAdapter,
+    TimeFrames,
 } from '@lightdash/common';
+import { TotalQueryBuilder } from '../TotalQueryBuilder';
 import { buildQuery } from './helpers';
 
 const LOD_TEST_EXPLORE: Explore = {
@@ -51,6 +54,32 @@ const LOD_TEST_EXPLORE: Explore = {
                     compiledSql: '"sales".region',
                     tablesReferences: ['sales'],
                     hidden: false,
+                },
+                order_date: {
+                    type: DimensionType.DATE,
+                    name: 'order_date',
+                    label: 'order_date',
+                    table: 'sales',
+                    tableLabel: 'sales',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.order_date',
+                    compiledSql: '"sales".order_date',
+                    tablesReferences: ['sales'],
+                    hidden: false,
+                },
+                order_date_month: {
+                    type: DimensionType.DATE,
+                    name: 'order_date_month',
+                    label: 'order_date_month',
+                    table: 'sales',
+                    tableLabel: 'sales',
+                    fieldType: FieldType.DIMENSION,
+                    sql: "DATE_TRUNC('MONTH', ${TABLE}.order_date)",
+                    compiledSql: `DATE_TRUNC('MONTH', "sales".order_date)`,
+                    tablesReferences: ['sales'],
+                    hidden: false,
+                    timeInterval: TimeFrames.MONTH,
+                    timeIntervalBaseDimensionName: 'order_date',
                 },
             },
             metrics: {
@@ -120,7 +149,182 @@ const LOD_TEST_EXPLORE: Explore = {
                     tablesReferences: ['sales'],
                     hidden: false,
                 },
+                // Second LOD metric with a DIFFERENT ignore set (region), so a
+                // multi-group query yields lod_1 (surviving region) AND lod_2
+                // (surviving product_name).
+                total_by_product: {
+                    fieldType: FieldType.METRIC,
+                    type: MetricType.SUM,
+                    name: 'total_by_product',
+                    table: 'sales',
+                    tableLabel: 'sales',
+                    label: 'total by product',
+                    sql: '${TABLE}.total_customers',
+                    compiledSql: 'SUM("sales".total_customers)',
+                    tablesReferences: ['sales'],
+                    hidden: false,
+                    ignoreDimensions: ['region'],
+                    compiledIgnoreDimensions: ['sales.region'],
+                },
+                // LOD metric that ignores the base date dimension — used to
+                // prove time-grain matching (order_date_month is ignored via
+                // its timeIntervalBaseDimensionName).
+                customers_ignoring_date: {
+                    fieldType: FieldType.METRIC,
+                    type: MetricType.SUM,
+                    name: 'customers_ignoring_date',
+                    table: 'sales',
+                    tableLabel: 'sales',
+                    label: 'customers ignoring date',
+                    sql: '${TABLE}.total_customers',
+                    compiledSql: 'SUM("sales".total_customers)',
+                    tablesReferences: ['sales'],
+                    hidden: false,
+                    ignoreDimensions: ['order_date'],
+                    compiledIgnoreDimensions: ['sales.order_date'],
+                },
+                // Aggregate helper used by the nested-aggregate LOD metric.
+                max_amount: {
+                    fieldType: FieldType.METRIC,
+                    type: MetricType.MAX,
+                    name: 'max_amount',
+                    table: 'sales',
+                    tableLabel: 'sales',
+                    label: 'max amount',
+                    sql: '${TABLE}.amount',
+                    compiledSql: 'MAX("sales".amount)',
+                    tablesReferences: ['sales'],
+                    hidden: false,
+                },
+                // Nested-aggregate metric (SUM wraps the MAX ref) that is ALSO
+                // LOD-active — this overlap must be rejected.
+                lod_sum_of_max: {
+                    fieldType: FieldType.METRIC,
+                    type: MetricType.NUMBER,
+                    name: 'lod_sum_of_max',
+                    table: 'sales',
+                    tableLabel: 'sales',
+                    label: 'lod sum of max',
+                    sql: 'sum(${max_amount})',
+                    compiledSql: 'SUM(MAX("sales".amount))',
+                    tablesReferences: ['sales'],
+                    hidden: false,
+                    ignoreDimensions: ['product_name'],
+                    compiledIgnoreDimensions: ['sales.product_name'],
+                },
             },
+            lineageGraph: {},
+        },
+    },
+};
+
+// FORK: LOD — a NON-inflating (ONE_TO_ONE) joined explore. The join is
+// inflation-proof (findTablesWithInflationFromJoin returns nothing for
+// ONE_TO_ONE), so the experimental fanout rewrite never fires and the LOD
+// join-back renders — with the join threaded inside the lod_N CTE.
+const LOD_JOINED_EXPLORE: Explore = {
+    targetDatabase: SupportedDbtAdapter.POSTGRES,
+    name: 'orders',
+    label: 'orders',
+    baseTable: 'orders',
+    tags: [],
+    joinedTables: [
+        {
+            table: 'customers',
+            sqlOn: '${orders.customer_id} = ${customers.customer_id}',
+            compiledSqlOn: '("orders".customer_id) = ("customers".customer_id)',
+            type: undefined,
+            tablesReferences: ['orders', 'customers'],
+            relationship: JoinRelationship.ONE_TO_ONE,
+        },
+    ],
+    tables: {
+        orders: {
+            name: 'orders',
+            label: 'orders',
+            database: 'postgres',
+            schema: 'jaffle',
+            sqlTable: '"postgres"."jaffle"."orders"',
+            primaryKey: ['order_id'],
+            dimensions: {
+                order_id: {
+                    type: DimensionType.STRING,
+                    name: 'order_id',
+                    label: 'order_id',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.order_id',
+                    compiledSql: '"orders".order_id',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+                customer_id: {
+                    type: DimensionType.STRING,
+                    name: 'customer_id',
+                    label: 'customer_id',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.customer_id',
+                    compiledSql: '"orders".customer_id',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+            },
+            metrics: {
+                // LOD metric on the base table, ignoring the base-table dim.
+                total_amount: {
+                    fieldType: FieldType.METRIC,
+                    type: MetricType.SUM,
+                    name: 'total_amount',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    label: 'total amount',
+                    sql: '${TABLE}.amount',
+                    compiledSql: 'SUM("orders".amount)',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                    ignoreDimensions: ['order_id'],
+                    compiledIgnoreDimensions: ['orders.order_id'],
+                },
+            },
+            lineageGraph: {},
+        },
+        customers: {
+            name: 'customers',
+            label: 'customers',
+            database: 'postgres',
+            schema: 'jaffle',
+            sqlTable: '"postgres"."jaffle"."customers"',
+            primaryKey: ['customer_id'],
+            dimensions: {
+                customer_id: {
+                    type: DimensionType.STRING,
+                    name: 'customer_id',
+                    label: 'customer_id',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.customer_id',
+                    compiledSql: '"customers".customer_id',
+                    tablesReferences: ['customers'],
+                    hidden: false,
+                },
+                country: {
+                    type: DimensionType.STRING,
+                    name: 'country',
+                    label: 'country',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.country',
+                    compiledSql: '"customers".country',
+                    tablesReferences: ['customers'],
+                    hidden: false,
+                },
+            },
+            metrics: {},
             lineageGraph: {},
         },
     },
@@ -500,5 +704,240 @@ describe('MetricQueryBuilder snapshot: LOD queries (FORK: LOD)', () => {
                 },
             }),
         ).toThrow('custom dimensions');
+    });
+
+    // Sorting by an LOD metric orders by the outer alias fed from the lod_N
+    // join-back. The whole query must stay wrapped (ORDER BY in the outer
+    // SELECT), not pushed into the base CTE.
+    test('sorts by the LOD metric alias with the query wrapped', () => {
+        const query = buildQuery({
+            explore: LOD_TEST_EXPLORE,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                dimensions: ['sales_product_name', 'sales_region'],
+                metrics: [
+                    'sales_customers_purchasing',
+                    'sales_total_customers',
+                ],
+                sorts: [{ fieldId: 'sales_total_customers', descending: true }],
+            },
+        });
+        expect(query).toContain('ORDER BY');
+        // ORDER BY reads the outer alias, and appears AFTER the lod_1 CTE.
+        expect(query.indexOf('lod_1 AS (')).toBeLessThan(
+            query.indexOf('ORDER BY'),
+        );
+        expect(query.slice(query.indexOf('ORDER BY'))).toContain(
+            '"sales_total_customers"',
+        );
+        expect(query).toMatchSnapshot();
+    });
+
+    // A HAVING-style metric filter on an LOD metric must be applied AFTER the
+    // lod_base + lod_1 join-back (i.e. in the post-aggregation CTE), never
+    // inside lod_base itself.
+    test('applies a HAVING-style filter on the LOD metric after the join-back', () => {
+        const query = buildQuery({
+            explore: LOD_TEST_EXPLORE,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                dimensions: ['sales_product_name', 'sales_region'],
+                metrics: [
+                    'sales_customers_purchasing',
+                    'sales_total_customers',
+                ],
+                filters: {
+                    metrics: {
+                        id: 'root',
+                        and: [
+                            {
+                                id: 'gt-filter',
+                                target: { fieldId: 'sales_total_customers' },
+                                operator: FilterOperator.GREATER_THAN,
+                                values: [10],
+                            },
+                        ],
+                    },
+                },
+            },
+        });
+        // The metric predicate lands after lod_base (post-aggregation), not
+        // inside the lod_base CTE definition.
+        const predicate = '("sales_total_customers") > (10)';
+        const lodBaseCte = query.slice(
+            query.indexOf('lod_base AS ('),
+            query.indexOf('lod_1 AS ('),
+        );
+        expect(lodBaseCte).not.toContain(predicate);
+        expect(query).toContain(predicate);
+        expect(query.indexOf('LEFT JOIN lod_1')).toBeLessThan(
+            query.indexOf(predicate),
+        );
+        expect(query).toMatchSnapshot();
+    });
+
+    // Time-grain matching: ignoring the base date dim (sales.order_date) also
+    // ignores any selected grain of it (order_date_month), so the LOD CTE
+    // groups only by the surviving region dimension.
+    test('matches all grains of an ignored base time dimension', () => {
+        const query = buildQuery({
+            explore: LOD_TEST_EXPLORE,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                dimensions: ['sales_order_date_month', 'sales_region'],
+                metrics: ['sales_customers_ignoring_date'],
+            },
+        });
+        const lodCte = query.slice(
+            query.indexOf('lod_1 AS ('),
+            query.indexOf('metrics AS ('),
+        );
+        // lod_1 groups by region only — the month grain is ignored.
+        expect(lodCte).toContain('AS "sales_region"');
+        expect(lodCte).not.toContain('order_date');
+        expect(lodCte.replace(/\s+/g, ' ')).toContain('GROUP BY 1 )');
+        expect(query).toMatchSnapshot();
+    });
+
+    // Two LOD metrics with different ignore sets in one query produce two CTEs
+    // (lod_1, lod_2), each grouped by (and joined on) its own surviving dim.
+    test('builds one CTE per distinct surviving-dimension set', () => {
+        const query = buildQuery({
+            explore: LOD_TEST_EXPLORE,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                dimensions: ['sales_product_name', 'sales_region'],
+                metrics: ['sales_total_customers', 'sales_total_by_product'],
+            },
+        });
+        expect(query).toContain('lod_1 AS (');
+        expect(query).toContain('lod_2 AS (');
+        // total_customers ignores product_name → lod_1 survives region.
+        // total_by_product ignores region → lod_2 survives product_name.
+        const lod1 = query.slice(
+            query.indexOf('lod_1 AS ('),
+            query.indexOf('lod_2 AS ('),
+        );
+        expect(lod1).toContain('AS "sales_region"');
+        expect(lod1).not.toContain('AS "sales_product_name"');
+        // lod_2 (total_by_product ignores region) survives product_name only.
+        const lod2 = query.slice(
+            query.indexOf('lod_2 AS ('),
+            query.indexOf('metrics AS ('),
+        );
+        expect(lod2).toContain('AS "sales_product_name"');
+        expect(lod2).not.toContain('AS "sales_region"');
+        expect(query).toContain('LEFT JOIN lod_1 ON');
+        expect(query).toContain('LEFT JOIN lod_2 ON');
+        expect(query).toMatchSnapshot();
+    });
+
+    // A joined (non-inflating, ONE_TO_ONE) explore: the LOD metric on the base
+    // table ignores the base-table dim, so the surviving dim lives on the
+    // joined table. The join SQL must therefore render INSIDE the lod_1 CTE.
+    test('renders the join inside the LOD CTE on a joined explore', () => {
+        const query = buildQuery({
+            explore: LOD_JOINED_EXPLORE,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                exploreName: 'orders',
+                dimensions: ['orders_order_id', 'customers_country'],
+                metrics: ['orders_total_amount'],
+            },
+        });
+        const lodCte = query.slice(
+            query.indexOf('lod_1 AS ('),
+            query.indexOf('metrics AS ('),
+        );
+        // The join to customers is threaded into lod_1 so the surviving
+        // dimension (customers_country) is reachable.
+        expect(lodCte).toContain('"postgres"."jaffle"."customers"');
+        expect(lodCte).toContain('AS "customers_country"');
+        expect(query).toMatchSnapshot();
+    });
+
+    // A table calculation referencing an LOD metric reads the outer alias
+    // produced by the join-back (not a re-aggregation of the base column).
+    test('lets a table calculation read the LOD metric outer alias', () => {
+        const query = buildQuery({
+            explore: LOD_TEST_EXPLORE,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                dimensions: ['sales_product_name', 'sales_region'],
+                metrics: ['sales_total_customers'],
+                tableCalculations: [
+                    {
+                        name: 'double_total',
+                        displayName: 'Double total',
+                        sql: '${sales.total_customers} * 2',
+                    },
+                ],
+                compiledTableCalculations: [
+                    {
+                        name: 'double_total',
+                        displayName: 'Double total',
+                        sql: '${sales.total_customers} * 2',
+                        compiledSql: '"sales_total_customers" * 2',
+                        dependsOn: [],
+                    },
+                ],
+            },
+        });
+        expect(query).toContain('"sales_total_customers" * 2');
+        expect(query).toContain('"double_total"');
+        expect(query).toMatchSnapshot();
+    });
+
+    // FORK: LOD — a metric that is both a nested-aggregate outer metric and
+    // LOD-active would have to be built in two CTEs (na_base and lod_N) at
+    // once, so it is rejected.
+    test('throws when an LOD metric also nests an aggregate reference', () => {
+        expect(() =>
+            buildQuery({
+                explore: LOD_TEST_EXPLORE,
+                compiledMetricQuery: {
+                    ...BASE_METRIC_QUERY,
+                    dimensions: ['sales_product_name', 'sales_region'],
+                    metrics: ['sales_lod_sum_of_max'],
+                },
+            }),
+        ).toThrow('LOD metrics cannot use nested aggregate references');
+    });
+
+    // Totals path: a grand total goes through TotalQueryBuilder, which strips
+    // all dimensions. With no dimension selected there is nothing for the LOD
+    // metric to ignore, so LOD is correctly inert at the grand-total grain and
+    // the query is a plain aggregate (no lod_ CTE). See the report for why the
+    // brief's `CROSS JOIN lod_1` expectation cannot hold on a grand total.
+    test('reapplies LOD correctly at the grand-total grain (inert, no dims)', () => {
+        const sourceMetricQuery: MetricQuery = {
+            exploreName: 'sales',
+            dimensions: ['sales_product_name', 'sales_region'],
+            metrics: ['sales_customers_purchasing', 'sales_total_customers'],
+            filters: {},
+            sorts: [],
+            limit: 500,
+            tableCalculations: [],
+        };
+        const { metricQuery: totalsQuery } = new TotalQueryBuilder({
+            metricQuery: sourceMetricQuery,
+            pivotConfiguration: null,
+            kind: 'grandTotal',
+        }).compileQuery();
+
+        expect(totalsQuery.dimensions).toEqual([]);
+
+        const query = buildQuery({
+            explore: LOD_TEST_EXPLORE,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                ...totalsQuery,
+                compiledTableCalculations: [],
+                compiledAdditionalMetrics: [],
+                compiledCustomDimensions: [],
+            },
+        });
+        expect(query).not.toContain('lod_');
+        expect(query).toMatchSnapshot();
     });
 });
