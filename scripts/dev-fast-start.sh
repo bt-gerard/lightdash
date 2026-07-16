@@ -337,7 +337,13 @@ fi
 # return 404. Detect the conflicting listener now, before docker-compose runs
 # and hides which MinIO is actually being used.
 step "Check nothing else is using S3 port 9000"
-if command -v lsof >/dev/null 2>&1; then
+# If a docker container already publishes host port 9000, the listener lsof
+# sees is the engine's own forwarder (Rancher Desktop surfaces it as an
+# 'ssh [mux]' process, which the name allowlist below can't catch) — that IS
+# the expected MinIO, not a conflict.
+if docker ps --format '{{.Ports}}' 2>/dev/null | grep -Eq ':9000(-[0-9]+)?->'; then
+    echo "OK: port 9000 is published by a running docker container (MinIO)"
+elif command -v lsof >/dev/null 2>&1; then
     CONFLICT_PID=""; CONFLICT_CMD=""
     for _pid in $(lsof -nP -iTCP:9000 -sTCP:LISTEN -t 2>/dev/null | sort -u); do
         _cmd="$(ps -o comm= -p "$_pid" 2>/dev/null)"
@@ -475,11 +481,16 @@ else
         echo "Creating shared base snapshot for future instances..."
         docker compose -p "$LD_COMPOSE_PROJECT" -f "$INSTANCE_COMPOSE" stop db-dev >/dev/null 2>&1
         docker volume create "$SHARED_BASE_VOLUME" >/dev/null
-        docker run --rm \
+        if ! docker run --rm \
             -v "${LD_VOLUME_PREFIX}_postgres_data:/source:ro" \
             -v "${SHARED_BASE_VOLUME}:/snapshot" \
-            alpine sh -c "cd /source && tar cf - . | (cd /snapshot && tar xf -)" \
-            || fail "shared-base" "failed to create shared base snapshot"
+            alpine sh -c "cd /source && tar cf - . | (cd /snapshot && tar xf -)"; then
+            # never leave the DB stopped (the API crash-loops against it), and
+            # never leave a half-written base volume for future runs to trust
+            docker compose -p "$LD_COMPOSE_PROJECT" -f "$INSTANCE_COMPOSE" start db-dev >/dev/null 2>&1
+            docker volume rm "$SHARED_BASE_VOLUME" >/dev/null 2>&1
+            fail "shared-base" "failed to create shared base snapshot (db restarted, partial volume removed)"
+        fi
         docker compose -p "$LD_COMPOSE_PROJECT" -f "$INSTANCE_COMPOSE" start db-dev >/dev/null 2>&1
         for _ in $(seq 1 30); do docker exec "$DB_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
     fi
