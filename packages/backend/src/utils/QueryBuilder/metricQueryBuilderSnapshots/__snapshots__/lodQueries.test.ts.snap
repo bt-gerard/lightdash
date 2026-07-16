@@ -362,6 +362,41 @@ LIMIT
   500"
 `;
 
+exports[`MetricQueryBuilder snapshot: LOD queries (FORK: LOD) > reactivates LOD at the columnSubtotal grain when the retained dimension is ignored 1`] = `
+"WITH
+  lod_base AS (
+    SELECT
+      "sales".product_name AS "sales_product_name",
+      SUM("sales".customers_purchasing) AS "sales_customers_purchasing"
+    FROM
+      "postgres"."jaffle"."sales" AS "sales"
+    GROUP BY
+      1
+  ),
+  lod_1 AS (
+    SELECT
+      SUM("sales".total_customers) AS "sales_total_customers"
+    FROM
+      "postgres"."jaffle"."sales" AS "sales"
+  ),
+  metrics AS (
+    SELECT
+      lod_base.*,
+      lod_1."sales_total_customers" AS "sales_total_customers"
+    FROM
+      lod_base
+      CROSS JOIN lod_1
+  )
+SELECT
+  *
+FROM
+  metrics
+ORDER BY
+  "sales_customers_purchasing" DESC
+LIMIT
+  500"
+`;
+
 exports[`MetricQueryBuilder snapshot: LOD queries (FORK: LOD) > reapplies LOD correctly at the grand-total grain (inert, no dims) 1`] = `
 "SELECT
   SUM("sales".customers_purchasing) AS "sales_customers_purchasing",
