@@ -91,6 +91,7 @@ import {
 // FORK: LOD
 import {
     buildLodCteParts,
+    getNonAggregateMetricsReferencingLod,
     groupLodMetrics,
     isLodMetricsEnabled,
     type LodGroup,
@@ -1738,6 +1739,49 @@ export class MetricQueryBuilder {
         return this.lodGroupsCache;
     }
 
+    // FORK: LOD
+    private nonAggMetricsReferencingLodCache: Set<string> | undefined;
+
+    // FORK: LOD — non-aggregate metrics (e.g. pct = a / b) whose SQL
+    // references an LOD-active metric, transitively. These are computed in the
+    // LOD outer SELECT with refs rewritten to CTE columns instead of being
+    // inlined and re-aggregated in the main SELECT.
+    private getNonAggMetricsReferencingLod(): Set<string> {
+        if (this.nonAggMetricsReferencingLodCache) {
+            return this.nonAggMetricsReferencingLodCache;
+        }
+        const lodMetricIds = this.getLodActiveMetricIds();
+        if (lodMetricIds.size === 0) {
+            this.nonAggMetricsReferencingLodCache = new Set();
+            return this.nonAggMetricsReferencingLodCache;
+        }
+        const allMetrics: Array<[string, CompiledMetric]> = [];
+        for (const metricId of this.getSelectedAndReferencedMetricIds()) {
+            try {
+                allMetrics.push([metricId, this.getMetricFromId(metricId)]);
+            } catch {
+                // skip
+            }
+        }
+        const result = getNonAggregateMetricsReferencingLod({
+            allMetrics,
+            lodMetricIds,
+        });
+        // Guard: a metric referencing BOTH an LOD metric and a distinct metric
+        // would need to be rewritten against two conflicting CTE registries.
+        const nonAggReferencingDd =
+            this.getNonAggregateMetricsReferencingDistinct();
+        for (const metricId of result) {
+            if (nonAggReferencingDd.has(metricId)) {
+                throw new ParameterError(
+                    'Metrics referencing both LOD and distinct metrics are not supported',
+                );
+            }
+        }
+        this.nonAggMetricsReferencingLodCache = result;
+        return this.nonAggMetricsReferencingLodCache;
+    }
+
     /**
      * Returns the set of non-aggregate metric IDs whose SQL templates
      * reference at least one sum_distinct / average_distinct metric.
@@ -1929,6 +1973,9 @@ export class MetricQueryBuilder {
         // can be rewritten to point at the deduplication CTE aliases.
         const nonAggReferencingDd =
             this.getNonAggregateMetricsReferencingDistinct();
+        // FORK: LOD — evaluated up-front (not lazily inside the loop) so its
+        // LOD+distinct guard fires here, before the LOD block's generic guard.
+        const nonAggReferencingLod = this.getNonAggMetricsReferencingLod();
 
         metrics.forEach((field) => {
             try {
@@ -1963,6 +2010,15 @@ export class MetricQueryBuilder {
                 // FORK: LOD — metrics computed at a coarser grain are built
                 // in their own CTE (lodCtes.ts) and joined back
                 if (this.getLodActiveMetricIds().has(field)) {
+                    (metric.tablesReferences || [metric.table]).forEach(
+                        (table) => tables.add(table),
+                    );
+                    return;
+                }
+                // FORK: LOD — non-aggregate metrics referencing LOD metrics
+                // are computed in the LOD outer SELECT so their refs resolve to
+                // CTE columns instead of being re-aggregated inline.
+                if (nonAggReferencingLod.has(field)) {
                     (metric.tablesReferences || [metric.table]).forEach(
                         (table) => tables.add(table),
                     );
@@ -5767,11 +5823,50 @@ export class MetricQueryBuilder {
                     ),
             });
             ctes.push(...lodParts.ctes);
+
+            // FORK: LOD — non-aggregate metrics that reference LOD metrics are
+            // rewritten so their refs read the CTE columns (lod_base for the
+            // full-grain metrics/dimensions, lod_N for LOD metrics) instead of
+            // inlining+re-aggregating in the outer SELECT.
+            const lodMetricIdSet = new Set(
+                lodGroups.flatMap((group) => group.metricIds),
+            );
+            const nonAggReferencingLod = this.getNonAggMetricsReferencingLod();
+            const lodCteRegistry: Array<{ name: string; metrics: string[] }> = [
+                // lod_base FIRST: phase-1 ${TABLE}.column rewrites in
+                // replaceMetricReferencesWithCteReferences use metricCtes[0].
+                {
+                    name: lodBaseCteName,
+                    metrics: this.getSelectedAndReferencedMetricIds().filter(
+                        (id) =>
+                            !lodMetricIdSet.has(id) &&
+                            !nonAggReferencingLod.has(id),
+                    ),
+                },
+                ...lodGroups.map((group) => ({
+                    name: group.cteName,
+                    metrics: group.metricIds,
+                })),
+            ];
+            const derivedSelects = Array.from(nonAggReferencingLod).map(
+                (metricId) => {
+                    const derivedMetric = this.getMetricFromId(metricId);
+                    const rewritten =
+                        this.replaceMetricReferencesWithCteReferences(
+                            derivedMetric,
+                            lodCteRegistry,
+                        );
+                    return `  ${rewritten} AS ${fieldQuoteChar}${metricId}${fieldQuoteChar}`;
+                },
+            );
+
             finalSelectParts = [
                 `SELECT`,
-                [`  ${lodBaseCteName}.*`, ...lodParts.metricSelects].join(
-                    ',\n',
-                ),
+                [
+                    `  ${lodBaseCteName}.*`,
+                    ...lodParts.metricSelects,
+                    ...derivedSelects,
+                ].join(',\n'),
                 `FROM ${lodBaseCteName}`,
                 ...lodParts.joins,
             ];
