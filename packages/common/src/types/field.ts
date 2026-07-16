@@ -830,6 +830,7 @@ type CompiledProperties = {
     compilationError?: FieldCompilationError;
     compiledValueSql?: string; // raw value expression before aggregation (for sum_distinct CTE)
     compiledDistinctKeys?: string[]; // compiled SQL for distinct keys (sum_distinct only)
+    compiledIgnoreDimensions?: string[]; // FORK: LOD — resolved 'table.name' refs
     // Metric-only: compile-time SQL for each metric filter that uses a relative
     // date operator (inThePast/inTheNext/...). The query builder re-evaluates
     // these boundaries at query time by swapping the stored predicate for a
@@ -1029,6 +1030,7 @@ export interface Metric extends Field {
     filters?: MetricFilterRule[];
     percentile?: number;
     distinctKeys?: string[]; // dimension references for sum_distinct deduplication key
+    ignoreDimensions?: string[]; // FORK: LOD — dimension refs excluded from this metric's grain
     formatOptions?: CustomFormat;
     dimensionReference?: string; // field id of the dimension this metric is based on
     // Temporal base of a MIN/MAX metric over a single DATE/TIMESTAMP dimension,

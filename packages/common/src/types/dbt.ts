@@ -311,6 +311,9 @@ export type DbtColumnLightdashMetric = {
     filters?: { [key: string]: AnyType }[];
     percentile?: number;
     distinct_keys?: string | string[]; // dimension references for sum_distinct deduplication key
+    // FORK: LOD — dimensions this metric is computed WITHOUT grouping by
+    // (EXCLUDE semantics; 'name' or 'table.name' refs). See FORK-DESIGN.md.
+    ignore_dimensions?: string[];
     default_time_dimension?: DefaultTimeDimension;
     spotlight?: {
         visibility?: NonNullable<
@@ -714,6 +717,10 @@ export const convertModelMetric = ({
                       ? metric.distinct_keys
                       : [metric.distinct_keys],
               }
+            : {}),
+        // FORK: LOD
+        ...(metric.ignore_dimensions
+            ? { ignoreDimensions: metric.ignore_dimensions }
             : {}),
         dimensionReference,
         ...getMinMaxBaseDimensionMetadata(

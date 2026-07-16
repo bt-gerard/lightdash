@@ -1,4 +1,8 @@
-import { SupportedDbtAdapter, type DbtModelNode } from '../types/dbt';
+import {
+    SupportedDbtAdapter,
+    type DbtModelNode,
+    convertModelMetric,
+} from '../types/dbt';
 import { InlineErrorType, type Explore } from '../types/explore';
 import {
     DimensionType,
@@ -2513,5 +2517,36 @@ describe('granularity_labels overrides', () => {
             expect(dims.created_week.timeIntervalLabel).toBeUndefined();
             expect(explore.granularityLabels).toBeUndefined();
         }
+    });
+});
+
+describe('convertModelMetric ignore_dimensions', () => {
+    it('copies ignore_dimensions through to the metric', () => {
+        const metric = convertModelMetric({
+            modelName: 'sales',
+            name: 'total_customers',
+            metric: {
+                type: MetricType.NUMBER,
+                sql: 'hll_count.merge(${TABLE}.total_customers)',
+                ignore_dimensions: ['product_name', 'regions.region'],
+            },
+            source: undefined,
+            tableLabel: 'Sales',
+        });
+        expect(metric.ignoreDimensions).toEqual([
+            'product_name',
+            'regions.region',
+        ]);
+    });
+
+    it('leaves ignoreDimensions undefined when absent', () => {
+        const metric = convertModelMetric({
+            modelName: 'sales',
+            name: 'revenue',
+            metric: { type: MetricType.SUM, sql: '${TABLE}.amount' },
+            source: undefined,
+            tableLabel: 'Sales',
+        });
+        expect(metric.ignoreDimensions).toBeUndefined();
     });
 });
