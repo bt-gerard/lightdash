@@ -72,7 +72,7 @@ releasing. Deploys to the Cloud Run service **`lightdash-fork`**
 `LIGHTDASH_LOD_METRICS_ENABLED=true` and the `lod_sales` fixture model
 (12 customers: 10 North / 2 South; purchases: A←n1,n2,n3,s1; B←n4,n5):
 
-- Grouped by `product_name`: A → 4/12 = 33.33% ✓, B → 4/**12** = 16.67% ✓
+- Grouped by `product_name`: A → 4/12 = 33.33% ✓, B → 2/**12** = 16.67% ✓
   (upstream computes B as 2/10 = 20% — the bug in lightdash#16181).
 - Grouped by `product_name` + `region`: A/North 3/10 = 30% ✓,
   A/South 1/2 = 50% ✓, B/North 2/10 = 20% ✓.
