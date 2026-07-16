@@ -426,6 +426,13 @@
                         }
                     ]
                 },
+                "ignore_dimensions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "Dimensions this metric is computed WITHOUT grouping by (LOD EXCLUDE semantics). Accepts 'dimension_name' or 'table.dimension_name'."
+                },
                 "tags": {
                     "$ref": "#/definitions/Tags"
                 },
