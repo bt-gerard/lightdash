@@ -8,15 +8,16 @@ steps:
       - '-t'
       - '${_AR}/lightdash:${_UPSTREAM_TAG}-lod.${_LOD_SUFFIX}'
       - '-t'
-      - '${_AR}/lightdash:${SHORT_SHA}'
+      - '${_AR}/lightdash:${_GIT_SHA}'
       - .
 images:
   - '${_AR}/lightdash:${_UPSTREAM_TAG}-lod.${_LOD_SUFFIX}'
-  - '${_AR}/lightdash:${SHORT_SHA}'
+  - '${_AR}/lightdash:${_GIT_SHA}'
 substitutions:
   _AR: 'us-central1-docker.pkg.dev/${PROJECT_ID}/lightdash'
   _UPSTREAM_TAG: '0.3388.0'
   _LOD_SUFFIX: '1'
+  _GIT_SHA: 'manual'  # trigger maps this to $SHORT_SHA; manual builds pass it
 options:
   machineType: 'E2_HIGHCPU_32'
 timeout: '3600s'
