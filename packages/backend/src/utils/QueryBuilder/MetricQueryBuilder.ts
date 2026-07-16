@@ -1734,9 +1734,12 @@ export class MetricQueryBuilder {
         }
 
         // FORK: LOD — custom dimensions don't live in explore dimensions
-        // (getDimensionFromId throws for them), and v1 doesn't support
-        // combining LOD metrics with custom dimensions. Fail loudly instead
-        // of silently producing wrong SQL.
+        // (getDimensionFromId throws for them). Partition the selection into
+        // custom-dimension ids and explore-dimension ids, and resolve/match LOD
+        // activity over the explore dimensions only. An LOD metric that merely
+        // declares ignore_dimensions but whose ignored dims don't intersect the
+        // selection is inert, so an inert LOD metric + custom dimension query
+        // must compile normally (metric at full grain, no lod_ CTE).
         const { compiledMetricQuery } = this.args;
         const customDimensionIds = new Set(
             compiledMetricQuery.compiledCustomDimensions.map((cd) => cd.id),
@@ -1744,15 +1747,13 @@ export class MetricQueryBuilder {
         const hasSelectedCustomDimension = compiledMetricQuery.dimensions.some(
             (dimId) => customDimensionIds.has(dimId),
         );
-        if (hasSelectedCustomDimension) {
-            throw new ParameterError(
-                'LOD metrics cannot be combined with custom dimensions',
-            );
-        }
+        const exploreDimensionIds = compiledMetricQuery.dimensions.filter(
+            (dimId) => !customDimensionIds.has(dimId),
+        );
 
         const adapterType = this.args.warehouseSqlBuilder.getAdapterType();
         const startOfWeek = this.args.warehouseSqlBuilder.getStartOfWeek();
-        const selectedDimensions = compiledMetricQuery.dimensions.map((dimId) =>
+        const selectedDimensions = exploreDimensionIds.map((dimId) =>
             getDimensionFromId({
                 dimId,
                 dimensions: this.exploreDimensions,
@@ -1763,10 +1764,25 @@ export class MetricQueryBuilder {
                 columnTimezone: this.columnTimezone,
             }),
         );
-        this.lodGroupsCache = groupLodMetrics({
+        const lodGroups = groupLodMetrics({
             selectedDimensions,
             metrics: candidateMetrics,
         });
+
+        // FORK: LOD — v1 doesn't support ACTIVE LOD metrics combined with custom
+        // dimensions: a custom dim in the row grain but absent from the LOD CTE
+        // would silently produce wrong numbers. Only throw when LOD actually
+        // activated (a group formed) and a custom dimension is selected.
+        if (lodGroups.length > 0 && hasSelectedCustomDimension) {
+            const lodMetricIds = lodGroups.flatMap((g) => g.metricIds);
+            throw new ParameterError(
+                `LOD metrics (${lodMetricIds.join(
+                    ', ',
+                )}) cannot be combined with custom dimensions`,
+            );
+        }
+
+        this.lodGroupsCache = lodGroups;
         return this.lodGroupsCache;
     }
 
@@ -1805,7 +1821,7 @@ export class MetricQueryBuilder {
         for (const metricId of result) {
             if (nonAggReferencingDd.has(metricId)) {
                 throw new ParameterError(
-                    'Metrics referencing both LOD and distinct metrics are not supported',
+                    `Metric (${metricId}) references both LOD and distinct metrics, which is not supported`,
                 );
             }
         }
@@ -5768,6 +5784,11 @@ export class MetricQueryBuilder {
         // dimensions only, then joined back onto the full-grain base rows.
         const lodGroups = isLodMetricsEnabled() ? this.getLodGroups() : [];
         if (lodGroups.length > 0) {
+            const lodMetricIds = new Set(
+                lodGroups.flatMap((group) => group.metricIds),
+            );
+            const lodMetricIdList = Array.from(lodMetricIds).join(', ');
+
             // LOD cannot be combined with PoP or distinct metrics in the same
             // query — those paths already rewrite finalSelectParts / metric
             // references in ways that would conflict with the LOD join-back.
@@ -5776,7 +5797,7 @@ export class MetricQueryBuilder {
                 ddMetricIds.length > 0
             ) {
                 throw new ParameterError(
-                    'LOD metrics cannot be combined with period-over-period or distinct metrics in the same query',
+                    `LOD metrics (${lodMetricIdList}) cannot be combined with period-over-period or distinct metrics in the same query`,
                 );
             }
 
@@ -5787,25 +5808,24 @@ export class MetricQueryBuilder {
             // inflated LOD values.
             if (experimentalFanoutApplied) {
                 throw new ParameterError(
-                    'LOD metrics are not supported on explores with metric-inflating joins yet',
+                    `LOD metrics (${lodMetricIdList}) are not supported on explores with metric-inflating joins yet`,
                 );
             }
 
             // FORK: LOD — a metric that is both a nested-aggregate outer
             // metric and LOD-active would need to be built in two different
             // CTEs (na_base and lod_N) at once.
-            const lodMetricIds = new Set(
-                lodGroups.flatMap((group) => group.metricIds),
-            );
             const nestedAggOuterMetricIds = new Set(
                 nestedAggMetrics.map(({ outerMetricId }) => outerMetricId),
             );
-            const hasLodNestedAggOverlap = Array.from(lodMetricIds).some(
+            const overlappingNestedAggIds = Array.from(lodMetricIds).filter(
                 (metricId) => nestedAggOuterMetricIds.has(metricId),
             );
-            if (hasLodNestedAggOverlap) {
+            if (overlappingNestedAggIds.length > 0) {
                 throw new ParameterError(
-                    'LOD metrics cannot use nested aggregate references',
+                    `LOD metrics (${overlappingNestedAggIds.join(
+                        ', ',
+                    )}) cannot use nested aggregate references`,
                 );
             }
 

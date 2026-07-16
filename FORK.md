@@ -15,31 +15,28 @@ definitions (see lightdash/lightdash#16181). Design doc: `FORK-DESIGN.md`.
 New files (no upstream conflicts possible):
 - `packages/backend/src/utils/QueryBuilder/lodCtes.ts` (+ `lodCtes.test.ts`)
 - `packages/backend/src/utils/QueryBuilder/metricQueryBuilderSnapshots/lodQueries.test.ts` (+ snapshot)
+- `examples/full-jaffle-shop-demo/dbt/models/lod_sales.{sql,yml}` — verification fixture (LOD demo model + metadata)
 - `FORK.md`, `FORK-DESIGN.md`, `cloudbuild.yaml`
 
-Modified upstream files — every touched hunk is marked `// FORK: LOD`
-(`grep -rn "FORK: LOD" packages/` lists the full diff surface):
+Modified files — every touched hunk in upstream *source* is marked `// FORK: LOD`
+(`grep -rn "FORK: LOD" packages/` lists that diff surface). Some touched files
+can't carry inline markers: the JSON schemas have no comment syntax and the
+`packages/backend/src/generated/*` files are regenerated wholesale. Dev-only
+tooling (e.g. `scripts/dev-fast-start.sh`) is also excluded from the marker
+convention — its hunks are unmarked because it never ships upstream.
 - `packages/common/src/types/dbt.ts` — `ignore_dimensions` YAML property + converter copy-through
 - `packages/common/src/types/field.ts` — `ignoreDimensions` on `Metric`, `compiledIgnoreDimensions` on compiled properties
-- `packages/common/src/dbt/schemas/lightdashMetadata.json` — schema property
-- `packages/common/src/schemas/json/lightdash-dbt-2.0.json` — schema property (all 3 metric blocks)
+- `packages/common/src/dbt/schemas/lightdashMetadata.json` — schema property (no comment syntax; unmarked)
+- `packages/common/src/schemas/json/lightdash-dbt-2.0.json` — schema property, all 3 metric blocks (no comment syntax; unmarked)
 - `packages/common/src/compiler/exploreCompiler.ts` — resolution + validation (LOD-local `merge()` aggregation detection)
 - `packages/common/src/compiler/translator.test.ts`, `exploreCompiler.test.ts` — tests
 - `packages/backend/src/utils/QueryBuilder/MetricQueryBuilder.ts` — 3 insertion points + interaction guards
-- `packages/backend/src/generated/*` — regenerated (`pnpm generate-api`)
+- `packages/backend/src/generated/*` — regenerated wholesale (`pnpm generate-api`; unmarked)
+- `scripts/dev-fast-start.sh` — dev-tooling hardening, unmarked (dev-only, never upstreamed)
 
 ## Feature gate
 
-`LIGHTDASH_LOD_METRICS_ENABLED=true` (set on the Cloud Run service). Unset or
-any other value → upstream behavior, byte-identical SQL (snapshot-asserted).
-
-## v1 limitations (all fail loudly with ParameterError, never wrong SQL)
-
-- LOD + period-over-period, LOD + `sum_distinct`/`average_distinct`,
-  LOD + nested-aggregate references, LOD + custom dimensions,
-  LOD on explores with metric-inflating (fanout) joins: unsupported.
-- Row set is unchanged (no sparse-grid densification) — LOD fixes values on
-  existing rows.
+`LIGHTDASH_LOD_METRICS_ENABLED=true` (set on the Cloud Run service). Unset or any other value → upstream behavior, byte-identical SQL (snapshot-asserted). **Flag-off semantics.** With the flag off, a metric that declares `ignore_dimensions` still compiles and runs — it just silently computes at the query's full grain, exactly like upstream. This is intentional: the flag is a kill switch, not a validator. Compile-time validation of `ignore_dimensions` (unknown field, disallowed metric kind, disallowed combinations) still applies regardless of the flag, so a broken definition surfaces its `CompileError` whether or not LOD SQL generation is enabled. ## v1 limitations (unsupported combinations fail loudly; inflation matches upstream) LOD + period-over-period, LOD + `sum_distinct`/`average_distinct`,
 - LOD metrics must be dedup-aware aggregates (e.g. `hll_count.merge`) when the
   underlying value repeats across rows; a plain `SUM` re-adds repeated values.
 

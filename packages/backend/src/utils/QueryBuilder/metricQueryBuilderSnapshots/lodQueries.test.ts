@@ -606,7 +606,7 @@ describe('MetricQueryBuilder snapshot: LOD queries (FORK: LOD)', () => {
                 },
             }),
         ).toThrow(
-            'LOD metrics cannot be combined with period-over-period or distinct metrics in the same query',
+            'cannot be combined with period-over-period or distinct metrics in the same query',
         );
     });
 
@@ -651,9 +651,7 @@ describe('MetricQueryBuilder snapshot: LOD queries (FORK: LOD)', () => {
                     ],
                 },
             }),
-        ).toThrow(
-            'Metrics referencing both LOD and distinct metrics are not supported',
-        );
+        ).toThrow('references both LOD and distinct metrics');
     });
 
     // LOD metrics cannot be combined with the experimental fanout rewrite
@@ -689,16 +687,40 @@ describe('MetricQueryBuilder snapshot: LOD queries (FORK: LOD)', () => {
         expect(query).toMatchSnapshot();
     });
 
-    // FORK: LOD — v1 doesn't support LOD metrics combined with custom
+    // FORK: LOD — an INERT LOD metric (ignore_dimensions declared, but the
+    // ignored dim is not selected) combined with a custom dimension must
+    // compile normally: the metric stays at full grain, no lod_ CTE, no throw.
+    // total_customers ignores product_name, which is NOT selected here.
+    test('compiles an inert LOD metric with a custom dimension', () => {
+        const query = buildQuery({
+            explore: LOD_TEST_EXPLORE,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                dimensions: ['sales_region', 'is_emea'],
+                metrics: ['sales_total_customers'],
+                compiledCustomDimensions: [CUSTOM_SQL_DIMENSION],
+            },
+        });
+        expect(query).not.toContain('lod_');
+        expect(query).toMatchSnapshot();
+    });
+
+    // FORK: LOD — v1 doesn't support ACTIVE LOD metrics combined with custom
     // dimensions (custom dimensions aren't explore dimensions, so LOD's
-    // grouping-by-surviving-dimensions logic can't reason about them).
-    test('throws when LOD metric is combined with a custom dimension', () => {
+    // grouping-by-surviving-dimensions logic can't reason about them). Here
+    // product_name (in total_customers' ignore set) IS selected, so LOD
+    // activates and the custom dimension must be rejected.
+    test('throws when active LOD metric is combined with a custom dimension', () => {
         expect(() =>
             buildQuery({
                 explore: LOD_TEST_EXPLORE,
                 compiledMetricQuery: {
                     ...BASE_METRIC_QUERY,
-                    dimensions: ['sales_region', 'is_emea'],
+                    dimensions: [
+                        'sales_product_name',
+                        'sales_region',
+                        'is_emea',
+                    ],
                     metrics: ['sales_total_customers'],
                     compiledCustomDimensions: [CUSTOM_SQL_DIMENSION],
                 },
@@ -901,7 +923,7 @@ describe('MetricQueryBuilder snapshot: LOD queries (FORK: LOD)', () => {
                     metrics: ['sales_lod_sum_of_max'],
                 },
             }),
-        ).toThrow('LOD metrics cannot use nested aggregate references');
+        ).toThrow('cannot use nested aggregate references');
     });
 
     // Totals path: a grand total goes through TotalQueryBuilder, which strips
