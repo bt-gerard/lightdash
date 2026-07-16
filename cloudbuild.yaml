@@ -14,7 +14,7 @@ images:
   - '${_AR}/lightdash:${_UPSTREAM_TAG}-lod.${_LOD_SUFFIX}'
   - '${_AR}/lightdash:${_GIT_SHA}'
 substitutions:
-  _AR: 'us-central1-docker.pkg.dev/${PROJECT_ID}/lightdash'
+  _AR: 'us-central1-docker.pkg.dev/playvalve-data-dev/lightdash'
   _UPSTREAM_TAG: '0.3388.0'
   _LOD_SUFFIX: '1'
   _GIT_SHA: 'manual'  # trigger maps this to $SHORT_SHA; manual builds pass it
