@@ -13185,6 +13185,10 @@ const models: TsoaRoute.Models = {
             },
             percentile: { dataType: 'double' },
             distinctKeys: { dataType: 'array', array: { dataType: 'string' } },
+            ignoreDimensions: {
+                dataType: 'array',
+                array: { dataType: 'string' },
+            },
             formatOptions: { ref: 'CustomFormat' },
             dimensionReference: { dataType: 'string' },
             baseDimensionType: { ref: 'DimensionType' },
@@ -13841,6 +13845,10 @@ const models: TsoaRoute.Models = {
                         dataType: 'refAlias',
                         ref: 'CompiledMetricRelativeDateFilter',
                     },
+                },
+                compiledIgnoreDimensions: {
+                    dataType: 'array',
+                    array: { dataType: 'string' },
                 },
                 compiledDistinctKeys: {
                     dataType: 'array',

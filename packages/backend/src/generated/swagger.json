@@ -14123,6 +14123,12 @@
                         },
                         "type": "array"
                     },
+                    "ignoreDimensions": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "type": "array"
+                    },
                     "formatOptions": {
                         "$ref": "#/components/schemas/CustomFormat"
                     },
@@ -15019,6 +15025,12 @@
                     "compiledRelativeDateFilters": {
                         "items": {
                             "$ref": "#/components/schemas/CompiledMetricRelativeDateFilter"
+                        },
+                        "type": "array"
+                    },
+                    "compiledIgnoreDimensions": {
+                        "items": {
+                            "type": "string"
                         },
                         "type": "array"
                     },
