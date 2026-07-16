@@ -279,6 +279,13 @@
                                     "type": "string"
                                 }
                             },
+                            "ignore_dimensions": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                },
+                                "description": "Dimensions this metric is computed WITHOUT grouping by (LOD EXCLUDE semantics). Accepts 'dimension_name' or 'table.dimension_name'."
+                            },
                             "default_time_dimension": {
                                 "type": "object",
                                 "description": "Specifies the default time dimension field and interval to use for time-based analysis on this metric. If specified, both field and interval are required. If there is already a default time dimension set in the model, this will override it.",
@@ -1012,6 +1019,13 @@
                                         "type": "string"
                                     }
                                 },
+                                "ignore_dimensions": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    },
+                                    "description": "Dimensions this metric is computed WITHOUT grouping by (LOD EXCLUDE semantics). Accepts 'dimension_name' or 'table.dimension_name'."
+                                },
                                 "groups": {
                                     "type": "array",
                                     "description": "Groups are used to group dimensions and metrics in the sidebar. You can create nested groups up to 5 levels",
@@ -1732,6 +1746,13 @@
                                     "items": {
                                         "type": "string"
                                     }
+                                },
+                                "ignore_dimensions": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    },
+                                    "description": "Dimensions this metric is computed WITHOUT grouping by (LOD EXCLUDE semantics). Accepts 'dimension_name' or 'table.dimension_name'."
                                 },
                                 "groups": {
                                     "type": "array",
