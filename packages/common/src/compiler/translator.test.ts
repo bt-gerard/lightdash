@@ -1,9 +1,9 @@
 import {
+    convertModelMetric,
     SupportedDbtAdapter,
     type DbtModelLightdashConfig,
     type DbtModelNode,
     type RESERVED_MODEL_META_KEYS,
-    convertModelMetric,
 } from '../types/dbt';
 import {
     getExploreSplitCandidates,
@@ -4781,6 +4781,7 @@ describe('known missing catalog entries', () => {
     });
 });
 
+// FORK: LOD
 describe('convertModelMetric ignore_dimensions', () => {
     it('copies ignore_dimensions through to the metric', () => {
         const metric = convertModelMetric({
