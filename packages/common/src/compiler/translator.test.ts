@@ -9,6 +9,7 @@ import {
     type DbtModelLightdashConfig,
     type DbtModelNode,
     type RESERVED_MODEL_META_KEYS,
+    convertModelMetric,
 } from '../types/dbt';
 import {
     getExploreSplitCandidates,
@@ -5887,5 +5888,36 @@ describe('model-level additional dimensions', () => {
         expect(result).toHaveLength(1);
         expect(result[0]).not.toHaveProperty('errors');
         expect(result[0].tables?.orders.dimensions.order_label).toBeDefined();
+    });
+});
+
+describe('convertModelMetric ignore_dimensions', () => {
+    it('copies ignore_dimensions through to the metric', () => {
+        const metric = convertModelMetric({
+            modelName: 'sales',
+            name: 'total_customers',
+            metric: {
+                type: MetricType.NUMBER,
+                sql: 'hll_count.merge(${TABLE}.total_customers)',
+                ignore_dimensions: ['product_name', 'regions.region'],
+            },
+            source: undefined,
+            tableLabel: 'Sales',
+        });
+        expect(metric.ignoreDimensions).toEqual([
+            'product_name',
+            'regions.region',
+        ]);
+    });
+
+    it('leaves ignoreDimensions undefined when absent', () => {
+        const metric = convertModelMetric({
+            modelName: 'sales',
+            name: 'revenue',
+            metric: { type: MetricType.SUM, sql: '${TABLE}.amount' },
+            source: undefined,
+            tableLabel: 'Sales',
+        });
+        expect(metric.ignoreDimensions).toBeUndefined();
     });
 });
