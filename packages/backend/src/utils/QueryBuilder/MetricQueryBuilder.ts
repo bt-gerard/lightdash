@@ -1713,24 +1713,19 @@ export class MetricQueryBuilder {
         if (this.lodGroupsCache) return this.lodGroupsCache;
         const adapterType = this.args.warehouseSqlBuilder.getAdapterType();
         const startOfWeek = this.args.warehouseSqlBuilder.getStartOfWeek();
-        const selectedDimensions = this.args.compiledMetricQuery.dimensions
-            .map((dimId) => {
-                try {
-                    return getDimensionFromId({
-                        dimId,
-                        dimensions: this.exploreDimensions,
-                        dimensionsWithoutAccess:
-                            this.exploreDimensionsWithoutAccess,
-                        adapterType,
-                        startOfWeek,
-                        timezone: this.timezoneForDateTrunc,
-                        columnTimezone: this.columnTimezone,
-                    });
-                } catch {
-                    return null;
-                }
-            })
-            .filter((d): d is CompiledDimension => d !== null);
+        const selectedDimensions = this.args.compiledMetricQuery.dimensions.map(
+            (dimId) =>
+                getDimensionFromId({
+                    dimId,
+                    dimensions: this.exploreDimensions,
+                    dimensionsWithoutAccess:
+                        this.exploreDimensionsWithoutAccess,
+                    adapterType,
+                    startOfWeek,
+                    timezone: this.timezoneForDateTrunc,
+                    columnTimezone: this.columnTimezone,
+                }),
+        );
         this.lodGroupsCache = groupLodMetrics({
             selectedDimensions,
             metrics: this.getSelectedAndReferencedMetricIds().map(
@@ -5330,6 +5325,11 @@ export class MetricQueryBuilder {
             sqlFrom,
             joins: [joins.joinSQL, ...dimensionsSQL.joins],
         });
+        // FORK: LOD — whether the experimental fanout rewrite replaced
+        // finalSelectParts, so the LOD guard below can reject explores with
+        // metric-inflating joins before the LOD join-back is wired in.
+        const experimentalFanoutApplied =
+            !!experimentalMetricsCteSQL.finalSelectParts;
         if (experimentalMetricsCteSQL.finalSelectParts) {
             finalSelectParts = experimentalMetricsCteSQL.finalSelectParts;
             ctes.push(...experimentalMetricsCteSQL.ctes);
@@ -5690,6 +5690,35 @@ export class MetricQueryBuilder {
             ) {
                 throw new ParameterError(
                     'LOD metrics cannot be combined with period-over-period or distinct metrics in the same query',
+                );
+            }
+
+            // FORK: LOD — explores with metric-inflating joins rewrite
+            // finalSelectParts via the experimental fanout CTEs (see
+            // getExperimentalMetricsCteSQL). Combining that rewrite with the
+            // LOD join-back would produce duplicate columns or silently
+            // inflated LOD values.
+            if (experimentalFanoutApplied) {
+                throw new ParameterError(
+                    'LOD metrics are not supported on explores with metric-inflating joins yet',
+                );
+            }
+
+            // FORK: LOD — a metric that is both a nested-aggregate outer
+            // metric and LOD-active would need to be built in two different
+            // CTEs (na_base and lod_N) at once.
+            const lodMetricIds = new Set(
+                lodGroups.flatMap((group) => group.metricIds),
+            );
+            const nestedAggOuterMetricIds = new Set(
+                nestedAggMetrics.map(({ outerMetricId }) => outerMetricId),
+            );
+            const hasLodNestedAggOverlap = Array.from(lodMetricIds).some(
+                (metricId) => nestedAggOuterMetricIds.has(metricId),
+            );
+            if (hasLodNestedAggOverlap) {
+                throw new ParameterError(
+                    'LOD metrics cannot use nested aggregate references',
                 );
             }
 
