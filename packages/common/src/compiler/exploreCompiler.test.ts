@@ -607,6 +607,76 @@ describe('compileMetric spotlight defaults validation', () => {
     });
 });
 
+// FORK: LOD
+describe('compileMetric ignoreDimensions', () => {
+    const validMetric = {
+        ...tablesWithMetricsWithFilters.table1.metrics.metric1,
+        filters: undefined,
+    };
+
+    it('resolves bare and table-qualified refs to table.name', () => {
+        const compiled = compiler.compileMetric(
+            { ...validMetric, ignoreDimensions: ['dim1', 'table2.dim2'] },
+            tablesWithMetricsWithFilters,
+            [],
+        );
+        expect(compiled.compiledIgnoreDimensions).toEqual([
+            'table1.dim1',
+            'table2.dim2',
+        ]);
+        expect(compiled.tablesReferences).toContain('table2');
+    });
+
+    it('throws CompileError on unknown dimension', () => {
+        expect(() =>
+            compiler.compileMetric(
+                { ...validMetric, ignoreDimensions: ['nope'] },
+                tablesWithMetricsWithFilters,
+                [],
+            ),
+        ).toThrowError(CompileError);
+    });
+
+    it('throws CompileError when the ref is a metric', () => {
+        expect(() =>
+            compiler.compileMetric(
+                { ...validMetric, ignoreDimensions: ['metric_with_sql'] },
+                tablesWithMetricsWithFilters,
+                [],
+            ),
+        ).toThrowError(CompileError);
+    });
+
+    it('throws CompileError on non-aggregate metric types with a plain column sql', () => {
+        const validNonAggregateMetric = {
+            ...validMetric,
+            type: MetricType.NUMBER,
+        };
+        expect(() =>
+            compiler.compileMetric(
+                { ...validNonAggregateMetric, ignoreDimensions: ['dim1'] },
+                tablesWithMetricsWithFilters,
+                [],
+            ),
+        ).toThrowError(CompileError);
+    });
+
+    it('throws CompileError combined with sum_distinct', () => {
+        const validSumDistinctMetric = {
+            ...validMetric,
+            type: MetricType.SUM_DISTINCT,
+            distinctKeys: ['dim1'],
+        };
+        expect(() =>
+            compiler.compileMetric(
+                { ...validSumDistinctMetric, ignoreDimensions: ['dim1'] },
+                tablesWithMetricsWithFilters,
+                [],
+            ),
+        ).toThrowError(CompileError);
+    });
+});
+
 describe('Parse dimension reference', () => {
     test('should parse dimensions', () => {
         expect(parseAllReferences('${dimension} == 1', 'table')).toStrictEqual([

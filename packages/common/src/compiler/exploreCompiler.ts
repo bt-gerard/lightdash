@@ -14,7 +14,9 @@ import {
     friendlyName,
     isCustomBinDimension,
     isNonAggregateMetric,
+    isNonAggregateMetricType,
     isPostCalculationMetric,
+    isPostCalculationMetricType,
     MetricType,
     type CompiledCustomDimension,
     type CompiledCustomSqlDimension,
@@ -86,6 +88,8 @@ type Reference = {
  *
  * Matches: sum(, count(, avg(, etc. with word boundary to avoid false positives
  * like "summary" matching "sum".
+ * "merge" is included for warehouse sketch aggregations like
+ * hll_count.merge(...) — FORK: LOD
  */
 // Diamond metric references repeat the same recorded filter predicate
 const uniqByFilterId = <T extends { id: string }>(filters: T[]): T[] =>
@@ -95,7 +99,7 @@ const uniqByFilterId = <T extends { id: string }>(filters: T[]): T[] =>
     );
 
 const SQL_AGGREGATION_FUNCTIONS_PATTERN =
-    /\b(sum|count_if|countif|count|avg|average|max_by|min_by|min|max|median|stddev|stddev_pop|stddev_samp|variance|var_pop|var_samp|percentile|percentile_cont|percentile_disc|count_distinct|approx_count_distinct|any_value|array_agg|string_agg|group_concat|listagg|corr|covar_pop|covar_samp|mode|approx_percentile)\s*\(/i;
+    /\b(sum|count_if|countif|count|avg|average|max_by|min_by|min|max|median|stddev|stddev_pop|stddev_samp|variance|var_pop|var_samp|percentile|percentile_cont|percentile_disc|count_distinct|approx_count_distinct|any_value|array_agg|string_agg|group_concat|listagg|corr|covar_pop|covar_samp|mode|approx_percentile|merge)\s*\(/i;
 
 /**
  * Check if the SQL contains any aggregation functions.
@@ -1119,6 +1123,12 @@ export class ExploreCompiler {
             ...(compiledMetric.compiledDistinctKeys
                 ? { compiledDistinctKeys: compiledMetric.compiledDistinctKeys }
                 : {}),
+            ...(compiledMetric.compiledIgnoreDimensions
+                ? {
+                      compiledIgnoreDimensions:
+                          compiledMetric.compiledIgnoreDimensions,
+                  }
+                : {}), // FORK: LOD
             ...(compiledMetric.compiledRelativeDateFilters
                 ? {
                       compiledRelativeDateFilters:
@@ -1143,6 +1153,7 @@ export class ExploreCompiler {
         tablesReferences: Set<string>;
         valueSql?: string;
         compiledDistinctKeys?: string[];
+        compiledIgnoreDimensions?: string[]; // FORK: LOD
         compiledRelativeDateFilters?: CompiledMetricRelativeDateFilter[];
         compiledTimestampFilters?: CompiledMetricTimestampFilter[];
     } {
@@ -1400,6 +1411,62 @@ export class ExploreCompiler {
                 ...referencedTimestampFilters,
             ]);
         }
+
+        // FORK: LOD — resolve and validate ignore_dimensions
+        let compiledIgnoreDimensions: string[] | undefined;
+        if (metric.ignoreDimensions && metric.ignoreDimensions.length > 0) {
+            if (
+                metric.type === MetricType.SUM_DISTINCT ||
+                metric.type === MetricType.AVERAGE_DISTINCT
+            ) {
+                throw new CompileError(
+                    `Metric "${metric.name}" cannot combine "ignore_dimensions" with "${metric.type}"`,
+                    {},
+                );
+            }
+            const hasAggregationInMetricSql =
+                isNonAggregateMetric(metric) &&
+                sqlContainsAggregation(metric.sql);
+            if (
+                isPostCalculationMetricType(metric.type) ||
+                (isNonAggregateMetricType(metric.type) &&
+                    !hasAggregationInMetricSql)
+            ) {
+                throw new CompileError(
+                    `Metric "${metric.name}" of type "${metric.type}" without aggregation in its sql cannot use "ignore_dimensions"`,
+                    {},
+                );
+            }
+            compiledIgnoreDimensions = metric.ignoreDimensions.map((ref) => {
+                const { refTable, refName } = getParsedReference(
+                    ref,
+                    metric.table,
+                );
+                const referencedTable = getReferencedTable(refTable, tables);
+                const referencedDimension =
+                    referencedTable?.dimensions[refName];
+                const referencedMetric = referencedTable?.metrics[refName];
+                if (!referencedDimension) {
+                    if (referencedMetric) {
+                        throw new CompileError(
+                            `Metric "${metric.name}" has "ignore_dimensions" entry "${ref}" which references a metric, not a dimension`,
+                            {},
+                        );
+                    }
+                    throw new CompileError(
+                        `Metric "${metric.name}" has "ignore_dimensions" entry "${ref}" which matches no dimension in the explore`,
+                        {},
+                    );
+                }
+                const resolvedTable = referencedTable?.name ?? refTable;
+                tablesReferences = new Set([
+                    ...tablesReferences,
+                    resolvedTable,
+                ]);
+                return `${resolvedTable}.${refName}`;
+            });
+        }
+
         if (
             metric.type === MetricType.SUM_DISTINCT ||
             metric.type === MetricType.AVERAGE_DISTINCT
@@ -1431,6 +1498,7 @@ export class ExploreCompiler {
                 tablesReferences,
                 valueSql: renderedSql,
                 compiledDistinctKeys: compiledKeys,
+                compiledIgnoreDimensions, // FORK: LOD
                 compiledRelativeDateFilters: relativeDateFilters,
                 compiledTimestampFilters: timestampFilters,
             };
@@ -1445,6 +1513,7 @@ export class ExploreCompiler {
             sql: compiledSql,
             tablesReferences,
             valueSql: renderedSql,
+            compiledIgnoreDimensions, // FORK: LOD
             compiledRelativeDateFilters: relativeDateFilters,
             compiledTimestampFilters: timestampFilters,
         };
