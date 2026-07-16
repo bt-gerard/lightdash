@@ -96,6 +96,22 @@ LIMIT
   500"
 `;
 
+exports[`MetricQueryBuilder snapshot: LOD queries (FORK: LOD) > compiles a custom dimension query with no LOD metric selected 1`] = `
+"SELECT
+  "sales".region AS "sales_region",
+  ("sales".region = 'EMEA') AS "is_emea",
+  SUM("sales".customers_purchasing) AS "sales_customers_purchasing"
+FROM
+  "postgres"."jaffle"."sales" AS "sales"
+GROUP BY
+  1,
+  2
+ORDER BY
+  "sales_customers_purchasing" DESC
+LIMIT
+  500"
+`;
+
 exports[`MetricQueryBuilder snapshot: LOD queries (FORK: LOD) > grand-total CTE with CROSS JOIN when all dims are ignored 1`] = `
 "WITH
   lod_base AS (
