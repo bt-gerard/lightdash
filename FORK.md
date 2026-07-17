@@ -6,7 +6,7 @@ definitions (see lightdash/lightdash#16181). Design doc: `FORK-DESIGN.md`.
 
 ## Base version
 
-- Upstream release tag: `0.3388.0`
+- Upstream release tag: `0.3404.0`
 - Fork repo: `bt-gerard/lightdash` (may move into the `playvalve` org later)
 - Deploy branch: `lod-metrics`. Local remotes: `origin` = fork, `upstream` = official.
 
@@ -52,16 +52,19 @@ releasing. Deploys to the Cloud Run service **`lightdash-fork`**
 ## Upstream sync runbook (manual, on demand)
 
 1. `git fetch upstream --tags`
-2. `git checkout lod-metrics && git merge <new-release-tag>`
+2. `git checkout lod-metrics && git rebase <new-release-tag>`
 3. Resolve conflicts — expected surface is only the `// FORK: LOD` hunks
-   (find them: `grep -rn "FORK: LOD" packages/`)
+   (find them: `grep -rn "FORK: LOD" packages/`). For conflicts in
+   `packages/backend/src/generated/*`, take the upstream side and re-run
+   `pnpm generate-api` before `git rebase --continue`.
 4. `pnpm install && pnpm -F common test && pnpm -F backend test`
    — the LOD snapshot suite includes flag-off byte-identity coverage, so an
    upstream change that alters base SQL shows up as a snapshot diff to review
 5. `pnpm generate-api` if upstream changed controllers/types
 6. Update the base version here and `_UPSTREAM_TAG` in `cloudbuild.yaml`;
    reset `_LOD_SUFFIX` to 1
-7. Push, let Cloud Build build, deploy, smoke-test an LOD chart
+7. `git push --force-with-lease` (rebase rewrites the branch), let Cloud
+   Build build, deploy, smoke-test an LOD chart
 
 ## Verification
 
