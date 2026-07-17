@@ -49,22 +49,11 @@ releasing. Deploys to the Cloud Run service **`lightdash-fork`**
 (us-central1) — a separate service from `lightdash-test`, with
 `LIGHTDASH_LOD_METRICS_ENABLED=true`.
 
-## Upstream sync runbook (manual, on demand)
+## Upstream sync runbook
 
-1. `git fetch upstream --tags`
-2. `git checkout lod-metrics && git rebase <new-release-tag>`
-3. Resolve conflicts — expected surface is only the `// FORK: LOD` hunks
-   (find them: `grep -rn "FORK: LOD" packages/`). For conflicts in
-   `packages/backend/src/generated/*`, take the upstream side and re-run
-   `pnpm generate-api` before `git rebase --continue`.
-4. `pnpm install && pnpm -F common test && pnpm -F backend test`
-   — the LOD snapshot suite includes flag-off byte-identity coverage, so an
-   upstream change that alters base SQL shows up as a snapshot diff to review
-5. `pnpm generate-api` if upstream changed controllers/types
-6. Update the base version here and `_UPSTREAM_TAG` in `cloudbuild.yaml`;
-   reset `_LOD_SUFFIX` to 1
-7. `git push --force-with-lease` (rebase rewrites the branch), let Cloud
-   Build build, deploy, smoke-test an LOD chart
+See `FORK-OPS.md` for the full step-by-step: rebase onto the latest upstream
+release tag, conflict recipes, test gates, version bump, force-push, image
+build to Artifact Registry, and Cloud Run deploy/rollback.
 
 ## Verification
 
