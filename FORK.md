@@ -76,5 +76,15 @@ releasing. Deploys to the Cloud Run service **`lightdash-fork`**
 - Compiled SQL confirmed: `lod_1` grouped by surviving dims only, null-safe
   LEFT JOIN back, derived `pct` reads CTE columns (never re-aggregates).
 
-BigQuery (production dialect) verification pending — planned against the
-`lightdash-fork` Cloud Run service or a BQ-connected dev project.
+**2026-07-17 — BigQuery (production dialect + real production data)**, via a
+local project connected to `playvalve-gemini` (fusebox love_island, target
+prod): LOD metrics defined directly on the pre-cross-join
+`fct_taxonomy_economy_agg_safeguard` table (`hll_count.merge(unique_users)`
+with `ignore_dimensions` = all 16 event/taxonomy dims) reproduce the
+cross-joined `mart_taxonomy_economy_agg_view` (agg_level=0) **byte-identically
+on every existing dimension combination** — same HLL DAU denominators, spend
+counts, and `% Active Users Spending` — for both grand (item_category) and
+subset (platform × item_category) grains on 2026-07-14 data. Only designed
+difference: the cross join additionally emits synthetic zero-rows for missing
+combinations (v1 has no densification). This validates replacing the
+~216M-rows/day cross-joined cubes with query-time LOD CTEs.
