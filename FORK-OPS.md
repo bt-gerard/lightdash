@@ -15,6 +15,22 @@ Frequency: weekly (or whenever you want upstream fixes).
   eval "$(fnm env)" && fnm use 20.19
   ```
 - `sfw` (Socket Firewall) installed: `npm i -g sfw`.
+- `git-secrets` installed: `brew install git-secrets`. The pre-commit hook
+  hard-fails without the binary. Never commit with `--no-verify` — it skips
+  the secrets scan AND lint-staged.
+- Recommended (machine-local, no repo diff): upstream's pattern registration
+  is buggy — the Google patterns are fused into one dead regex and no
+  private-key pattern exists despite the script's comment. Register working
+  ones once per machine:
+  ```bash
+  git secrets --add 'ya29\.[0-9A-Za-z_-]+'
+  git secrets --add 'AIza[0-9A-Za-z_-]{35}'
+  git secrets --add 'BEGIN[[:space:]][A-Z[:space:]]*PRIVATE[[:space:]]KEY'
+  ```
+  (No literal spaces in patterns — git-secrets word-splits when combining.)
+- Git hooks only exist after `pnpm install` has run (husky `prepare` script
+  sets `core.hooksPath`). A fresh clone or automation env that commits
+  before installing has NO pre-commit checks.
 - 1Password unlocked — commits are SSH-signed and every rebased commit gets
   re-signed. If 1Password is locked, commits hang or fail.
 - `gcloud` authenticated against project `playvalve-data-dev`.
