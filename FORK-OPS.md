@@ -33,7 +33,7 @@ Frequency: weekly (or whenever you want upstream fixes).
   before installing has NO pre-commit checks.
 - 1Password unlocked — commits are SSH-signed and every rebased commit gets
   re-signed. If 1Password is locked, commits hang or fail.
-- `gcloud` authenticated against project `playvalve-data-dev`.
+- `gcloud` authenticated against project `playvalve-main`.
 
 ## 1. Preflight
 
@@ -178,7 +178,7 @@ since your fetch. Never use plain `--force`.
 
 ## 7. Build & publish to Artifact Registry
 
-Images land in `us-central1-docker.pkg.dev/playvalve-data-dev/lightdash/lightdash`
+Images land in `us-central1-docker.pkg.dev/playvalve-main/lightdash/lightdash`
 tagged `<TAG>-lod.<suffix>` and `<git sha>`.
 
 **Path A — Cloud Build trigger** (once the GitHub connection is set up):
@@ -186,7 +186,7 @@ the push in step 6 triggers `cloudbuild.yaml` automatically; the trigger
 maps `_GIT_SHA` to `$SHORT_SHA`. Watch it:
 
 ```bash
-gcloud builds list --project playvalve-data-dev --region us-central1 --limit 3
+gcloud builds list --project playvalve-main --limit 3
 ```
 
 **Path B — manual submit** (works today, no trigger needed). `SHORT_SHA` is
@@ -194,34 +194,40 @@ empty on manual builds, so pass `_GIT_SHA` explicitly:
 
 ```bash
 gcloud builds submit \
-  --project playvalve-data-dev \
+  --project playvalve-main \
   --config cloudbuild.yaml \
   --substitutions _GIT_SHA=$(git rev-parse --short HEAD) \
   .
 ```
 
 The build uses BuildKit on an `E2_HIGHCPU_32` machine, ~30 min, 1 h timeout.
+The upload filter is `.gcloudignore` (fork-owned): it includes `.gitignore`
+but re-includes the tracked `AGENTS.md` files — without them the backend
+postbuild fails on the `SKILLS.md` symlinks.
 
 Confirm the image exists:
 
 ```bash
 gcloud artifacts docker images list \
-  us-central1-docker.pkg.dev/playvalve-data-dev/lightdash/lightdash \
+  us-central1-docker.pkg.dev/playvalve-main/lightdash/lightdash \
   --include-tags --limit 5
 ```
 
 ## 8. Deploy (Cloud Run)
 
-Target service: **`lightdash-fork`** (us-central1) with
-`LIGHTDASH_LOD_METRICS_ENABLED=true`. NOTE: this service does not exist yet —
-it must NOT share the database of `lightdash-test` (which serves
-lightdash.bluetile.com). Once it exists:
+Target service: **`lightdash`** in `playvalve-main` (us-central1), managed by
+terraform in `playvalve-terraform-infra/projects/playvalve-main/lightdash.tf`
+(service + Cloud SQL `lightdash-db` + secrets + storage bucket). It runs with
+`LIGHTDASH_LOD_METRICS_ENABLED=true` and `SCHEDULER_ENABLED=false` (its DB is
+a clone of lightdash-test's — scheduler stays off until this instance is the
+primary, or every scheduled delivery double-sends). Do NOT `gcloud run deploy`
+by hand; bump the image in terraform instead:
 
 ```bash
-gcloud run deploy lightdash-fork \
-  --project playvalve-data-dev \
-  --region us-central1 \
-  --image us-central1-docker.pkg.dev/playvalve-data-dev/lightdash/lightdash:$TAG-lod.1
+cd ~/workspace/playvalve/playvalve-terraform-infra/projects/playvalve-main
+# edit lightdash.tf: lightdash_fork_image_tag default -> "<TAG>-lod.<suffix>"
+terraform plan   # review: only the Cloud Run image should change
+terraform apply
 ```
 
 Smoke test after deploy: open an LOD chart (e.g. `% Active Users Spending`
