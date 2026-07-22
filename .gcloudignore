@@ -1,0 +1,9 @@
+# Fork build infra — upload filter for `gcloud builds submit` (see cloudbuild.yaml).
+# gcloudignore uses git-style matching, so .gitignore's `AGENTS.md` pattern drops
+# the nested AGENTS.md files that upstream force-adds; the backend postbuild needs
+# them (SKILLS.md symlinks to one). Re-include them.
+.gcloudignore
+.git
+#!include:.gitignore
+!AGENTS.md
+extermal/
