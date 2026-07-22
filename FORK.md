@@ -40,6 +40,31 @@ convention — its hunks are unmarked because it never ships upstream.
 - LOD metrics must be dedup-aware aggregates (e.g. `hll_count.merge`) when the
   underlying value repeats across rows; a plain `SUM` re-adds repeated values.
 
+## CLI: point your binaries at the fork (`LIGHTDASH_CLI`)
+
+`lightdash deploy` compiles dbt YAML into explores **client-side** (via
+`@lightdash/common`) and uploads the compiled result. The published
+`@lightdash/cli` on npm doesn't know `ignore_dimensions`: the YAML schemas
+don't reject unknown properties, so the upstream CLI won't error — its
+converter silently drops the property and the metric deploys without LOD,
+computing at full grain with no warning. Anyone deploying dbt projects to the
+fork service must therefore use the CLI built from this branch.
+
+Convention: expose the fork binary through the `LIGHTDASH_CLI` env var and
+invoke `$LIGHTDASH_CLI` (instead of a globally-installed `lightdash`) in
+scripts and CI:
+
+```bash
+# build once from this branch (repo root); tsc --build also builds common
+pnpm install && pnpm -F cli build
+
+export LIGHTDASH_CLI="$FORK_REPO/packages/cli/dist/index.js"
+"$LIGHTDASH_CLI" deploy
+```
+
+Rebuild the CLI after every upstream sync so its compiler matches the deployed
+image — a version-skewed CLI reintroduces the silent-drop failure mode.
+
 ## Image build & deploy
 
 Cloud Build trigger on push to `lod-metrics` runs `cloudbuild.yaml`, pushing
