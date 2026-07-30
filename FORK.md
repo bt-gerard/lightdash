@@ -110,3 +110,29 @@ subset (platform × item_category) grains on 2026-07-14 data. Only designed
 difference: the cross join additionally emits synthetic zero-rows for missing
 combinations (v1 has no densification). This validates replacing the
 ~216M-rows/day cross-joined cubes with query-time LOD CTEs.
+
+**2026-07-30 — Postgres (local dev stack), end-to-end through the real API**, on
+branch `lod-filter-scope` with `LIGHTDASH_LOD_METRICS_ENABLED=true` and the
+`lod_sales` fixture. Verifies the filter-scope change (see
+`FORK-DESIGN-LOD-FILTER-SCOPE.md`), where `ignore_dimensions` now also drops
+dimension filters on the ignored dimensions inside the LOD CTE.
+
+- **No regression on the 2026-07-16 numbers.** Grouped by `product_name`:
+  A → 4/12 = 33.33% ✓, B → 2/**12** = 16.67% ✓. Grouped by
+  `product_name` + `region`: A/North 3/10 = 30% ✓, A/South 1/2 = 50% ✓,
+  B/North 2/10 = 20% ✓. Non-purchasing customers surface as `product_name`
+  NULL rows carrying the correct grain-level denominators (12; 10/2).
+- **Filter-only activation (the new behaviour).** Grouped by `region` with a
+  filter `product_name = 'Product A'` — `product_name` is ignored by
+  `total_customers` and is NOT selected: North 3/**10** = 30%, South 1/**2**
+  = 50%. Under the previous semantics both rows would have read 100%
+  (3/3 and 1/1), because the filter reached the denominator.
+- **Compiled SQL confirmed.** `lod_base` keeps
+  `WHERE (("lod_sales".product_name) IN ('Product A'))`; `lod_1` has **no
+  WHERE clause at all** (sole filter pruned, tree collapsed) and groups by
+  `region` — the same grain as the main query, since activation was
+  filter-only rather than grain-driven. Null-safe LEFT JOIN back on `region`.
+
+Not covered by this entry: BigQuery. The reach case (denominator 149,092 vs
+73,301) and the taxonomy-cube regression still need a BigQuery project with an
+LOD explore deployed by a CLI built from this branch.
