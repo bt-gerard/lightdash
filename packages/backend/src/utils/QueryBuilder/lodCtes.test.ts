@@ -93,6 +93,8 @@ describe('groupLodMetrics', () => {
         expect(
             groupLodMetrics({
                 selectedDimensions: [dim('sales', 'region')],
+                filterTargetFieldIds: [],
+                dimensionsById: {},
                 metrics: [metric('m1', ['sales.product_name'])],
             }),
         ).toEqual([]);
@@ -104,6 +106,8 @@ describe('groupLodMetrics', () => {
                 dim('sales', 'product_name'),
                 dim('sales', 'region'),
             ],
+            filterTargetFieldIds: [],
+            dimensionsById: {},
             metrics: [
                 metric('m1', ['sales.product_name']),
                 metric('m2', ['sales.product_name']),
@@ -114,13 +118,85 @@ describe('groupLodMetrics', () => {
         expect(groups[0]).toEqual({
             cteName: 'lod_1',
             survivingDimensionIds: ['sales_region'],
+            ignoredFilterFieldIds: [],
             metricIds: ['sales_m1', 'sales_m2'],
         });
         expect(groups[1]).toEqual({
             cteName: 'lod_2',
             survivingDimensionIds: [],
+            ignoredFilterFieldIds: [],
             metricIds: ['sales_m3'],
         });
+    });
+
+    const dimensionsById = {
+        sales_region: dim('sales', 'region'),
+        sales_product_name: dim('sales', 'product_name'),
+        sales_country: dim('sales', 'country'),
+    } as never;
+
+    it('activates when an ignored dimension is filtered but not selected', () => {
+        const groups = groupLodMetrics({
+            selectedDimensions: [dim('sales', 'region')],
+            filterTargetFieldIds: ['sales_product_name'],
+            dimensionsById,
+            metrics: [metric('m1', ['sales.product_name'])],
+        });
+        expect(groups).toEqual([
+            {
+                cteName: 'lod_1',
+                survivingDimensionIds: ['sales_region'],
+                ignoredFilterFieldIds: ['sales_product_name'],
+                metricIds: ['sales_m1'],
+            },
+        ]);
+    });
+
+    it('stays inert when the ignored dimension is neither selected nor filtered', () => {
+        expect(
+            groupLodMetrics({
+                selectedDimensions: [dim('sales', 'region')],
+                filterTargetFieldIds: ['sales_country'],
+                dimensionsById,
+                metrics: [metric('m1', ['sales.product_name'])],
+            }),
+        ).toEqual([]);
+    });
+
+    // Same surviving set, different dropped filters — these must NOT share a
+    // CTE, or one metric silently inherits the other's widened WHERE.
+    it('separates metrics that drop different filters', () => {
+        const groups = groupLodMetrics({
+            selectedDimensions: [dim('sales', 'product_name')],
+            filterTargetFieldIds: ['sales_country'],
+            dimensionsById,
+            metrics: [
+                metric('m1', ['sales.product_name']),
+                metric('m2', ['sales.product_name', 'sales.country']),
+            ],
+        });
+        expect(groups).toHaveLength(2);
+        expect(groups[0].ignoredFilterFieldIds).toEqual([]);
+        expect(groups[0].metricIds).toEqual(['sales_m1']);
+        expect(groups[1].ignoredFilterFieldIds).toEqual(['sales_country']);
+        expect(groups[1].metricIds).toEqual(['sales_m2']);
+        expect(groups[0].survivingDimensionIds).toEqual(
+            groups[1].survivingDimensionIds,
+        );
+    });
+
+    it('shares one CTE when surviving dims and dropped filters both match', () => {
+        const groups = groupLodMetrics({
+            selectedDimensions: [dim('sales', 'product_name')],
+            filterTargetFieldIds: ['sales_country'],
+            dimensionsById,
+            metrics: [
+                metric('m1', ['sales.product_name', 'sales.country']),
+                metric('m2', ['sales.product_name', 'sales.country']),
+            ],
+        });
+        expect(groups).toHaveLength(1);
+        expect(groups[0].metricIds).toEqual(['sales_m1', 'sales_m2']);
     });
 });
 
@@ -150,6 +226,7 @@ describe('buildLodCteParts', () => {
                 {
                     cteName: 'lod_1',
                     survivingDimensionIds: ['sales_region'],
+                    ignoredFilterFieldIds: [],
                     metricIds: ['sales_total'],
                 },
             ],
@@ -175,6 +252,7 @@ describe('buildLodCteParts', () => {
                 {
                     cteName: 'lod_1',
                     survivingDimensionIds: [],
+                    ignoredFilterFieldIds: [],
                     metricIds: ['sales_total'],
                 },
             ],
