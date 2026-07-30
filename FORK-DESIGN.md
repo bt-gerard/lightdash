@@ -42,7 +42,7 @@ Query grouped by `product_name` only, `pct = customers_purchasing / total_custom
 | Decision | Choice |
 |---|---|
 | Scope | Exactly the issue's `ignore_dimensions` proposal (EXCLUDE semantics), joins allowed |
-| Filter semantics | ALL dimension WHERE filters apply inside the LOD CTE (Tableau EXCLUDE: filter first, then coarser aggregation) |
+| Filter semantics | Filters on ignored dimensions are dropped inside the LOD CTE; all other filters apply. See `FORK-DESIGN-LOD-FILTER-SCOPE.md` |
 | Join-back / row set | Main query drives; LEFT JOIN LOD CTE on surviving dims, CROSS JOIN when none survive. No densification |
 | Time dimensions | Base dimension name in `ignore_dimensions` matches ALL its granularity variants; exact grain names also accepted |
 | Warehouse verification | BigQuery with real data (production warehouse); other dialects via snapshots; Postgres via local stack as second check |
@@ -108,12 +108,14 @@ lod_1 AS (
     <surviving dimension selects, same aliases as the main query>,
     <metric aggregate SQL> AS "metric_id"
   FROM <same base table + same join tree as the main query>
-  WHERE <same dimension filters as the main query>
+  WHERE <main query's dimension filters, minus those on ignored dimensions>
   GROUP BY 1..n   -- omitted when no dimensions survive
 )
 ```
 
-The main query's join tree and dimension-filter SQL are reused verbatim so the CTE aggregates exactly the rows the main query sees.
+The main query's join tree is reused verbatim. The dimension-filter SQL is
+recompiled per CTE from a filter tree with the ignored dimensions' rules pruned,
+so the CTE spans the full population of those dimensions.
 
 **Join-back:** main grouped query drives. `LEFT JOIN lod_1 ON <null-safe equality per surviving dimension alias>` (via `warehouseSqlBuilder.getNullSafeEqualJoinSql`, dialect-portable), or `CROSS JOIN` when no dimensions survive. Post-calculation metrics referencing an LOD metric are rewritten to the CTE column via the existing `replaceMetricReferencesWithCteReferences`. Sorting/HAVING on LOD metrics work on final projected aliases; the step sets `requiresQueryInCTE` the same way PoP does.
 
@@ -129,6 +131,8 @@ The main query's join tree and dimension-filter SQL are reused verbatim so the C
 - LOD metric with metric-level `filters:` → works; the `CASE WHEN` wrapper is inside the metric's compiled SQL, which moves into the CTE untouched.
 - NULL dimension values → null-safe join equality; NULL groups match their CTE row.
 - Unmatched main rows (defensive; should not occur since CTE and main query see identical rows) → LEFT JOIN leaves the LOD value NULL rather than dropping the row.
+- Ignored dimension filtered but not selected → LOD activates; the CTE keeps the main query's grain and drops that filter.
+- Ignored dimension filtered inside an `or` group → `ParameterError`; pruning a disjunct would narrow the CTE.
 
 ## Testing
 
