@@ -304,6 +304,38 @@ LIMIT
   500"
 `;
 
+exports[`MetricQueryBuilder snapshot: LOD queries (FORK: LOD) > does not throw for a totals query with only a pruned dimension filter 1`] = `
+"WITH
+  lod_base AS (
+    SELECT
+      SUM("sales".customers_purchasing) AS "sales_customers_purchasing"
+    FROM
+      "postgres"."jaffle"."sales" AS "sales"
+    WHERE
+      ((("sales".product_name) IN ('Product A')))
+  ),
+  lod_1 AS (
+    SELECT
+      SUM("sales".total_customers) AS "sales_total_customers"
+    FROM
+      "postgres"."jaffle"."sales" AS "sales"
+  ),
+  metrics AS (
+    SELECT
+      lod_base.*,
+      lod_1."sales_total_customers" AS "sales_total_customers"
+    FROM
+      lod_base
+      CROSS JOIN lod_1
+  )
+SELECT
+  *
+FROM
+  metrics
+LIMIT
+  1"
+`;
+
 exports[`MetricQueryBuilder snapshot: LOD queries (FORK: LOD) > drops both grain and filter for a selected, filtered ignored dim 1`] = `
 "WITH
   lod_base AS (
@@ -485,6 +517,67 @@ GROUP BY
   1
 ORDER BY
   "sales_total_customers" DESC
+LIMIT
+  500"
+`;
+
+exports[`MetricQueryBuilder snapshot: LOD queries (FORK: LOD) > keeps row-level security and required filters when the filter tree fully prunes 1`] = `
+"WITH
+  lod_base AS (
+    SELECT
+      "sales".region AS "sales_region",
+      SUM("sales".customers_purchasing) AS "sales_customers_purchasing"
+    FROM
+      "postgres"."jaffle"."sales" AS "sales"
+    WHERE
+      "sales".region != 'INTERNAL'
+      AND ((("sales".product_name) IN ('Product A')))
+      AND (
+        (
+          ("sales".region) NOT IN ('BANNED')
+          OR ("sales".region) IS NULL
+        )
+      )
+    GROUP BY
+      1
+  ),
+  lod_1 AS (
+    SELECT
+      "sales".region AS "sales_region",
+      SUM("sales".total_customers) AS "sales_total_customers"
+    FROM
+      "postgres"."jaffle"."sales" AS "sales"
+    WHERE
+      "sales".region != 'INTERNAL'
+      AND (
+        (
+          ("sales".region) NOT IN ('BANNED')
+          OR ("sales".region) IS NULL
+        )
+      )
+    GROUP BY
+      1
+  ),
+  metrics AS (
+    SELECT
+      lod_base.*,
+      lod_1."sales_total_customers" AS "sales_total_customers"
+    FROM
+      lod_base
+      LEFT JOIN lod_1 ON (
+        lod_base."sales_region" = lod_1."sales_region"
+        OR (
+          lod_base."sales_region" IS NULL
+          AND lod_1."sales_region" IS NULL
+        )
+      )
+  )
+SELECT
+  *
+FROM
+  metrics
+ORDER BY
+  "sales_customers_purchasing" DESC
 LIMIT
   500"
 `;
