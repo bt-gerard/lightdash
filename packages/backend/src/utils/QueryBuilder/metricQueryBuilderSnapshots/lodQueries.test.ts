@@ -1220,4 +1220,46 @@ describe('MetricQueryBuilder snapshot: LOD queries (FORK: LOD)', () => {
             }),
         ).toThrow('OR filter group');
     });
+
+    // A nested AND group that fully collapses (every rule inside it targets an
+    // ignored dimension) is itself a dropped OR disjunct — removing it narrows
+    // the CTE exactly like dropping a bare leaf would. Must fail the same way.
+    test('throws when a nested filter group fully collapses inside an OR group', () => {
+        expect(() =>
+            buildQuery({
+                explore: LOD_TEST_EXPLORE,
+                compiledMetricQuery: {
+                    ...BASE_METRIC_QUERY,
+                    dimensions: ['sales_region'],
+                    metrics: ['sales_total_customers'],
+                    filters: {
+                        dimensions: {
+                            id: 'root',
+                            or: [
+                                {
+                                    id: 'region-filter',
+                                    target: { fieldId: 'sales_region' },
+                                    operator: FilterOperator.EQUALS,
+                                    values: ['EMEA'],
+                                },
+                                {
+                                    id: 'nested-and',
+                                    and: [
+                                        {
+                                            id: 'product-filter',
+                                            target: {
+                                                fieldId: 'sales_product_name',
+                                            },
+                                            operator: FilterOperator.EQUALS,
+                                            values: ['Product A'],
+                                        },
+                                    ],
+                                },
+                            ],
+                        },
+                    },
+                },
+            }),
+        ).toThrow('OR filter group');
+    });
 });
