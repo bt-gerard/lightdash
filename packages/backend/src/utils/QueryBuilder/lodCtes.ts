@@ -16,6 +16,8 @@ export const isLodMetricsEnabled = (): boolean =>
 export type LodGroup = {
     cteName: string;
     survivingDimensionIds: string[];
+    // Filter targets this CTE must drop from its WHERE (sorted, deduplicated).
+    ignoredFilterFieldIds: string[];
     metricIds: string[];
 };
 
@@ -77,6 +79,8 @@ export const getIgnoredFilteredFieldIds = (params: {
 
 export const groupLodMetrics = (params: {
     selectedDimensions: CompiledDimension[];
+    filterTargetFieldIds: string[];
+    dimensionsById: Record<string, CompiledDimension>;
     metrics: Array<{ metricId: string; metric: CompiledMetric }>;
 }): LodGroup[] => {
     const groupsByKey = new Map<string, LodGroup>();
@@ -89,11 +93,19 @@ export const groupLodMetrics = (params: {
                 ignoreDims,
             ),
         );
-        if (ignoredSelected.size === 0) return; // not LOD-active for this query
+        const ignoredFiltered = getIgnoredFilteredFieldIds({
+            filterTargetFieldIds: params.filterTargetFieldIds,
+            compiledIgnoreDimensions: ignoreDims,
+            dimensionsById: params.dimensionsById,
+        }).sort();
+        // Not LOD-active unless an ignored dim is selected or filtered.
+        if (ignoredSelected.size === 0 && ignoredFiltered.length === 0) return;
         const surviving = params.selectedDimensions
             .map((d) => getItemId({ table: d.table, name: d.name }))
             .filter((id) => !ignoredSelected.has(id));
-        const key = surviving.join('|');
+        // Both halves are in the key: same grain + different dropped filters
+        // must not share a CTE.
+        const key = `${surviving.join('|')}::${ignoredFiltered.join('|')}`;
         const existing = groupsByKey.get(key);
         if (existing) {
             existing.metricIds.push(metricId);
@@ -101,6 +113,7 @@ export const groupLodMetrics = (params: {
             groupsByKey.set(key, {
                 cteName: `lod_${groupsByKey.size + 1}`,
                 survivingDimensionIds: surviving,
+                ignoredFilterFieldIds: ignoredFiltered,
                 metricIds: [metricId],
             });
         }

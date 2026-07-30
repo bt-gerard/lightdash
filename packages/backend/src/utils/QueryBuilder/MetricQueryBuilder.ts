@@ -91,6 +91,7 @@ import {
 // FORK: LOD
 import {
     buildLodCteParts,
+    collectFilterTargetFieldIds,
     getNonAggregateMetricsReferencingLod,
     groupLodMetrics,
     isLodMetricsEnabled,
@@ -1766,6 +1767,12 @@ export class MetricQueryBuilder {
         );
         const lodGroups = groupLodMetrics({
             selectedDimensions,
+            // FORK: LOD — filtered ignored dims activate LOD even when the
+            // dimension is not selected.
+            filterTargetFieldIds: collectFilterTargetFieldIds(
+                compiledMetricQuery.filters.dimensions,
+            ),
+            dimensionsById: this.exploreDimensions,
             metrics: candidateMetrics,
         });
 
