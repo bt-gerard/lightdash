@@ -824,6 +824,15 @@ export class MetricQueryBuilder {
                         item,
                         lodMetricIds,
                     );
+                // FORK: LOD — a nested group that fully collapsed is itself a
+                // dropped disjunct; propagate the OR guard so it can't narrow.
+                if (!nestedGroup && isOrGroup) {
+                    throw new ParameterError(
+                        `LOD metrics (${lodMetricIds.join(
+                            ', ',
+                        )}) ignore a dimension filtered inside a nested filter group, which cannot be dropped from an OR filter group`,
+                    );
+                }
                 return nestedGroup ? [...acc, nestedGroup] : acc;
             }
 
@@ -5979,10 +5988,12 @@ export class MetricQueryBuilder {
                 );
             });
             if (droppedTimeFieldIds.length > 0) {
+                // FORK: LOD — accurate whether or not the model has a
+                // required_filters default on the pruned time dimension.
                 warnings.push({
                     message: `LOD metrics (${lodMetricIdList}) ignore the time filter on ${droppedTimeFieldIds.join(
                         ', ',
-                    )}, so they are computed across all time periods`,
+                    )}, so they are computed over all time periods unless the model defines a required filter for that dimension`,
                 });
             }
 
