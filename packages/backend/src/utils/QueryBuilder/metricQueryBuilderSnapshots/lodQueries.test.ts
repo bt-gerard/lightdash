@@ -1262,4 +1262,92 @@ describe('MetricQueryBuilder snapshot: LOD queries (FORK: LOD)', () => {
             }),
         ).toThrow('OR filter group');
     });
+
+    // Guard widening: previously this query compiled because the LOD metric was
+    // inert (product_name not selected). Filtering it now forms a group, so the
+    // custom-dimension guard fires. Correct — a custom dimension sits in the row
+    // grain but is excluded from the CTE's GROUP BY.
+    test('throws on custom dimensions when activation is filter-only', () => {
+        expect(() =>
+            buildQuery({
+                explore: LOD_TEST_EXPLORE,
+                compiledMetricQuery: {
+                    ...BASE_METRIC_QUERY,
+                    dimensions: ['sales_region', 'is_emea'],
+                    metrics: ['sales_total_customers'],
+                    compiledCustomDimensions: [CUSTOM_SQL_DIMENSION],
+                    filters: {
+                        dimensions: {
+                            id: 'root',
+                            and: [
+                                {
+                                    id: 'product-filter',
+                                    target: { fieldId: 'sales_product_name' },
+                                    operator: FilterOperator.EQUALS,
+                                    values: ['Product A'],
+                                },
+                            ],
+                        },
+                    },
+                },
+            }),
+        ).toThrow('custom dimensions');
+    });
+
+    test('throws on distinct metrics when activation is filter-only', () => {
+        expect(() =>
+            buildQuery({
+                explore: LOD_TEST_EXPLORE,
+                compiledMetricQuery: {
+                    ...BASE_METRIC_QUERY,
+                    dimensions: ['sales_region'],
+                    metrics: [
+                        'sales_total_customers',
+                        'sales_distinct_customers',
+                    ],
+                    filters: {
+                        dimensions: {
+                            id: 'root',
+                            and: [
+                                {
+                                    id: 'product-filter',
+                                    target: { fieldId: 'sales_product_name' },
+                                    operator: FilterOperator.EQUALS,
+                                    values: ['Product A'],
+                                },
+                            ],
+                        },
+                    },
+                },
+            }),
+        ).toThrow(
+            'cannot be combined with period-over-period or distinct metrics in the same query',
+        );
+    });
+
+    test('throws on nested-aggregate overlap when activation is filter-only', () => {
+        expect(() =>
+            buildQuery({
+                explore: LOD_TEST_EXPLORE,
+                compiledMetricQuery: {
+                    ...BASE_METRIC_QUERY,
+                    dimensions: ['sales_region'],
+                    metrics: ['sales_lod_sum_of_max'],
+                    filters: {
+                        dimensions: {
+                            id: 'root',
+                            and: [
+                                {
+                                    id: 'product-filter',
+                                    target: { fieldId: 'sales_product_name' },
+                                    operator: FilterOperator.EQUALS,
+                                    values: ['Product A'],
+                                },
+                            ],
+                        },
+                    },
+                },
+            }),
+        ).toThrow('cannot use nested aggregate references');
+    });
 });
