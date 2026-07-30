@@ -1,9 +1,13 @@
 import {
     getItemId,
+    isAndFilterGroup,
+    isFilterGroup,
     isNonAggregateMetric,
     parseAllReferences,
     type CompiledDimension,
     type CompiledMetric,
+    type FilterGroup,
+    type FilterGroupItem,
 } from '@lightdash/common';
 
 export const isLodMetricsEnabled = (): boolean =>
@@ -32,6 +36,43 @@ export const getIgnoredSelectedDimensionIds = (
             );
         })
         .map((d) => getItemId({ table: d.table, name: d.name }));
+};
+
+export const collectFilterTargetFieldIds = (
+    filterGroup: FilterGroup | undefined,
+): string[] => {
+    if (!filterGroup) return [];
+    const items: FilterGroupItem[] = isAndFilterGroup(filterGroup)
+        ? filterGroup.and
+        : filterGroup.or;
+    return items.flatMap((item) =>
+        isFilterGroup(item)
+            ? collectFilterTargetFieldIds(item)
+            : [item.target.fieldId],
+    );
+};
+
+// Filter targets are item ids (sales_region); ignored refs are table.name
+// (sales.region). Unknown ids (custom SQL dimensions) never match.
+export const getIgnoredFilteredFieldIds = (params: {
+    filterTargetFieldIds: string[];
+    compiledIgnoreDimensions: string[];
+    dimensionsById: Record<string, CompiledDimension>;
+}): string[] => {
+    const ignoredRefs = new Set(params.compiledIgnoreDimensions);
+    const matched = params.filterTargetFieldIds.filter((fieldId) => {
+        const dimension = params.dimensionsById[fieldId];
+        if (!dimension) return false;
+        if (ignoredRefs.has(`${dimension.table}.${dimension.name}`))
+            return true;
+        return (
+            dimension.timeIntervalBaseDimensionName !== undefined &&
+            ignoredRefs.has(
+                `${dimension.table}.${dimension.timeIntervalBaseDimensionName}`,
+            )
+        );
+    });
+    return Array.from(new Set(matched));
 };
 
 export const groupLodMetrics = (params: {
