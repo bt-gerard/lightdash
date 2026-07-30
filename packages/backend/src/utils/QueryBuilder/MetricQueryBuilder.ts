@@ -5921,6 +5921,27 @@ export class MetricQueryBuilder {
                 );
             }
 
+            // FORK: LOD — `this.sourceQuery` is set only when this is a totals
+            // query whose source has blocking metric/table-calc filters (see
+            // the constructor and `deriveSourceQueryUses`). In that case
+            // `buildSourceQuerySQL` INNER JOINs every raw scan — including
+            // this LOD CTE — to `source_dimension_groups`, a semi-join derived
+            // from the FILTERED source query. That join would silently
+            // reinstate any filter this group pruned from its WHERE.
+            const prunedLodGroups = lodGroups.filter(
+                (group) => group.ignoredFilterFieldIds.length > 0,
+            );
+            if (this.sourceQuery && prunedLodGroups.length > 0) {
+                const prunedLodMetricIds = Array.from(
+                    new Set(
+                        prunedLodGroups.flatMap((group) => group.metricIds),
+                    ),
+                ).join(', ');
+                throw new ParameterError(
+                    `LOD metrics (${prunedLodMetricIds}) are not supported in a totals query that also has metric or table calculation filters, because the totals row restriction would re-apply the filter the LOD metric ignores`,
+                );
+            }
+
             const fieldQuoteChar =
                 this.args.warehouseSqlBuilder.getFieldQuoteChar();
             const lodBaseCteName = 'lod_base';
