@@ -12,8 +12,9 @@ import {
     SupportedDbtAdapter,
     TimeFrames,
 } from '@lightdash/common';
+import { MetricQueryBuilder } from '../MetricQueryBuilder';
 import { TotalQueryBuilder } from '../TotalQueryBuilder';
-import { buildQuery } from './helpers';
+import { buildQuery, SNAPSHOT_DEFAULTS } from './helpers';
 
 const LOD_TEST_EXPLORE: Explore = {
     targetDatabase: SupportedDbtAdapter.POSTGRES,
@@ -1003,5 +1004,220 @@ describe('MetricQueryBuilder snapshot: LOD queries (FORK: LOD)', () => {
         expect(query).toContain('lod_1 AS (');
         expect(query).toContain('CROSS JOIN lod_1');
         expect(query).toMatchSnapshot();
+    });
+
+    // Filter-only activation: product_name is filtered but NOT selected, so the
+    // CTE keeps the main query's grain and drops the filter — the population
+    // denominator spans all products.
+    test('drops the filter on an ignored dimension that is not selected', () => {
+        const query = buildQuery({
+            explore: LOD_TEST_EXPLORE,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                dimensions: ['sales_region'],
+                metrics: [
+                    'sales_customers_purchasing',
+                    'sales_total_customers',
+                ],
+                filters: {
+                    dimensions: {
+                        id: 'root',
+                        and: [
+                            {
+                                id: 'product-filter',
+                                target: { fieldId: 'sales_product_name' },
+                                operator: FilterOperator.EQUALS,
+                                values: ['Product A'],
+                            },
+                        ],
+                    },
+                },
+            },
+        });
+        const lodCte = query.slice(query.indexOf('lod_1 AS ('));
+        // Main query is still filtered; the LOD CTE is not.
+        expect(query).toContain(`'Product A'`);
+        expect(lodCte).not.toContain(`'Product A'`);
+        // Same grain as the main query, so the join-back is on region.
+        expect(query).toContain('LEFT JOIN lod_1 ON');
+        expect(query).toMatchSnapshot();
+    });
+
+    // Selected AND filtered: the dimension leaves the GROUP BY and its filter
+    // leaves the WHERE. Both knobs, one property.
+    test('drops both grain and filter for a selected, filtered ignored dim', () => {
+        const query = buildQuery({
+            explore: LOD_TEST_EXPLORE,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                dimensions: ['sales_product_name', 'sales_region'],
+                metrics: [
+                    'sales_customers_purchasing',
+                    'sales_total_customers',
+                ],
+                filters: {
+                    dimensions: {
+                        id: 'root',
+                        and: [
+                            {
+                                id: 'product-filter',
+                                target: { fieldId: 'sales_product_name' },
+                                operator: FilterOperator.EQUALS,
+                                values: ['Product A'],
+                            },
+                            {
+                                id: 'region-filter',
+                                target: { fieldId: 'sales_region' },
+                                operator: FilterOperator.EQUALS,
+                                values: ['EMEA'],
+                            },
+                        ],
+                    },
+                },
+            },
+        });
+        const lodCte = query.slice(query.indexOf('lod_1 AS ('));
+        expect(lodCte).not.toContain(`'Product A'`);
+        // region is not ignored by total_customers, so its filter survives.
+        expect(lodCte).toContain(`'EMEA'`);
+        expect(query).toMatchSnapshot();
+    });
+
+    // Two LOD metrics with the same surviving grain but different dropped
+    // filters must land in separate CTEs.
+    test('builds separate CTEs when metrics drop different filters', () => {
+        const query = buildQuery({
+            explore: LOD_TEST_EXPLORE,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                dimensions: ['sales_product_name', 'sales_region'],
+                metrics: ['sales_total_customers', 'sales_total_by_product'],
+                filters: {
+                    dimensions: {
+                        id: 'root',
+                        and: [
+                            {
+                                id: 'region-filter',
+                                target: { fieldId: 'sales_region' },
+                                operator: FilterOperator.EQUALS,
+                                values: ['EMEA'],
+                            },
+                        ],
+                    },
+                },
+            },
+        });
+        expect(query).toContain('lod_1 AS (');
+        expect(query).toContain('lod_2 AS (');
+        const lod1 = query.slice(
+            query.indexOf('lod_1 AS ('),
+            query.indexOf('lod_2 AS ('),
+        );
+        const lod2 = query.slice(query.indexOf('lod_2 AS ('));
+        // total_customers ignores product_name only → keeps the region filter.
+        expect(lod1).toContain(`'EMEA'`);
+        // total_by_product ignores region → drops it.
+        expect(lod2).not.toContain(`'EMEA'`);
+        expect(query).toMatchSnapshot();
+    });
+
+    // Every selected dimension ignored AND its filter dropped: an unfiltered
+    // one-row grand total, CROSS JOINed back.
+    test('drops filters on an unfiltered grand-total CTE', () => {
+        const query = buildQuery({
+            explore: LOD_TEST_EXPLORE,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                dimensions: ['sales_product_name'],
+                metrics: [
+                    'sales_customers_purchasing',
+                    'sales_total_customers',
+                ],
+                filters: {
+                    dimensions: {
+                        id: 'root',
+                        and: [
+                            {
+                                id: 'product-filter',
+                                target: { fieldId: 'sales_product_name' },
+                                operator: FilterOperator.EQUALS,
+                                values: ['Product A'],
+                            },
+                        ],
+                    },
+                },
+            },
+        });
+        const lodCte = query.slice(query.indexOf('lod_1 AS ('));
+        expect(query).toContain('CROSS JOIN lod_1');
+        // Sole filter pruned → the CTE has no WHERE at all.
+        expect(lodCte).not.toContain('WHERE');
+        expect(query).toMatchSnapshot();
+    });
+
+    // A pruned time filter means the CTE spans all periods — warn about it.
+    test('warns when a time filter is dropped', () => {
+        const { warnings } = new MetricQueryBuilder({
+            parameterDefinitions: {},
+            intrinsicUserAttributes: SNAPSHOT_DEFAULTS.intrinsicUserAttributes,
+            timezone: SNAPSHOT_DEFAULTS.timezone,
+            warehouseSqlBuilder: SNAPSHOT_DEFAULTS.warehouseClient,
+            explore: LOD_TEST_EXPLORE,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                dimensions: ['sales_region'],
+                metrics: ['sales_customers_ignoring_date'],
+                filters: {
+                    dimensions: {
+                        id: 'root',
+                        and: [
+                            {
+                                id: 'date-filter',
+                                target: { fieldId: 'sales_order_date_month' },
+                                operator: FilterOperator.EQUALS,
+                                values: ['2026-07-01'],
+                            },
+                        ],
+                    },
+                },
+            },
+        }).compileQuery();
+        expect(
+            warnings.some((w) => w.message.includes('sales_order_date_month')),
+        ).toBe(true);
+    });
+
+    // An ignored dimension filtered inside an OR group has no well-defined
+    // widening — pruning the disjunct would NARROW the CTE. Fail loudly.
+    test('throws when an ignored dimension is filtered inside an OR group', () => {
+        expect(() =>
+            buildQuery({
+                explore: LOD_TEST_EXPLORE,
+                compiledMetricQuery: {
+                    ...BASE_METRIC_QUERY,
+                    dimensions: ['sales_region'],
+                    metrics: ['sales_total_customers'],
+                    filters: {
+                        dimensions: {
+                            id: 'root',
+                            or: [
+                                {
+                                    id: 'product-filter',
+                                    target: { fieldId: 'sales_product_name' },
+                                    operator: FilterOperator.EQUALS,
+                                    values: ['Product A'],
+                                },
+                                {
+                                    id: 'region-filter',
+                                    target: { fieldId: 'sales_region' },
+                                    operator: FilterOperator.EQUALS,
+                                    values: ['EMEA'],
+                                },
+                            ],
+                        },
+                    },
+                },
+            }),
+        ).toThrow('OR filter group');
     });
 });
