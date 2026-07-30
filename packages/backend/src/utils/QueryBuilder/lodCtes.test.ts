@@ -209,7 +209,9 @@ describe('buildLodCteParts', () => {
         },
         sqlFrom: 'FROM "db"."schema"."sales" AS "sales"',
         joinParts: [],
-        dimensionFiltersSQL: `WHERE ( ( "sales".region ) IN ('North') )`,
+        dimensionFiltersSQLByCte: {
+            lod_1: `WHERE ( ( "sales".region ) IN ('North') )`,
+        },
         metricSelects: {
             sales_total: '  hll_count.merge("sales".total) AS "sales_total"',
         },
@@ -259,6 +261,32 @@ describe('buildLodCteParts', () => {
         });
         expect(parts.ctes[0]).not.toContain('GROUP BY');
         expect(parts.joins).toEqual(['CROSS JOIN lod_1']);
+    });
+
+    it('gives each CTE its own WHERE clause', () => {
+        const parts = buildLodCteParts({
+            ...base,
+            dimensionFiltersSQLByCte: {
+                lod_1: `WHERE ( ( "sales".region ) IN ('North') )`,
+                lod_2: undefined,
+            },
+            lodGroups: [
+                {
+                    cteName: 'lod_1',
+                    survivingDimensionIds: ['sales_region'],
+                    ignoredFilterFieldIds: [],
+                    metricIds: ['sales_total'],
+                },
+                {
+                    cteName: 'lod_2',
+                    survivingDimensionIds: ['sales_region'],
+                    ignoredFilterFieldIds: ['sales_country'],
+                    metricIds: ['sales_total'],
+                },
+            ],
+        });
+        expect(parts.ctes[0]).toContain('WHERE');
+        expect(parts.ctes[1]).not.toContain('WHERE');
     });
 });
 

@@ -5865,12 +5865,18 @@ export class MetricQueryBuilder {
             ctes.push(
                 MetricQueryBuilder.wrapAsCte(lodBaseCteName, finalSelectParts),
             );
+            // FORK: LOD
             const lodParts = buildLodCteParts({
                 lodGroups,
                 dimensionSelects: dimensionsSQL.selects,
                 sqlFrom,
                 joinParts: [joins.joinSQL, ...dimensionsSQL.joins],
-                dimensionFiltersSQL: dimensionsSQL.filtersSQL,
+                dimensionFiltersSQLByCte: Object.fromEntries(
+                    lodGroups.map((group) => [
+                        group.cteName,
+                        dimensionsSQL.filtersSQL,
+                    ]),
+                ),
                 metricSelects: lodMetricSelects,
                 baseCteName: lodBaseCteName,
                 fieldQuoteChar,
