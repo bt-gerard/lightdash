@@ -39,6 +39,11 @@ convention — its hunks are unmarked because it never ships upstream.
 `LIGHTDASH_LOD_METRICS_ENABLED=true` (set on the Cloud Run service). Unset or any other value → upstream behavior, byte-identical SQL (snapshot-asserted). **Flag-off semantics.** With the flag off, a metric that declares `ignore_dimensions` still compiles and runs — it just silently computes at the query's full grain, exactly like upstream. This is intentional: the flag is a kill switch, not a validator. Compile-time validation of `ignore_dimensions` (unknown field, disallowed metric kind, disallowed combinations) still applies regardless of the flag, so a broken definition surfaces its `CompileError` whether or not LOD SQL generation is enabled. ## v1 limitations (unsupported combinations fail loudly; inflation matches upstream) LOD + period-over-period, LOD + `sum_distinct`/`average_distinct`,
 - LOD metrics must be dedup-aware aggregates (e.g. `hll_count.merge`) when the
   underlying value repeats across rows; a plain `SUM` re-adds repeated values.
+- LOD metrics also drop dimension filters on their ignored dimensions (see
+  `FORK-DESIGN-LOD-FILTER-SCOPE.md`), which means a query combining an LOD metric
+  with custom dimensions, distinct metrics or nested-aggregate references can now
+  fail where it previously compiled — the metric used to be inert when its ignored
+  dimension was filtered but not selected.
 
 ## CLI: point your binaries at the fork (`LIGHTDASH_CLI`)
 
