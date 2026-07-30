@@ -1,6 +1,13 @@
-import { DimensionType, FieldType, MetricType } from '@lightdash/common';
+import {
+    DimensionType,
+    FieldType,
+    FilterOperator,
+    MetricType,
+} from '@lightdash/common';
 import {
     buildLodCteParts,
+    collectFilterTargetFieldIds,
+    getIgnoredFilteredFieldIds,
     getIgnoredSelectedDimensionIds,
     getNonAggregateMetricsReferencingLod,
     groupLodMetrics,
@@ -236,5 +243,87 @@ describe('getNonAggregateMetricsReferencingLod', () => {
             lodMetricIds: new Set(['sales_other']),
         });
         expect(result).toEqual(new Set());
+    });
+});
+
+describe('collectFilterTargetFieldIds', () => {
+    const rule = (fieldId: string) => ({
+        id: `${fieldId}-rule`,
+        target: { fieldId },
+        operator: FilterOperator.EQUALS,
+        values: ['x'],
+    });
+
+    it('returns an empty list for no filters', () => {
+        expect(collectFilterTargetFieldIds(undefined)).toEqual([]);
+    });
+
+    it('collects targets from a flat AND group', () => {
+        expect(
+            collectFilterTargetFieldIds({
+                id: 'root',
+                and: [rule('sales_region'), rule('sales_product_name')],
+            } as never),
+        ).toEqual(['sales_region', 'sales_product_name']);
+    });
+
+    it('collects targets from nested groups of both kinds', () => {
+        expect(
+            collectFilterTargetFieldIds({
+                id: 'root',
+                and: [
+                    rule('sales_region'),
+                    { id: 'nested', or: [rule('sales_product_name')] },
+                ],
+            } as never),
+        ).toEqual(['sales_region', 'sales_product_name']);
+    });
+});
+
+describe('getIgnoredFilteredFieldIds', () => {
+    const dimensionsById = {
+        sales_region: dim('sales', 'region'),
+        sales_product_name: dim('sales', 'product_name'),
+        sales_order_date_month: dim('sales', 'order_date_month', 'order_date'),
+    } as never;
+
+    it('matches an exact dimension ref', () => {
+        expect(
+            getIgnoredFilteredFieldIds({
+                filterTargetFieldIds: ['sales_region', 'sales_product_name'],
+                compiledIgnoreDimensions: ['sales.product_name'],
+                dimensionsById,
+            }),
+        ).toEqual(['sales_product_name']);
+    });
+
+    it('matches a grain filter via the base time dimension', () => {
+        expect(
+            getIgnoredFilteredFieldIds({
+                filterTargetFieldIds: ['sales_order_date_month'],
+                compiledIgnoreDimensions: ['sales.order_date'],
+                dimensionsById,
+            }),
+        ).toEqual(['sales_order_date_month']);
+    });
+
+    it('never matches an unknown or custom dimension target', () => {
+        expect(
+            getIgnoredFilteredFieldIds({
+                filterTargetFieldIds: ['is_emea'],
+                compiledIgnoreDimensions: ['sales.region'],
+                dimensionsById,
+            }),
+        ).toEqual([]);
+    });
+
+    it('deduplicates a field filtered more than once', () => {
+        expect(
+            getIgnoredFilteredFieldIds({
+                filterTargetFieldIds: ['sales_region', 'sales_region'],
+                compiledIgnoreDimensions: ['sales.region'],
+                dimensionsById,
+            }),
+        ).toEqual(['sales_region']);
     });
 });
