@@ -798,6 +798,82 @@ export class MetricQueryBuilder {
         return this.buildDimensionsWhereClause(strippedGroup);
     }
 
+    // FORK: LOD — drop rules targeting ignored dimensions so the LOD CTE spans
+    // the whole population. Mirrors the PoP pruner, but refuses to prune inside
+    // an `or` group: removing a disjunct narrows the CTE, the opposite of
+    // ignoring the dimension.
+    private getDimensionsFilterGroupWithoutIgnoredFields(
+        ignoredFieldIds: Set<string>,
+        filterGroup: FilterGroup | undefined,
+        lodMetricIds: string[],
+    ): FilterGroup | undefined {
+        if (!filterGroup) {
+            return undefined;
+        }
+
+        const isOrGroup = !isAndFilterGroup(filterGroup);
+        const items = isAndFilterGroup(filterGroup)
+            ? filterGroup.and
+            : filterGroup.or;
+
+        const filteredItems = items.reduce<FilterGroupItem[]>((acc, item) => {
+            if (isFilterGroup(item)) {
+                const nestedGroup =
+                    this.getDimensionsFilterGroupWithoutIgnoredFields(
+                        ignoredFieldIds,
+                        item,
+                        lodMetricIds,
+                    );
+                return nestedGroup ? [...acc, nestedGroup] : acc;
+            }
+
+            if (!ignoredFieldIds.has(item.target.fieldId)) {
+                return [...acc, item];
+            }
+
+            if (isOrGroup) {
+                throw new ParameterError(
+                    `LOD metrics (${lodMetricIds.join(', ')}) ignore "${
+                        item.target.fieldId
+                    }", which cannot be filtered inside an OR filter group`,
+                );
+            }
+
+            return acc;
+        }, []);
+
+        if (filteredItems.length === 0) {
+            return undefined;
+        }
+
+        return isAndFilterGroup(filterGroup)
+            ? {
+                  ...filterGroup,
+                  and: filteredItems,
+              }
+            : {
+                  ...filterGroup,
+                  or: filteredItems,
+              };
+    }
+
+    // FORK: LOD — pass the untouched clause through when nothing is dropped, so
+    // the selected-only path stays byte-identical.
+    private getLodDimensionsFilterSQL(
+        group: LodGroup,
+        fullFiltersSQL: string | undefined,
+    ): string | undefined {
+        if (group.ignoredFilterFieldIds.length === 0) {
+            return fullFiltersSQL;
+        }
+        const strippedGroup = this.getDimensionsFilterGroupWithoutIgnoredFields(
+            new Set(group.ignoredFilterFieldIds),
+            this.args.compiledMetricQuery.filters.dimensions,
+            group.metricIds,
+        );
+        return this.buildDimensionsWhereClause(strippedGroup);
+    }
+
     private getDimensionsFilterSQL(): string | undefined {
         return this.buildDimensionsWhereClause(
             this.args.compiledMetricQuery.filters.dimensions,
@@ -5871,10 +5947,14 @@ export class MetricQueryBuilder {
                 dimensionSelects: dimensionsSQL.selects,
                 sqlFrom,
                 joinParts: [joins.joinSQL, ...dimensionsSQL.joins],
+                // FORK: LOD
                 dimensionFiltersSQLByCte: Object.fromEntries(
                     lodGroups.map((group) => [
                         group.cteName,
-                        dimensionsSQL.filtersSQL,
+                        this.getLodDimensionsFilterSQL(
+                            group,
+                            dimensionsSQL.filtersSQL,
+                        ),
                     ]),
                 ),
                 metricSelects: lodMetricSelects,
@@ -5886,6 +5966,26 @@ export class MetricQueryBuilder {
                         right,
                     ),
             });
+
+            // FORK: LOD — a dropped time filter means the CTE spans every
+            // period, or falls back to the model's required-filter default.
+            const droppedTimeFieldIds = Array.from(
+                new Set(lodGroups.flatMap((g) => g.ignoredFilterFieldIds)),
+            ).filter((fieldId) => {
+                const dimension = this.exploreDimensions[fieldId];
+                return (
+                    dimension?.type === DimensionType.DATE ||
+                    dimension?.type === DimensionType.TIMESTAMP
+                );
+            });
+            if (droppedTimeFieldIds.length > 0) {
+                warnings.push({
+                    message: `LOD metrics (${lodMetricIdList}) ignore the time filter on ${droppedTimeFieldIds.join(
+                        ', ',
+                    )}, so they are computed across all time periods`,
+                });
+            }
+
             ctes.push(...lodParts.ctes);
 
             // FORK: LOD — non-aggregate metrics that reference LOD metrics are
