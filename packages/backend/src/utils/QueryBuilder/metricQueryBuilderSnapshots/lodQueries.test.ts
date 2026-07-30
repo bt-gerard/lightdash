@@ -219,6 +219,30 @@ const LOD_TEST_EXPLORE: Explore = {
     },
 };
 
+// FORK: LOD — clone of LOD_TEST_EXPLORE's `sales` table with row-level
+// security (`sqlWhere`) and a model `requiredFilters` entry added, used ONLY
+// by the RLS-survival test below. Every other test keeps using
+// LOD_TEST_EXPLORE unchanged so their snapshots stay byte-identical.
+const LOD_TEST_EXPLORE_WITH_RLS: Explore = {
+    ...LOD_TEST_EXPLORE,
+    tables: {
+        ...LOD_TEST_EXPLORE.tables,
+        sales: {
+            ...LOD_TEST_EXPLORE.tables.sales,
+            sqlWhere: `"sales".region != 'INTERNAL'`,
+            requiredFilters: [
+                {
+                    id: 'required-region-filter',
+                    target: { fieldRef: 'sales.region' },
+                    operator: FilterOperator.NOT_EQUALS,
+                    values: ['BANNED'],
+                    required: true,
+                },
+            ],
+        },
+    },
+};
+
 // FORK: LOD — a NON-inflating (ONE_TO_ONE) joined explore. The join is
 // inflation-proof (findTablesWithInflationFromJoin returns nothing for
 // ONE_TO_ONE), so the experimental fanout rewrite never fires and the LOD
@@ -1006,6 +1030,99 @@ describe('MetricQueryBuilder snapshot: LOD queries (FORK: LOD)', () => {
         expect(query).toMatchSnapshot();
     });
 
+    // FORK: LOD — a totals query with a BLOCKING metric filter restricts raw
+    // rows to `source_dimension_groups`, derived from the FILTERED source
+    // query. If an LOD group also pruned a filter on an ignored dimension,
+    // that join would silently reinstate the pruned filter. This must throw
+    // rather than emit a query with a wrong (narrower) LOD denominator.
+    test('throws for a totals query with a metric filter that would reinstate a pruned LOD filter', () => {
+        expect(() =>
+            buildQuery({
+                explore: LOD_TEST_EXPLORE,
+                compiledMetricQuery: {
+                    ...BASE_METRIC_QUERY,
+                    dimensions: ['sales_product_name', 'sales_region'],
+                    metrics: [
+                        'sales_customers_purchasing',
+                        'sales_total_customers',
+                    ],
+                    filters: {
+                        dimensions: {
+                            id: 'root',
+                            and: [
+                                {
+                                    id: 'product-filter',
+                                    target: { fieldId: 'sales_product_name' },
+                                    operator: FilterOperator.EQUALS,
+                                    values: ['Product A'],
+                                },
+                            ],
+                        },
+                        metrics: {
+                            id: 'root',
+                            and: [
+                                {
+                                    id: 'metric-filter',
+                                    target: {
+                                        fieldId: 'sales_customers_purchasing',
+                                    },
+                                    operator: FilterOperator.GREATER_THAN,
+                                    values: [10],
+                                },
+                            ],
+                        },
+                    },
+                },
+                totalConfiguration: {
+                    kind: 'grandTotal',
+                    subtotalDimensions: undefined,
+                },
+            }),
+        ).toThrow(
+            'the totals row restriction would re-apply the filter the LOD metric ignores',
+        );
+    });
+
+    // FORK: LOD — same shape as above but WITHOUT a metric filter: no
+    // blocking filter means no source-groups join is built, so the grand
+    // total legitimately flips to filter-only activation with an unfiltered,
+    // one-row CROSS JOIN denominator. Must NOT throw.
+    test('does not throw for a totals query with only a pruned dimension filter', () => {
+        const query = buildQuery({
+            explore: LOD_TEST_EXPLORE,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                dimensions: ['sales_product_name', 'sales_region'],
+                metrics: [
+                    'sales_customers_purchasing',
+                    'sales_total_customers',
+                ],
+                filters: {
+                    dimensions: {
+                        id: 'root',
+                        and: [
+                            {
+                                id: 'product-filter',
+                                target: { fieldId: 'sales_product_name' },
+                                operator: FilterOperator.EQUALS,
+                                values: ['Product A'],
+                            },
+                        ],
+                    },
+                },
+            },
+            totalConfiguration: {
+                kind: 'grandTotal',
+                subtotalDimensions: undefined,
+            },
+        });
+        expect(query).toContain('lod_1 AS (');
+        expect(query).toContain('CROSS JOIN lod_1');
+        const lodCte = query.slice(query.indexOf('lod_1 AS ('));
+        expect(lodCte).not.toContain('Product A');
+        expect(query).toMatchSnapshot();
+    });
+
     // Filter-only activation: product_name is filtered but NOT selected, so the
     // CTE keeps the main query's grain and drops the filter — the population
     // denominator spans all products.
@@ -1040,6 +1157,50 @@ describe('MetricQueryBuilder snapshot: LOD queries (FORK: LOD)', () => {
         expect(lodCte).not.toContain(`'Product A'`);
         // Same grain as the main query, so the join-back is on region.
         expect(query).toContain('LEFT JOIN lod_1 ON');
+        expect(query).toMatchSnapshot();
+    });
+
+    // FORK: LOD — row-level security (`sqlWhere`) and a model `requiredFilters`
+    // entry must survive into the LOD CTE even when the user's own filter tree
+    // prunes to NOTHING (the only filter targets the ignored dimension).
+    // `buildDimensionsWhereClause` re-derives both from the explore on every
+    // call, independently of the pruned tree — this proves it, since neither
+    // source lives in LOD_TEST_EXPLORE and can't leak in by accident.
+    test('keeps row-level security and required filters when the filter tree fully prunes', () => {
+        const query = buildQuery({
+            explore: LOD_TEST_EXPLORE_WITH_RLS,
+            compiledMetricQuery: {
+                ...BASE_METRIC_QUERY,
+                dimensions: ['sales_region'],
+                metrics: [
+                    'sales_customers_purchasing',
+                    'sales_total_customers',
+                ],
+                filters: {
+                    dimensions: {
+                        id: 'root',
+                        and: [
+                            {
+                                id: 'product-filter',
+                                target: { fieldId: 'sales_product_name' },
+                                operator: FilterOperator.EQUALS,
+                                values: ['Product A'],
+                            },
+                        ],
+                    },
+                },
+            },
+        });
+        const lodCte = query.slice(
+            query.indexOf('lod_1 AS ('),
+            query.indexOf('LEFT JOIN lod_1 ON'),
+        );
+        // The pruned user filter is gone from the CTE...
+        expect(lodCte).not.toContain('Product A');
+        // ...but RLS and the required filter are not derived from that tree,
+        // so they still appear.
+        expect(lodCte).toContain(`"sales".region != 'INTERNAL'`);
+        expect(lodCte).toContain(`'BANNED'`);
         expect(query).toMatchSnapshot();
     });
 
