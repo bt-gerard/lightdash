@@ -166,7 +166,7 @@ export const buildLodCteParts = (params: {
     dimensionSelects: Record<string, string>;
     sqlFrom: string;
     joinParts: Array<string | undefined>;
-    dimensionFiltersSQL: string | undefined;
+    dimensionFiltersSQLByCte: Record<string, string | undefined>;
     metricSelects: Record<string, string>;
     baseCteName: string;
     fieldQuoteChar: string;
@@ -177,7 +177,7 @@ export const buildLodCteParts = (params: {
         dimensionSelects,
         sqlFrom,
         joinParts,
-        dimensionFiltersSQL,
+        dimensionFiltersSQLByCte,
         metricSelects,
         baseCteName,
         fieldQuoteChar: q,
@@ -198,7 +198,7 @@ export const buildLodCteParts = (params: {
             `SELECT\n${[...dimSelects, ...groupMetricSelects].join(',\n')}`,
             sqlFrom,
             ...joinParts,
-            dimensionFiltersSQL,
+            dimensionFiltersSQLByCte[group.cteName],
             group.survivingDimensionIds.length > 0
                 ? `GROUP BY ${group.survivingDimensionIds
                       .map((_, i) => i + 1)
