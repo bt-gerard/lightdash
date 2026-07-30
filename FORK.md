@@ -73,11 +73,13 @@ image — a version-skewed CLI reintroduces the silent-drop failure mode.
 ## Image build & deploy
 
 Cloud Build trigger on push to `lod-metrics` runs `cloudbuild.yaml`, pushing
-`us-central1-docker.pkg.dev/playvalve-data-dev/lightdash/lightdash:<UPSTREAM_TAG>-lod.<n>`
+`us-central1-docker.pkg.dev/playvalve-main/lightdash/lightdash:<UPSTREAM_TAG>-lod.<n>`
 (also tagged with the git SHA). Bump `_LOD_SUFFIX` in `cloudbuild.yaml` when
-releasing. Deploys to the Cloud Run service **`lightdash-fork`**
-(us-central1) — a separate service from `lightdash-test`, with
-`LIGHTDASH_LOD_METRICS_ENABLED=true`.
+releasing. Deploys to the Cloud Run service **`lightdash`** in `playvalve-main`
+(us-central1), with `LIGHTDASH_LOD_METRICS_ENABLED=true` and
+`SCHEDULER_ENABLED=false`. The image tag is managed by terraform
+(`playvalve-terraform-infra/projects/playvalve-main/lightdash.tf`) — never
+`gcloud run deploy` by hand. See `FORK-OPS.md` §7–8 for the full path.
 
 ## Upstream sync runbook
 
