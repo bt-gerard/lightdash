@@ -18,7 +18,7 @@ images:
 substitutions:
   _AR: 'us-central1-docker.pkg.dev/playvalve-main/lightdash'
   _UPSTREAM_TAG: '0.3443.0'
-  _LOD_SUFFIX: '1'
+  _LOD_SUFFIX: '2'
   _GIT_SHA: 'manual'  # trigger maps this to $SHORT_SHA; manual builds pass it
 options:
   machineType: 'E2_HIGHCPU_32'
