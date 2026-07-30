@@ -130,9 +130,10 @@ so the CTE spans the full population of those dimensions.
 - All selected dimensions ignored → valid; one-row grand-total CTE, CROSS JOIN.
 - LOD metric with metric-level `filters:` → works; the `CASE WHEN` wrapper is inside the metric's compiled SQL, which moves into the CTE untouched.
 - NULL dimension values → null-safe join equality; NULL groups match their CTE row.
-- Unmatched main rows (defensive; should not occur since CTE and main query see identical rows) → LEFT JOIN leaves the LOD value NULL rather than dropping the row.
+- Unmatched main rows (defensive; the LOD CTE's rows are normally a superset of the main query's, since pruning a filter only widens it) → LEFT JOIN leaves the LOD value NULL rather than dropping the row.
+- Exception to that superset property: when a pruned filter targets a dimension carrying a model `required_filters` default, the default is re-injected into the CTE (see `FORK-DESIGN-LOD-FILTER-SCOPE.md`). If the user's filter was WIDER than that default, the CTE is narrower than the main query and the NULL above is reachable in practice, not merely defensive.
 - Ignored dimension filtered but not selected → LOD activates; the CTE keeps the main query's grain and drops that filter.
-- Ignored dimension filtered inside an `or` group → `ParameterError`; pruning a disjunct would narrow the CTE.
+- Ignored dimension filtered inside an `or` group → `ParameterError`; pruning a disjunct would narrow the CTE. This covers both a rule directly inside the `or` group and a nested subgroup that fully collapses after pruning (e.g. `A or (B and C)` where B and C both target ignored dimensions).
 
 ## Testing
 
