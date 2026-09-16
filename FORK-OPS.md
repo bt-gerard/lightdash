@@ -215,24 +215,34 @@ gcloud artifacts docker images list \
 
 ## 8. Deploy (Cloud Run)
 
-Target service: **`lightdash`** in `playvalve-main` (us-central1), managed by
-terraform in `playvalve-terraform-infra/projects/playvalve-main/lightdash.tf`
-(service + Cloud SQL `lightdash-db` + secrets + storage bucket). It runs with
-`LIGHTDASH_LOD_METRICS_ENABLED=true` and `SCHEDULER_ENABLED=false` (its DB is
-a clone of lightdash-test's — scheduler stays off until this instance is the
-primary, or every scheduled delivery double-sends). Do NOT `gcloud run deploy`
-by hand; bump the image in terraform instead:
+Two production services run the fork, both with `LIGHTDASH_LOD_METRICS_ENABLED=true`
+(since 2026-09-16). Do NOT `gcloud run deploy` by hand; bump the image in
+terraform, one PR per repo:
+
+| Instance | Cloud Run service | Repo / file | What to bump |
+|---|---|---|---|
+| Playvalve (lightdash.bluetile.com) | `lightdash-test` in `playvalve-data-dev` | `playvalve-terraform-infra/projects/playvalve-data-dev/lightdash.tf` | variable `lightdash_image_tag` default → `<TAG>-lod.<suffix>` |
+| BestPlay (lightdash.bestplay.app) | `lightdash` in `bestplay-dev` | `bestplay-terraform-infra/projects/bestplay-dev/lightdash.tf` | the `image = ".../lightdash:<TAG>-lod.<suffix>"` line |
 
 ```bash
-cd ~/workspace/playvalve/playvalve-terraform-infra/projects/playvalve-main
-# edit lightdash.tf: lightdash_fork_image_tag default -> "<TAG>-lod.<suffix>"
-terraform plan   # review: only the Cloud Run image should change
-terraform apply
+terraform plan   # review: only the Cloud Run image (and, on Playvalve, the
+                 # pre-deploy backup null_resource) should change
+terraform apply  # Playvalve runs `gcloud sql backups create` first; on BestPlay
+                 # take one by hand before applying:
+                 # gcloud sql backups create --instance=lightdash-db --project=bestplay-dev
 ```
 
-Smoke test after deploy: open an LOD chart (e.g. `% Active Users Spending`
-on the economy safeguard explore) and check the compiled SQL contains
-`lod_base` / `lod_1` CTEs, and that a non-LOD chart still runs.
+Before any apply on these Cloud Run v2 services, confirm `invoker_iam_disabled`
+and `default_uri_disabled` are still in code (they are, since 2026-08-27); a
+provider older than those arguments silently resets them. Upgrades run the
+Lightdash DB migrations on first start of the new revision, so the backup is the
+rollback lever, not the old image tag.
+
+Smoke test after deploy: `curl -s https://<domain>/api/v1/health` reports the
+new version; open an LOD chart (a metric with `ignore_dimensions`, e.g.
+`unique_sessions_any_slice` on the Block Blitz admon funnel explore) and check
+the compiled SQL contains `lod_base` / `lod_1` CTEs, and that a non-LOD chart
+still runs.
 
 ## Rollback
 
