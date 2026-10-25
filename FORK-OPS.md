@@ -213,6 +213,30 @@ gcloud artifacts docker images list \
   --include-tags --limit 5
 ```
 
+## 7b. Publish the CLI to Artifact Registry
+
+Publish the CLI from the same commit as the image, with the same suffix as
+`_LOD_SUFFIX` in `cloudbuild.yaml`:
+
+```bash
+fnm use
+scripts/publish-fork-cli.sh <suffix>     # e.g. 1 -> <TAG>-lod.1
+```
+
+It sets the version on `@lightdash/common`, `@lightdash/warehouses` and
+`@lightdash/cli`, builds them, and publishes all three to
+`https://us-east1-npm.pkg.dev/playvalve-data-dev/lightdash-npm/` (pnpm turns
+`workspace:*` into the exact version). Then it installs the CLI from the
+registry into a temp folder and checks the version and `ignoreDimensions`. Last,
+it tags the commit `cli-<version>` and pushes the tag. The `package.json`
+changes are reset; nothing to commit.
+
+Needs `artifactregistry.writer` on `playvalve-data-dev` (data-engineering has
+it). Versions are immutable: a rebuild needs a new suffix.
+
+Then bump the `@lightdash/cli` pin in the consumer repos (exact version, plus
+the lockfile).
+
 ## 8. Deploy (Cloud Run)
 
 Two production services run the fork, both with `LIGHTDASH_LOD_METRICS_ENABLED=true`
