@@ -9,8 +9,7 @@
 # on playvalve-data-dev. Versions are immutable: a rebuild needs a new suffix.
 set -euo pipefail
 
-REGISTRY_HOST="us-east1-npm.pkg.dev/playvalve-data-dev/lightdash-npm/"
-REGISTRY="https://${REGISTRY_HOST}"
+REGISTRY="https://us-east1-npm.pkg.dev/playvalve-data-dev/lightdash-npm/"
 PACKAGE_JSONS=(
     packages/common/package.json
     packages/warehouses/package.json
@@ -52,7 +51,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "==> Auth to ${REGISTRY}"
-printf '@lightdash:registry=%s\n//%s:always-auth=true\n' "$REGISTRY" "$REGISTRY_HOST" >"$npmrc"
+printf '@lightdash:registry=%s\n' "$REGISTRY" >"$npmrc"
 npx -y google-artifactregistry-auth --repo-config="$npmrc" --credential-config="$npmrc" >/dev/null
 
 echo "==> Version ${version}"
