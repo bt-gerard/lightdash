@@ -6,12 +6,10 @@
 #   scripts/publish-fork-cli.sh 1   ->  2.203.0-lod.1
 #
 # Needs: clean tree, Node from .nvmrc, gcloud login with artifactregistry.writer
-# on the target registry (default playvalve-data-dev). Versions are immutable: a rebuild needs a new suffix.
+# on playvalve-data-dev. Versions are immutable: a rebuild needs a new suffix.
 set -euo pipefail
 
-# Override for another consumer's registry, e.g. Fusebox:
-#   LIGHTDASH_NPM_REGISTRY=https://us-central1-npm.pkg.dev/fusebox-cdp-001/lightdash-npm/
-REGISTRY="${LIGHTDASH_NPM_REGISTRY:-https://us-east1-npm.pkg.dev/playvalve-data-dev/lightdash-npm/}"
+REGISTRY="https://us-east1-npm.pkg.dev/playvalve-data-dev/lightdash-npm/"
 PACKAGE_JSONS=(
     packages/common/package.json
     packages/warehouses/package.json
