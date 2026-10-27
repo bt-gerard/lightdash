@@ -6,7 +6,7 @@ definitions (see lightdash/lightdash#16181). Design doc: `FORK-DESIGN.md`.
 
 ## Base version
 
-- Upstream release tag: `2.203.0`
+- Upstream release tag: `3.68.6`
 - Fork repo: `bt-gerard/lightdash` (may move into the `playvalve` org later)
 - Deploy branch: `lod-metrics`. Local remotes: `origin` = fork, `upstream` = official.
 
