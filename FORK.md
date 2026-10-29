@@ -55,20 +55,27 @@ converter silently drops the property and the metric deploys without LOD,
 computing at full grain with no warning. Anyone deploying dbt projects to the
 fork service must therefore use the CLI built from this branch.
 
-Convention: expose the fork binary through the `LIGHTDASH_CLI` env var and
-invoke `$LIGHTDASH_CLI` (instead of a globally-installed `lightdash`) in
-scripts and CI:
+Install it from the `lightdash-npm` Artifact Registry repo (scope routing in
+`.npmrc`, exact pin in `package.json`), not from npmjs:
 
-```bash
-# build once from this branch (repo root); tsc --build also builds common
-pnpm install && pnpm -F cli build
-
-export LIGHTDASH_CLI="$FORK_REPO/packages/cli/dist/index.js"
-"$LIGHTDASH_CLI" deploy
+```
+# .npmrc
+@lightdash:registry=https://us-east1-npm.pkg.dev/playvalve-data-dev/lightdash-npm/
 ```
 
-Rebuild the CLI after every upstream sync so its compiler matches the deployed
-image — a version-skewed CLI reintroduces the silent-drop failure mode.
+```bash
+npx google-artifactregistry-auth --repo-config=.npmrc --credential-config=~/.npmrc
+npm ci
+npx lightdash --version     # <UPSTREAM_TAG>-lod.<n>
+```
+
+Versions are `<UPSTREAM_TAG>-lod.<n>`, same suffix as the image. Publishing:
+`FORK-OPS.md` §7b (`scripts/publish-fork-cli.sh`).
+
+Scripts that take `LIGHTDASH_CLI` can point it at the installed bundle:
+`node <dir>/node_modules/@lightdash/cli/dist/index.js`. Building from this
+branch (`pnpm install && pnpm -F cli build`) still works for local fork
+development.
 
 ## Image build & deploy
 
