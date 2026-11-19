@@ -10,9 +10,9 @@ Frequency: weekly (or whenever you want upstream fixes).
 
 - Remotes: `origin` = `bt-gerard/lightdash`, `upstream` =
   `lightdash/lightdash` (`git remote -v` to check).
-- Node 20.19 via fnm and pnpm via corepack:
+- Node from `.nvmrc` (24.x since 3.3xx) via fnm, pnpm via corepack:
   ```bash
-  eval "$(fnm env)" && fnm use 20.19
+  eval "$(fnm env)" && fnm use --install-if-missing
   ```
 - `sfw` (Socket Firewall) installed: `npm i -g sfw`.
 - `git-secrets` installed: `brew install git-secrets`. The pre-commit hook
@@ -138,8 +138,9 @@ behind sfw's proxy and isn't needed for the sync.)
 All four gates must pass. No green, no push — ever.
 
 ```bash
-pnpm -F common test && pnpm -F common typecheck:fast
-pnpm -F backend test && pnpm -F backend typecheck:fast
+pnpm -F common build && pnpm -F warehouses build   # backend typechecks against their dist/
+pnpm -F common test && pnpm -F common typecheck
+pnpm -F backend test && pnpm -F backend typecheck
 ```
 
 Snapshot policy when the backend suite reports snapshot diffs:
